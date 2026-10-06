@@ -40,6 +40,10 @@ func Produce(s *handlers.Set) http.HandlerFunc {
 		if !s.Authorize(w, r, user.ActionProduce, topicName) {
 			return
 		}
+		if !admitProduce(s, w) {
+			return
+		}
+		defer s.Deps.Drain.Done()
 
 		query, ok := parseProduceQuery(s, w, r)
 		if !ok {

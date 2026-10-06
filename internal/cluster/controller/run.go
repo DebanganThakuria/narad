@@ -59,9 +59,20 @@ func (c *Controller) Run(ctx context.Context) {
 	}
 }
 
+// startLeaderLoop starts one leader term: the loop runs with a fresh
+// leaderTerm (its own election clock, no Barrier yet) and withdraws the
+// term's leader-only metrics when it ends.
 func (c *Controller) startLeaderLoop(ctx context.Context) context.CancelFunc {
 	leaderCtx, cancel := context.WithCancel(ctx)
-	go c.runAsLeader(leaderCtx)
+	t := newLeaderTerm(c.clock())
+	c.beginTerm(t)
+	c.logger().Info("controller: leadership gained; members are judged after a Barrier and one dead timeout on this leader's clock",
+		"dead_timeout", c.cfg.DeadTimeout)
+	go func() {
+		c.runAsLeader(withTerm(leaderCtx, t))
+		c.endTerm(t)
+		c.logger().Info("controller: leader loop stopped (leadership lost or shutting down); leader-only metrics withdrawn")
+	}()
 	return cancel
 }
 

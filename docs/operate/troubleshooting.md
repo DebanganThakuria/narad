@@ -81,11 +81,11 @@ narad cluster members
 
 A produce answers `503`, often from every node at once.
 
-**Cause.** Narad itself answers a produce with `503` in one case only (**Unreleased**): a topic with a schema, and every schema validation slot on the node stayed busy for 5 seconds; the body then reads `schema: validation capacity busy, retry` ([Validation capacity](../reference/schema-rules.md#validation-capacity)). Any other `503` comes from the proxy in front of it, the load balancer or ingress, when no pod is ready.
+**Cause.** Narad itself answers a produce with `503` in two cases only, both unreleased: a node being decommissioned answers `this node is being decommissioned and takes no new produce; send it to another node`, with `Retry-After: 1`; and a topic with a schema whose every validation slot on the node stayed busy for 5 seconds answers `schema: validation capacity busy, retry` ([Validation capacity](../reference/schema-rules.md#validation-capacity)). Nothing was stored in either case. v3.0.1 never answers a produce with `503`. Any other `503` comes from the proxy in front of Narad, the load balancer or ingress, when no pod is ready.
 
-**Check.** For the validation case, `narad_schema_validations_in_flight` on the node sits at its CPU count and `narad_schema_rejections_total{reason="busy"}` rises; look for producers sending large payloads, or a schema that `narad_schema_validation_seconds` shows to be slow. Otherwise, `kubectl get pods -n narad`, then `/readyz` on each pod ([Start with readiness](#check-readiness)).
+**Check.** For the decommission body, `narad cluster members` shows the node `draining`. For the validation case, `narad_schema_validations_in_flight` on the node sits at its CPU count and `narad_schema_rejections_total{reason="busy"}` rises; look for producers sending large payloads, or a schema that `narad_schema_validation_seconds` shows to be slow. Otherwise, `kubectl get pods -n narad`, then `/readyz` on each pod ([Start with readiness](#check-readiness)).
 
-**Fix.** For the validation case, retry with backoff, through another node if you can, and spread large payloads out or simplify the slow schema. When every pod answers `no raft leader known`, follow [Not ready on every pod](#not-ready-all-pods). When pods are down, see [A node is down](#node-down).
+**Fix.** For a draining node, send produce to the other nodes: the Go SDK retries on another node by default. Cancel the decommission to have the node take produce again. For the validation case, retry with backoff, through another node if you can, and spread large payloads out or simplify the slow schema. When every pod answers `no raft leader known`, follow [Not ready on every pod](#not-ready-all-pods). When pods are down, see [A node is down](#node-down).
 
 ### `500` on every produce {#produce-500}
 
@@ -211,6 +211,68 @@ The due lag of a delay child climbs or stays flat above 0 instead of returning t
 **Check.** `narad cluster members` for a `dead` node, and the logs of the node that owns the parent partition for `fanout: child batch commit failed`, `fanout: persist cursor` or `fanout: read parent slab`.
 
 **Fix.** Bring the child partition's owner back, or fix what the log's `err` names. The cursor resumes where it stopped. How cursors behave: [Fan-out engine](../understand/fanout-engine.md).
+
+### `narad_quarantined_copies` above 0 {#quarantined-copies}
+
+The node holds partition copies it set aside instead of deleting. At startup it lists each one at error level, `quarantined partition copy on this node: it was set aside instead of deleted and may hold the only instance of some of its records; inspect it before removing it (troubleshooting: quarantined copies)`, with `kind`, `topic`, `partition`, `dir`, `bytes` and `mod_time` (twenty lines at most), then `this node holds quarantined partition copies; none is removed automatically (troubleshooting: quarantined copies)` with the totals in `copies` and `bytes`. The gauge and `narad_quarantined_bytes` are refreshed at startup and on every stale-copy sweep (about every 30 s).
+
+**Cause.** `kind` says where the copy came from:
+
+- `partition` (`topics/<topic>/p<NNNNN>.quarantine`, or with a timestamp suffix when that name was taken): a stale copy the new owner could not vouch for, or one ahead of the position it was promoted at, set aside by the [stale-copy sweep](#log-partition-set-aside), or an earlier copy a move's [install](#log-move-install-set-aside) found at the partition's path.
+- `staging` (`.moves/<topic>-<N>.quarantine`): a move's staging copy set aside because this node owns the partition by now and the copy may hold records its path lacks ([set-aside staging](#log-move-keeping-staging)), or because the move ended while the partition's owner was dead ([dead source](#log-move-dead-source-staging)).
+- `topic_incarnation` (`topics/<topic>.stale-<id>`): the directory of a deleted incarnation of a topic recreated under the same name. Narad removes it on its own once the leader confirms that incarnation is gone; one that stays means the leader cannot be asked or still lists the incarnation.
+
+**Check.** The error line logged when the copy was set aside names why; search the node's logs for its `dir`.
+
+**Fix.** Copy a `partition` or `staging` copy off before anything else: its records may be the only ones left. Narad never serves one and never deletes one on its own; a `partition` copy goes only when its topic is deleted. Decide whether its records matter, re-produce them from the copy if they do, and delete the directory when you are done. The gauge drops on the next sweep.
+
+### `narad_orphan_topic_dirs` stays above 0 {#orphan-topic-directories}
+
+The node holds directories of topics its replica no longer knows: a deleted topic whose purge never reached this node (it was down, marked dead or lagging when the delete committed).
+
+**Cause.** The stale-copy sweep removes such a directory once the leader confirms its [incarnation](../reference/glossary.md#incarnation) is gone (the name is absent, or live as another incarnation), at most 16 a pass. Two kinds stay:
+
+- A directory without an incarnation marker (`topics/<name>/incarnation`), such as one of a topic whose record has no incarnation id. While the node runs, Narad cannot tell it from a directory a concurrent open is making, so only the startup sweep removes it, which runs before the node accepts topic creates.
+- A directory the leader has not confirmed gone: the leader cannot be reached, or it still lists the incarnation because this node's replica is behind a create.
+
+**Check.** `ls dataDir/topics` for names `narad topic list` does not show, and the node's logs for `leader confirm:` warnings.
+
+**Fix.** For a leader that cannot be asked, restore the cluster's leader; the next sweep removes the directory. For an unmarked directory, restart the node, or remove the directory by hand once you are sure no topic of that name exists.
+
+### `narad_decommission_blocked` above 0 {#decommission-blocked}
+
+**Unreleased:** in master, not in v3.0.1.
+
+A draining node's decommission cannot progress. The leader exports one series per node and `reason` while it holds, logs each reason once when it appears (`controller: decommission blocked` at error for a reason that needs you, `controller: decommission waiting` at warn for one that clears on its own, both with `node`, `reason` and `detail`), and `controller: decommission no longer blocked` at info when the node is free again. `narad cluster members` shows the reasons the cluster metadata holds under `decommission_blocked`.
+
+**Cause and fix**, by `reason`:
+
+- `below_min_voters` (error): removing the voter would leave fewer than three voters. Add a node, or cancel the decommission. A new decommission like this is refused up front.
+- `no_healthy_majority` (error): the voters left alive after the removal would not be a majority, because other voters are dead. Bring the dead voters back, or decommission them first.
+- `owner_dead` (error): the node is dead and owns partitions whose data is only on its disk. Bring it back so they can move off, or cancel the decommission.
+- `no_receivers` (error): the node owns partitions and no alive node that is not draining can take them. Add a node, or cancel another decommission.
+- `node_status_unavailable` (error): the node owns nothing, but its dispatch backlog cannot be read: it is dead or unreachable on the node RPC port. Its ingress WAL may hold messages only it has, so the leader keeps it in Raft. Bring it back; it hands its WAL off and is then removed. Or cancel the decommission.
+- `dispatch_backlog` (warn): the node's ingress WAL still holds accepted messages not yet handed to their owners, or it may still take some: it does not refuse client produce yet (its replica has not applied the drain), or it is still answering produce it admitted before it started to. It clears on its own; one that stays points at the node's dispatcher (its logs, `narad_ingress_dispatch_backlog_records`), or at a node whose replica does not catch up (`narad cluster members --detail` shows its `draining`).
+- `move_target` (warn): a move still aims at the node. The leader clears such moves itself; abort one that stays with `narad cluster moves abort`. Logged at error when the move's source is dead or no longer a member: the draining node may then hold the only live copy, so the leader leaves the move alone and waits for the copy to be force-promoted and moved off, or for the source to come back. Abort it by hand only if dropping that copy is really intended.
+- `move_budget_full` (warn): the node owns partitions and every move slot (8) is taken by other moves. It drains once they finish; a slot held by a blocked move frees once you [abort it](#moves-blocked).
+- `leader_transfer` (warn): the node leads; leadership moves to another voter first, and the new leader removes it.
+
+### `narad_moves_blocked` above 0 {#moves-blocked}
+
+**Unreleased:** in master, not in v3.0.1.
+
+A partition move cannot finish on its own. The gauge is per node and per `reason`: a move's destination reports the first two reasons for the moves it runs, and the leader reports the last two for every move in flight.
+
+**Cause.** By `reason`:
+
+- `copy_unverifiable`: the move's staged copy failed verification, and failed again after one fresh copy, so the node stopped freezing the source ([staged copy cannot be verified](#log-move-unverifiable)). Also a dead source's copy that reaches its high watermark but fails verification.
+- `source_dead_copy_behind`: the move's source is dead and the copy is behind the source's last high watermark, so promoting it would lose records ([source is dead](#log-move-dead-source-behind)).
+- `source_dead` (leader): the partition's owner, the move's source, is dead. The destination force-promotes a complete copy after it has seen the source dead for 2 minutes; a copy that is behind waits as above. The leader logs `controller: move blocked: its source is dead` at error once per move and leadership term.
+- `target_dead` (leader): the move's destination is dead. The leader clears the target once the destination has been dead for 2 minutes on its own clock, and logs `controller: move blocked: its destination is dead` at error once per move and term.
+
+**Check.** The node's log for the error line of each reason; `narad cluster moves` shows each move's `from_status`, `to_status` and `blocked`, and `narad cluster moves --detail` adds the destination's own report (`worker`: phase, attempts, copied bytes, last error).
+
+**Fix.** By reason, in the log lines below. Each blocked move holds one of the `MaxInFlightMoves` slots, so later rebalances and decommissions wait behind it. To give up on a move, abort it: `narad cluster moves abort <topic> <partition> --target <destination>` clears its target, the partition stays with its owner, and the destination discards its copy (a copy made while the source was dead is set aside instead). The leader may plan the partition again later.
 
 ### `narad_raft_nonvoters` stays above 0 {#nonvoters-stay}
 
@@ -443,9 +505,9 @@ Logged at warning level with `topic` and `err`.
 
 **Cause.** The node holds a directory left by a deleted and recreated topic of the same name (an older [incarnation](../reference/glossary.md#incarnation)), and it failed to rename it aside. Narad never serves such a directory; it renames it to `topics/<name>.stale-<id>` and removes it once the leader confirms that incarnation is gone.
 
-**Check.** The `err` field, usually a permission or disk problem in the data directory.
+**Check.** The `err` field, usually a permission or disk problem in the data directory. An `err` with `asked to prepare incarnation <id>, the local record now names <other>` (or a missing record) means this node's replica has not applied the latest delete or recreate of the name yet: the node prepares a topic directory only for the incarnation its own record still names, so it never sets a live successor's directory aside. A move onto the node logs `move: prepare topic directory for the incarnation; will retry` with the same `err` once per move, then at debug level.
 
-**Fix.** Fix what `err` names. The node retries on its next pass.
+**Fix.** Fix what `err` names. The node retries on its next pass; a refusal for a record that changed clears once the replica catches up, or once a re-plan cancels the move.
 
 ### `reclaim: local partition copy is AHEAD` {#log-partition-quarantined}
 
@@ -524,6 +586,50 @@ kubectl get secret narad-cluster-tls -n narad -o jsonpath='{.data.tls\.crt}' \
 ```
 
 **Fix.** Issue a new certificate (and CA, if it is the CA that expired) and replace the Secret ([Create the certificates](raft-tls.md#create-certificates)). Then restart the pods. If the certificate has expired on every node, a pod restarted with the new one and its peers on the old one refuse each other, so `kubectl rollout restart` stops at its first pod: delete the next pods down by hand until a majority runs the new certificate, as in step 3 of [Enable on a running cluster](raft-tls.md#enable-running-cluster). Renewing before the expiry avoids this: then a plain [rolling restart](raft-tls.md#renew) works.
+
+### `move: staged copy cannot be verified; not freezing the source again` {#log-move-unverifiable}
+
+**Unreleased:** in master, not in v3.0.1.
+
+Logged at error level on a move's destination, with `topic`, `partition`, `source`, `attempts`, `action` and `err`. The move counts in `narad_moves_blocked{reason="copy_unverifiable"}`.
+
+**Cause.** The destination drained the partition under the source's freeze, and the staged copy did not verify as the partition at the source's high watermark: it recovered short of it, past it (`a frame straddles the high watermark`), or not at all. The destination threw the copy away and copied the partition once more from scratch (logged at warning as `move: copying the partition again from scratch`), and that copy failed too. Draining again would fail the same way, so the destination stopped. It no longer freezes the source; the source's last freeze lapses within 30 s, and the partition keeps serving from the source, which still owns it.
+
+**Check.** `err`, and the source's log and partition directory: the source serves the partition, so a copy that recovers differently from it points at a storage problem on either node.
+
+**Fix.** The move stays in flight until it is aborted (`narad cluster moves abort <topic> <partition>`) or re-planned, or this node restarts, which tries once more. Nothing was deleted: the source keeps its copy.
+
+### `move: the source is dead and this node's copy` {#log-move-dead-source-behind}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `move: the source is dead and this node's copy is behind its last high watermark, so it cannot force-promote: promoting would lose records the source made visible. Waiting for the source to return; abort the move to give up on it`, at error level, with `topic`, `partition`, `source`, `copy_next_offset`, `source_last_hwm` and `err`. A copy that reaches the high watermark but fails verification logs `move: the source is dead and this node's copy fails verification, so it cannot force-promote` instead. Either is logged once each time the source dies, then at debug level; v3.0.1 logged `move: source dead but copy is behind its last hwm` at warning every 2 s. The move counts in `narad_moves_blocked` until the source reads alive again.
+
+**Cause.** The move's source died before the destination's copy caught up with it. Records from `copy_next_offset` to `source_last_hwm` exist only on the source's disk. The destination keeps waiting, because a force-promote would drop them.
+
+**Fix.** Bring the source back: the move resumes and completes. If the source is gone for good, the records past `copy_next_offset` are gone with it; aborting the move (`narad cluster moves abort <topic> <partition>`) leaves the partition with its dead owner, and the destination sets its partial copy aside ([below](#log-move-dead-source-staging)).
+
+### `move: set aside the staging copy of a move that ended while its source is dead` {#log-move-dead-source-staging}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `move: set aside the staging copy of a move that ended while its source is dead; it may be the only copy of the partition's records. Operator action required`, at error level, with `topic`, `partition`, `quarantine_dir`, `owner`, `owner_state` and `target`.
+
+**Cause.** A move to this node ended without a flip (it was aborted or re-planned, or the node shut down) while the partition's owner read dead (`owner_state` is `dead`, `no member record`, or why the record could not be read), and the move's staging copy held records. Those may be the only copy of the partition's records left, so the node renamed the copy to `quarantine_dir` (`.moves/<topic>-<N>.quarantine`) instead of deleting it. It is counted in `narad_quarantined_copies`.
+
+**Fix.** If the owner comes back with its disk, its copy is the partition and the set-aside one can be deleted once you have checked. If it is gone for good, copy `quarantine_dir` off before anything else: Narad never serves it and never deletes it. Its records stop at the copy's last segment; re-produce the ones you need.
+
+### `controller: refusing to mark voters dead` {#log-dead-marking-refused}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `controller: refusing to mark voters dead: the verdict would leave fewer alive voters than a Raft quorum, which a leader holding its lease rules out; check the cluster RPC plane (port, secret, certificates) into this leader`, at error level on the leader, with `refused`, `alive_voters_after`, `quorum` and `voters`. It is logged once per refusing streak, `narad_dead_marking_refused` is 1 while it lasts, and `controller: dead-marking breaker cleared` follows at info when the heartbeats are back.
+
+**Cause.** The leader has not seen heartbeats from enough voters to keep a quorum alive, yet it still holds its Raft lease, so those voters still answer it over Raft. The fault is most likely on the path the heartbeats take into this leader: the node RPC port (UDP) blocked, a cluster secret that differs, or a wedged listener. The leader refuses the verdict for the voters in it, so routing keeps treating them as alive; members that are not voters are still marked dead as usual.
+
+**Check.** Whether the leader's node RPC port (the API port, over UDP) is reachable from the listed voters, and whether they use the leader's cluster secret. At debug level the voters log `member heartbeat failed` with the error.
+
+**Fix.** Restore the node RPC plane into the leader. While it is broken, forwarded requests to the refused voters fail instead of being rerouted, which is the safer of the two. If the voters really are down, this node cannot keep leading, and the next leader marks them.
 
 ### `x509: certificate signed by unknown authority` {#raft-cert-untrusted}
 

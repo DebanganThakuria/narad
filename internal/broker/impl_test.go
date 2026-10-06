@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/broker/messaging"
+	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -144,4 +146,46 @@ func TestNewReturnsWorkingBroker(t *testing.T) {
 	if err := br.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
+}
+
+// The move runner reaches the reclaim and quarantine capabilities by
+// asserting optional interfaces on the broker facade. A method promoted
+// from two embedded managers at the same depth is ambiguous and drops
+// out of the facade's method set without a compile error, and the
+// assertion then fails quietly in production: the sweep would stop
+// reclaiming or counting copies with nothing to show for it.
+func TestBrokerServesTheReclaimCapabilities(t *testing.T) {
+	br, err := New(validDeps(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for name, ok := range map[string]bool{
+		"ReclaimMovedPartitionGuarded": implements[interface {
+			ReclaimMovedPartitionGuarded(ctx context.Context, topicName string, partition int, guard messaging.ReclaimGuard) error
+		}](br),
+		"ReclaimOrphanTopicDir": implements[interface {
+			ReclaimOrphanTopicDir(topicName, id string) (bool, error)
+		}](br),
+		"EnsureTopicIncarnation": implements[interface {
+			EnsureTopicIncarnation(topicName, id string) error
+		}](br),
+		"InstallPartitionDir": implements[interface {
+			InstallPartitionDir(topicName string, partition int, swap func() error) error
+		}](br),
+		"ResetPartitionConsumerState": implements[interface {
+			ResetPartitionConsumerState(topicName string, partition int)
+		}](br),
+		"QuarantinedCopies": implements[interface {
+			QuarantinedCopies() (runtime.QuarantineSummary, error)
+		}](br),
+	} {
+		if !ok {
+			t.Errorf("the broker facade lost %s", name)
+		}
+	}
+}
+
+func implements[I any](v any) bool {
+	_, ok := v.(I)
+	return ok
 }

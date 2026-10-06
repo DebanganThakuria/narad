@@ -202,6 +202,7 @@ func FuzzRPCDispatch(f *testing.F) {
 		must(nodewire.EncodeAbortMoveRequest(nodewire.AbortMoveRequest{Topic: "orders", Partition: 1, ExpectedTarget: "fuzz-1"})),
 		must(nodewire.EncodeGetAssignmentRequest(nodewire.GetAssignmentRequest{Topic: "orders", Partition: 1})),
 		nodewire.EncodeAppliedIndexRequest(),
+		nodewire.EncodeNodeStatusRequest(),
 	}
 	for _, seed := range seeds {
 		f.Add(seed)
@@ -298,6 +299,8 @@ func wireRejects(payload []byte) bool {
 		_, err = nodewire.DecodeGetAssignmentRequest(payload)
 	case nodewire.OpAppliedIndex:
 		err = nodewire.DecodeAppliedIndexRequest(payload)
+	case nodewire.OpNodeStatus:
+		err = nodewire.DecodeNodeStatusRequest(payload)
 	case nodewire.OpTokenRegister:
 		_, err = nodewire.DecodeTokenDelta(payload)
 	case nodewire.OpTokenNotify:

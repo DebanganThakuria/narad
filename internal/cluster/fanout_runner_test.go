@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
@@ -19,6 +22,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
@@ -577,5 +581,132 @@ func TestFanoutLostCursorAfterMoveAnchorsAtOldestNotTail(t *testing.T) {
 	cur, ok, err = storage.ReadFanoutCursor(storage.TopicPartitionDir(env.dataDir, "parent", 1), "child")
 	if err != nil || !ok || cur.NextOffset != 4 {
 		t.Fatalf("partition 1 cursor = %+v (ok %v, err %v), want tail-anchored at 4 (fresh attach for this epoch)", cur, ok, err)
+	}
+}
+
+// fanoutSeries reads one parent/child series of a fan-out lag gauge.
+func fanoutSeries(t *testing.T, reg *prometheus.Registry, name, partitionLabel string) (float64, bool) {
+	t.Helper()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if metricLabel(m, "partition") == partitionLabel && metricLabel(m, "parent") == "parent" && metricLabel(m, "child") == "child" {
+				return m.GetGauge().GetValue(), true
+			}
+		}
+	}
+	return 0, false
+}
+
+func metricLabel(m *dto.Metric, name string) string {
+	for _, lp := range m.GetLabel() {
+		if lp.GetName() == name {
+			return lp.GetValue()
+		}
+	}
+	return ""
+}
+
+func cursorsOnPartition(r *FanoutRunner, p int) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for k := range r.cursors {
+		if k.partition == p {
+			n++
+		}
+	}
+	return n
+}
+
+// A parent partition that moves to another node takes its fan-out lag
+// series with it: the old owner kept exporting the partition's last lag
+// (and, for a delay child, its due lag) for as long as the link lived,
+// so the fan-out lag alert stayed firing and a sum by parent and child
+// counted the partition twice. The partitions still owned here keep
+// theirs.
+func TestFanoutLagSeriesDroppedWhenTheParentPartitionMovesAway(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		delayMs int64
+	}{
+		{"immediate child", 0},
+		{"delay child", int64(time.Hour / time.Millisecond)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newFanoutTestEnv(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			reg := prometheus.NewRegistry()
+			runner := NewFanoutRunner(env.store, "node-self", env.dataDir, env.engine, nil,
+				partition.NewHashRoundRobin(), metrics.New(reg), slog.New(slog.NewTextHandler(io.Discard, nil)),
+				FanoutConfig{Linger: time.Millisecond, ReconcileInterval: time.Hour})
+			defer func() { cancel(); runner.wg.Wait() }()
+
+			if err := env.store.AttachChild(ctx, "parent", "child", tc.delayMs); err != nil {
+				t.Fatalf("AttachChild: %v", err)
+			}
+			child, err := env.store.GetTopic(ctx, "child")
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner.Reconcile(ctx)
+			waitForCursorFiles(t, env, child.AttachEpoch, 3)
+
+			env.produceToParent(t, 0, 5, 2, 0)
+			want := 0.0
+			if tc.delayMs > 0 {
+				want = 5 // not due for an hour: the raw offset lag stays 5
+			} else {
+				env.waitChildTotal(t, 5)
+			}
+			waitFor(t, 10*time.Second, "the lag gauge of parent/0", func() bool {
+				v, ok := fanoutSeries(t, reg, "narad_fanout_lag_messages", "0")
+				return ok && v == want
+			})
+			if tc.delayMs > 0 {
+				waitFor(t, 10*time.Second, "the due-lag gauge of parent/0", func() bool {
+					_, ok := fanoutSeries(t, reg, "narad_fanout_due_lag_seconds", "0")
+					return ok
+				})
+			}
+
+			// A rebalance moves parent/0 to another node.
+			if err := env.store.AssignPartition(ctx, "parent", 0, "node-other"); err != nil {
+				t.Fatalf("AssignPartition: %v", err)
+			}
+			waitFor(t, 10*time.Second, "the cursor of parent/0 to stop", func() bool {
+				runner.Reconcile(ctx)
+				return cursorsOnPartition(runner, 0) == 0
+			})
+			// More passes, a cursor-file sweep among them: nothing may
+			// bring the series back.
+			for range fanoutCursorFileSweepEvery + 2 {
+				runner.gate.invalidate()
+				runner.Reconcile(ctx)
+			}
+
+			if v, ok := fanoutSeries(t, reg, "narad_fanout_lag_messages", "0"); ok {
+				t.Errorf("narad_fanout_lag_messages{partition=\"0\"} survives on the old owner with value %v", v)
+			}
+			if _, ok := fanoutSeries(t, reg, "narad_fanout_due_lag_seconds", "0"); ok {
+				t.Error("narad_fanout_due_lag_seconds{partition=\"0\"} survives on the old owner")
+			}
+			for _, p := range []string{"1", "2"} {
+				waitFor(t, 10*time.Second, "the lag series of the still-owned partition "+p, func() bool {
+					_, ok := fanoutSeries(t, reg, "narad_fanout_lag_messages", p)
+					return ok
+				})
+			}
+			if n := cursorsOnPartition(runner, 1); n != 1 {
+				t.Fatalf("%d cursors on the still-owned parent/1, want 1", n)
+			}
+		})
 	}
 }

@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
@@ -96,23 +97,34 @@ func (e *Engine) ReclaimMovedPartitionGuarded(ctx context.Context, topicName str
 		// such thing as a moved-away partition.
 		return fmt.Errorf("%w: no cluster identity", ErrInvalid)
 	}
+	// The incarnation this reclaim is about. The directory is acted on
+	// only under the topic's guard and while its marker still names this
+	// incarnation (or none): a delete and recreate of the name after the
+	// checks below, with this node opening the successor's partition,
+	// quarantines the old topic directory and makes the successor's
+	// directory under the path, and removing or renaming that destroys
+	// the successor's records and consumer state.
+	//
+	// The record is read BEFORE the assignment, so the assignment the
+	// reclaim approves belongs to this incarnation or a later one. Read
+	// the other way round, a delete and recreate applied between the two
+	// reads made the record the successor's while the approved assignment
+	// was the deleted incarnation's: the marker check below then passed on
+	// the successor's own directory, and the reclaim removed it. In this
+	// order a later incarnation's assignment either names this node
+	// (refused below) or another node, and then any successor directory
+	// this node made carries a marker other than rec.ID, which the check
+	// under the guard refuses.
+	rec, err := e.getTopic(ctx, topicName)
+	if err != nil {
+		return fmt.Errorf("reclaim refused: topic unreadable: %w", err)
+	}
 	assignment, err := e.getAssignment(topicName, partition)
 	if err != nil {
 		return fmt.Errorf("reclaim refused: assignment unreadable: %w", err)
 	}
 	if assignment.OwnerID == "" || assignment.OwnerID == e.selfID || assignment.TargetID == e.selfID {
 		return fmt.Errorf("%w: partition is (or is becoming) locally owned", ErrInvalid)
-	}
-	// The incarnation this reclaim is about. The directory is acted on
-	// only under the topic's guard and while its marker still names this
-	// incarnation (or none): a delete and recreate of the name after the
-	// checks above, with this node opening the successor's partition,
-	// quarantines the old topic directory and makes the successor's
-	// directory under the path, and removing or renaming that destroys
-	// the successor's records and consumer state.
-	rec, err := e.getTopic(ctx, topicName)
-	if err != nil {
-		return fmt.Errorf("reclaim refused: topic unreadable: %w", err)
 	}
 	if err := e.logs.ClosePartition(topicName, partition); err != nil {
 		return fmt.Errorf("reclaim: close partition log: %w", err)
@@ -242,4 +254,29 @@ func (e *Engine) InstallPartitionDir(topicName string, partition int, swap func(
 		return swap()
 	}
 	return e.logs.ReplacePartitionDir(topicName, partition, swap)
+}
+
+// ReclaimOrphanTopicDir purges this node's directory of the deleted
+// topic incarnation id, whose purge never reached this node, under the
+// topic's guard and only while the local record shows the topic absent
+// and the directory still carries id's marker (see
+// runtime.Logs.ReclaimOrphanTopicDir). The move runner's periodic sweep
+// calls it once the LEADER confirmed the incarnation gone; the broker
+// facade reaches it through the embedded engine.
+func (e *Engine) ReclaimOrphanTopicDir(topicName, id string) (bool, error) {
+	if e.logs == nil {
+		return false, unavailableError("partition logs")
+	}
+	return e.logs.ReclaimOrphanTopicDir(topicName, id)
+}
+
+// QuarantinedCopies takes the inventory of this node's quarantined
+// copies and keeps it for the quarantine gauges (see
+// runtime.Logs.QuarantinedCopies). The move runner's sweep calls it on
+// its cadence; the broker facade reaches it through the embedded engine.
+func (e *Engine) QuarantinedCopies() (runtime.QuarantineSummary, error) {
+	if e.logs == nil {
+		return runtime.QuarantineSummary{}, unavailableError("partition logs")
+	}
+	return e.logs.QuarantinedCopies()
 }

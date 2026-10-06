@@ -80,7 +80,7 @@ See: [Fan out and delay messages](../build/fanout-and-delay.md).
 
 ## Force-promote {#force-promote}
 
-What ends a partition move whose source node stays dead: after 2 minutes, the destination takes over the partition with the copy it already holds.
+What ends a partition move whose source node stays dead: after 2 minutes, the destination takes over the partition with the copy it already holds, if that copy holds everything the source had made visible.
 
 See: [Rebalance and decommission](../understand/rebalance.md).
 

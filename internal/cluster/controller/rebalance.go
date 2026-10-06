@@ -16,8 +16,8 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"slices"
-	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -68,19 +68,23 @@ func (c *Controller) reconcileRebalance(ctx context.Context) {
 		return
 	}
 	in.Avoid = antiAffinityAvoid(byName, parentOwners)
+	t := c.term(ctx)
+	c.noteColocated(t, byName, parentOwners)
 
 	// Moves aimed at a node that is gone never finish on their own: only
 	// the destination aborts a move, and a dead destination cannot. Clear
 	// them so they stop pinning the budget; the partition stays with its
 	// owner (untouched by the move) and is re-planned like any other.
 	aborted := c.abortDeadTargetMoves(ctx, inFlight, members)
+	c.noteBlockedMoves(t, inFlight, aborted, members)
 
-	budget := c.cfg.MaxInFlightMoves - (len(inFlight) - aborted)
+	budget := c.cfg.MaxInFlightMoves - (len(inFlight) - len(aborted))
 	if budget <= 0 {
 		return // already at the in-flight cap; let running moves finish
 	}
 
 	moves := PlanRebalance(in)
+	var set []string
 	for _, m := range moves {
 		if budget <= 0 {
 			break
@@ -88,7 +92,11 @@ func (c *Controller) reconcileRebalance(ctx context.Context) {
 		if err := c.store.SetAssignmentTarget(ctx, m.Partition.Topic, m.Partition.Partition, m.To); err != nil {
 			continue
 		}
+		set = append(set, fmt.Sprintf("%s/%d %s->%s", m.Partition.Topic, m.Partition.Partition, m.From, m.To))
 		budget--
+	}
+	if len(set) > 0 {
+		c.logger().Info("controller: move targets set", "count", len(set), "moves", set)
 	}
 }
 
@@ -143,18 +151,21 @@ func (c *Controller) buildPlanInput(
 
 // abortDeadTargetMoves clears the target of every in-flight move whose
 // destination cannot complete it: the target member is gone from the
-// member list, has been dead longer than DeadTargetAbortAfter, or is out
-// of the Raft configuration (neither a voter nor a staged non-voter)
-// while dead or draining (a decommissioned node that has not aged out
-// yet). Returns how many targets were cleared. A briefly
-// dead target (a pod restart) is left alone: its worker resumes the copy
-// when it returns. Clearing the target is safe at any point of the move:
-// the owner never changed, and a destination that comes back finds its
-// guarded CAS refused and discards its staged copy.
-func (c *Controller) abortDeadTargetMoves(ctx context.Context, inFlight []metastore.Assignment, members []metastore.Member) int {
+// member list, has been dead longer than DeadTargetAbortAfter (on this
+// leader's clock, see deadFor), or is out of the Raft configuration
+// (neither a voter nor a staged non-voter) while dead or draining (a
+// decommissioned node that has not aged out yet). Returns the moves it
+// cleared. A briefly dead target (a pod restart) is left alone: its
+// worker resumes the copy when it returns. Clearing the target is safe at
+// any point of the move: the owner never changed, and a destination that
+// comes back finds its guarded CAS refused and discards its staged copy.
+func (c *Controller) abortDeadTargetMoves(ctx context.Context, inFlight []metastore.Assignment, members []metastore.Member) map[string]bool {
+	aborted := map[string]bool{}
 	if len(inFlight) == 0 {
-		return 0
+		return aborted
 	}
+	t := c.term(ctx)
+	now := c.clock()
 	byID := make(map[string]metastore.Member, len(members))
 	for _, m := range members {
 		byID[m.ID] = m
@@ -171,22 +182,32 @@ func (c *Controller) abortDeadTargetMoves(ctx context.Context, inFlight []metast
 	if err != nil {
 		inRaft = nil // unknown: only the membership rules below apply
 	}
-	deadBefore := time.Now().Unix() - int64(c.cfg.DeadTargetAbortAfter.Seconds())
-	aborted := 0
 	for _, a := range inFlight {
 		m, known := byID[a.TargetID]
-		gone := !known || // not a cluster member at all
-			(m.Status == metastore.MemberDead && m.LastHeartbeat < deadBefore) || // dead past the bound
-			(inRaft != nil && !slices.Contains(inRaft, a.TargetID) && (m.Status == metastore.MemberDead || m.Draining)) // removed from Raft
-		if !gone {
+		var why string
+		switch {
+		case !known:
+			why = "the target is not a cluster member"
+		case m.Status == metastore.MemberDead && c.deadFor(t, m.LastHeartbeat, c.cfg.DeadTargetAbortAfter, now):
+			why = "the target has been dead longer than the dead-target bound"
+		case inRaft != nil && !slices.Contains(inRaft, a.TargetID) && (m.Status == metastore.MemberDead || m.Draining):
+			why = "the target left the Raft configuration"
+		default:
 			continue
 		}
 		if err := c.store.SetAssignmentTarget(ctx, a.Topic, a.Partition, ""); err != nil {
 			continue
 		}
-		aborted++
+		c.logger().Warn("controller: move target cleared: "+why,
+			"topic", a.Topic, "partition", a.Partition, "owner", a.OwnerID, "target", a.TargetID)
+		aborted[moveKey(a)] = true
 	}
 	return aborted
+}
+
+// moveKey names one in-flight move.
+func moveKey(a metastore.Assignment) string {
+	return fmt.Sprintf("%s/%d->%s", a.Topic, a.Partition, a.TargetID)
 }
 
 // antiAffinityAvoid discourages placing a fan-out child's partition on the

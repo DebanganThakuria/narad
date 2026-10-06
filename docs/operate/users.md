@@ -216,7 +216,7 @@ The API answers `204` and the CLI prints nothing. You cannot delete your own acc
 
 ## Audit trail {#audit}
 
-**Unreleased:** every user create, delete, password change and grants change, and every decommission, decommission cancel and [forget](troubleshooting.md#raft-server-no-member-record), writes one log line on the node the client called, also when that node forwarded the change to the Raft leader: message `audit`, attribute `component=audit`, with `event` (`user.create`, `user.delete`, `user.password`, `user.grants`, `cluster.decommission`, `cluster.decommission.cancel` or `cluster.forget`), `actor` (the caller, empty with security off), `target`, `status` (the HTTP status the client got) and `outcome`:
+**Unreleased:** every user create, delete, password change and grants change, and every decommission (not a `dry_run`), decommission cancel and [forget](troubleshooting.md#raft-server-no-member-record), writes one log line on the node the client called, also when that node forwarded the change to the Raft leader: message `audit`, attribute `component=audit`, with `event` (`user.create`, `user.delete`, `user.password`, `user.grants`, `cluster.decommission`, `cluster.decommission.cancel` or `cluster.forget`), `actor` (the caller, empty with security off), `target`, `status` (the HTTP status the client got) and `outcome`:
 
 | `outcome` | Meaning |
 |---|---|

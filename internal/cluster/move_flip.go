@@ -84,6 +84,44 @@ type moveWorker struct {
 	// moved back off the partition's path (rollbackInstall restored it),
 	// and the worker has not installed again since.
 	movedBack bool
+	// warned holds the retry reasons this worker has already logged at
+	// warn level (see warnOnce).
+	warned map[string]bool
+	// deadSince is when this worker first read the source as dead, on
+	// its own clock; zero while the source reads alive
+	// (move_source_clock.go).
+	deadSince time.Time
+	// deadReported: this worker logged, at error, that the source died
+	// with a copy it cannot force-promote, since the source last read
+	// alive.
+	deadReported bool
+
+	// unverified counts the frozen drains in a row whose staged copy
+	// failed verification; gaveUp is set once the copy failed it again
+	// after a fresh start, and the worker then waits to be cancelled
+	// without freezing the source again (move_runner.go).
+	unverified int
+	gaveUp     bool
+
+	// status is what MoveStates reports for this worker; nil (a worker
+	// built without trackMove) records nothing (move_states.go).
+	status *moveStatus
+}
+
+// warnOnce logs a retry at warn level the first time this worker meets
+// reason and at debug level after that, so a move that keeps retrying
+// for the same reason (the topic record changed under it, until the
+// next reconcile pass cancels the worker) does not flood the log.
+func (w *moveWorker) warnOnce(reason, msg string, args ...any) {
+	if w.warned[reason] {
+		w.r.logger.Debug(msg, args...)
+		return
+	}
+	if w.warned == nil {
+		w.warned = map[string]bool{}
+	}
+	w.warned[reason] = true
+	w.r.logger.Warn(msg, args...)
 }
 
 // flipDone records that the move flipped.
@@ -109,9 +147,11 @@ func (w *moveWorker) observeDone() {
 // (quarantined, where no worker clears it) when it may hold records
 // that exist nowhere else: this node owns the partition by now and
 // staging may hold records the partition's path lacks (see
-// ownedStagingIsRedundant), or this worker moved its install back to
-// staging and the owner cannot be read. A partition with no assignment
-// (its topic is gone) has no owner. A worker cancelled
+// ownedStagingIsRedundant), this worker moved its install back to
+// staging and the owner cannot be read, or the partition's owner reads
+// dead (or has no member record) and staging holds records, which may be
+// the only copy of them left (ownerMayBeGone). A partition with no
+// assignment (its topic is gone) has no owner. A worker cancelled
 // with a flip pending leaves the install at the partition's path: if the
 // flip committed it is the partition, and if not, the next worker's
 // install quarantines it (setAsideLiveCopy; error-level log) or the
@@ -151,6 +191,15 @@ func (w *moveWorker) finish() {
 			w.setAsideStaging("move: set aside the staging copy of a partition this node owns; the partition's records may not all be under its path. Operator action required",
 				"partition_dir", dir, "moved_back", w.movedBack, "partition_dir_has_records", holdsRecords(segs))
 			return
+		}
+	}
+	if err == nil && a.OwnerID != r.selfID {
+		if gone, why := w.ownerMayBeGone(a.OwnerID); gone {
+			if segs, lerr := listLocalSegments(w.staging); lerr == nil && holdsRecords(segs) {
+				w.setAsideStaging("move: set aside the staging copy of a move that ended while its source is dead; it may be the only copy of the partition's records. Operator action required",
+					"owner", a.OwnerID, "owner_state", why, "target", a.TargetID)
+				return
+			}
 		}
 	}
 	if err := os.RemoveAll(w.staging); err != nil {
@@ -194,6 +243,26 @@ func (w *moveWorker) ownedStagingIsRedundant(dir string) bool {
 	return err == nil && ok && m.Source == w.source
 }
 
+// ownerMayBeGone reports whether the partition's owner (the move's
+// source, unless the partition was planned elsewhere since) may no
+// longer hold its copy: it reads dead, it has no member record, or its
+// record cannot be read. why describes what was read.
+func (w *moveWorker) ownerMayBeGone(owner string) (gone bool, why string) {
+	if owner == "" {
+		return true, "no owner"
+	}
+	m, err := w.r.store.GetMember(owner)
+	switch {
+	case errors.Is(err, errs.ErrNotFound):
+		return true, "no member record"
+	case err != nil:
+		return true, "member record unreadable: " + err.Error()
+	case m.Status == metastore.MemberDead:
+		return true, string(metastore.MemberDead)
+	}
+	return false, string(m.Status)
+}
+
 // holdsRecords reports whether any segment holds bytes.
 func holdsRecords(segs []localSegment) bool {
 	for _, s := range segs {
@@ -206,8 +275,8 @@ func holdsRecords(segs []localSegment) bool {
 
 // resetSession throws the staged copy away and starts the next attempt
 // from scratch, carrying what the session knew about the source (see
-// carryFrom). The rollback is the only caller: it could not move the
-// installed copy back to staging.
+// carryFrom): after a rollback that could not move the installed copy
+// back to staging, and after a staged copy failed verification.
 func (w *moveWorker) resetSession(reason string) {
 	r := w.r
 	r.logger.Warn("move: copying the partition again from scratch", "topic", w.topic, "partition", w.partition, "reason", reason)
@@ -346,6 +415,9 @@ func (w *moveWorker) proposeFlip(ctx context.Context) error {
 	if err != nil && !flipSettled(err) {
 		w.pending.unknownAt = w.r.now()
 	}
+	if err != nil {
+		w.status.setError(fmt.Errorf("propose the flip: %w", err))
+	}
 	return err
 }
 
@@ -362,7 +434,8 @@ func (w *moveWorker) proposeFlip(ctx context.Context) error {
 //     re-armed freeze whose HWM still matches the copy, for at most
 //     movePendingFreezeLimit; or, for a force-promote, while the source
 //     stays dead. A source that dies under a pending install turns it
-//     into a force-promote once it has been dead long enough. Once the
+//     into a force-promote once it has been dead long enough, by the
+//     leader's stamp and by this worker's own clock. Once the
 //     install cannot be flipped as it is, the worker stops proposing
 //     and, when a leader read confirms the flip has not committed and no
 //     proposal is in flight, moves the install back to staging to drain
@@ -374,6 +447,9 @@ func (w *moveWorker) proposeFlip(ctx context.Context) error {
 func (w *moveWorker) resolvePending(ctx context.Context) bool {
 	r, p := w.r, w.pending
 	m, merr := r.store.GetMember(w.source)
+	if merr == nil {
+		w.observeSource(m)
+	}
 	// The settle check is taken when the leader read starts, not when it
 	// returns: the barrier may be taken anywhere in between, and only a
 	// read whose barrier comes after the window can have seen every
@@ -445,7 +521,7 @@ func (w *moveWorker) pendingFlippable(ctx context.Context, m metastore.Member, m
 	if err := r.checkTopicIncarnation(w.topic, p.expectID); err != nil {
 		return false, err.Error(), false
 	}
-	if !p.forcePromoted && merr == nil && r.sourceDeadEnough(m) {
+	if !p.forcePromoted && merr == nil && w.sourceDeadLongEnough(m) {
 		// The install is the whole copy as of the fence; the source died
 		// with the flip unconfirmed. Flip it as a force-promote would.
 		p.forcePromoted = true

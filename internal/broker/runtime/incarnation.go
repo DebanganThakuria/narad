@@ -33,6 +33,7 @@ package runtime
 // name-based behaviour: nothing is stamped, nothing is quarantined.
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -184,10 +185,34 @@ func (g *Logs) notifyRetired(topicName string) {
 // exactly as an open does (adopt an unmarked directory, quarantine a
 // directory of another incarnation, stamp the marker) without opening
 // a log. A move calls it before installing a copied partition so the
-// copy never lands inside a deleted incarnation's directory.
+// copy never lands inside a deleted incarnation's directory, and the
+// move runner's sweep calls it to set aside a deleted incarnation's
+// directory.
+//
+// Both callers read id before this takes the topic's guard, so it may
+// name an incarnation deleted since: the name recreated, and this node
+// already serving the successor's partition under the path. Preparing
+// the directory for that id would set the LIVE successor's directory
+// aside as a leftover and stamp the deleted id on a fresh one, and the
+// successor's committed records and consumer files would never be
+// served again. So the local metastore record is re-read under the
+// guard, as an open does, and the call refuses with
+// ErrStaleTopicIncarnation unless the record still carries id. A record
+// that is gone or unreadable refuses too; the callers retry on their
+// next pass. An open of a newer incarnation needs the same guard, so
+// under it the record is never older than the directory's marker.
 func (g *Logs) EnsureTopicIncarnation(topicName, id string) error {
 	unlock := g.lockTopic(topicName)
 	defer unlock()
+	if id != "" && g.metastore != nil {
+		t, err := g.metastore.GetTopic(context.Background(), topicName)
+		if err != nil {
+			return fmt.Errorf("%w: %s: re-read the topic record under its guard: %w", ErrStaleTopicIncarnation, topicName, err)
+		}
+		if t.ID != id {
+			return fmt.Errorf("%w: %s: asked to prepare incarnation %s, the local record now names %q", ErrStaleTopicIncarnation, topicName, id, t.ID)
+		}
+	}
 	return g.ensureIncarnationGuarded(topicName, id)
 }
 

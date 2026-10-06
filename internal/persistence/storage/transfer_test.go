@@ -8,6 +8,7 @@ package storage
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -177,5 +178,171 @@ func TestReadSegmentRangeBoundsAllocation(t *testing.T) {
 	}
 	if _, err = ReadSegmentRange(dir, 0, 0, -1); err == nil {
 		t.Fatal("negative length accepted")
+	}
+}
+
+// logWithHiddenFrames writes n committed records (one frame each) to a
+// log in dir, then m records that are written and fsynced but never
+// made visible.
+func logWithHiddenFrames(t *testing.T, dir string, n, m int, opts Options) *Log {
+	t.Helper()
+	opts.FlushInterval = time.Millisecond
+	l, err := NewLog(dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range n {
+		if _, err := l.Append(EncodeKeyedRecord("k", int64(i), []byte("committed"))); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Sync(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := l.AdvanceHighWatermark(l.NextOffset()); err != nil {
+		t.Fatal(err)
+	}
+	for i := range m {
+		if _, err := l.Append(EncodeKeyedRecord("k", int64(i), []byte("HIDDEN"))); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Sync(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return l
+}
+
+// The committed boundary is the first frame at or above the high
+// watermark, the same from the open log and from its closed files, and
+// never past the log's own high watermark.
+func TestCommittedBoundaryExcludesAnUncommittedTail(t *testing.T) {
+	dir := t.TempDir()
+	l := logWithHiddenFrames(t, dir, 5, 3, Options{})
+	st, err := os.Stat(filepath.Join(dir, segmentFileName(0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	open, ok := l.CommittedBoundary(0, 5)
+	if !ok || open <= 0 || open >= st.Size() {
+		t.Fatalf("open boundary %d (ok %v), file %d bytes: want strictly inside (5 committed, 3 hidden frames)", open, ok, st.Size())
+	}
+	if beyond, _ := l.CommittedBoundary(0, 100); beyond != open {
+		t.Fatalf("boundary asked past the high watermark = %d, want the committed %d", beyond, open)
+	}
+	if _, ok := l.CommittedBoundary(99, 5); ok {
+		t.Fatal("a boundary reported for a segment the log does not have")
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := l.CommittedBoundary(0, 5); ok {
+		t.Fatal("a closed log reported a boundary")
+	}
+	closed, err := CommittedSegmentBytes(dir, 0, 5)
+	if err != nil || closed != open {
+		t.Fatalf("closed-file boundary %d (err %v), open %d", closed, err, open)
+	}
+	if all, _ := CommittedSegmentBytes(dir, 0, 100); all != st.Size() {
+		t.Fatalf("boundary past every frame = %d, want the file size %d", all, st.Size())
+	}
+	if none, _ := CommittedSegmentBytes(dir, 0, 0); none != 0 {
+		t.Fatalf("boundary at hwm 0 = %d, want 0", none)
+	}
+}
+
+// A torn last frame ends the closed-file walk before it, and a frame
+// header that does not decode below the high watermark leaves the file
+// as it is (recovery steps over such damage, so the walk cannot place
+// the boundary).
+func TestCommittedSegmentBytesStopsAtATornFrame(t *testing.T) {
+	dir := t.TempDir()
+	l := logWithHiddenFrames(t, dir, 4, 0, Options{})
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, segmentFileName(0))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := CommittedSegmentBytes(dir, 0, 3)
+	if err != nil || third <= 0 || third >= int64(len(data)) {
+		t.Fatalf("boundary at offset 3 = %d (err %v), file %d", third, err, len(data))
+	}
+	if err := os.WriteFile(path, data[:len(data)-2], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := CommittedSegmentBytes(dir, 0, 10); err != nil || got != third {
+		t.Fatalf("torn last frame: boundary %d (err %v), want %d (before the torn frame)", got, err, third)
+	}
+	damaged := append([]byte(nil), data...)
+	damaged[third] ^= 0xff // the magic of the 4th frame
+	if err := os.WriteFile(path, damaged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := CommittedSegmentBytes(dir, 0, 10); err != nil || got != int64(len(damaged)) {
+		t.Fatalf("damaged header: boundary %d (err %v), want the file size %d", got, err, len(damaged))
+	}
+}
+
+// A listing for a copy at a high watermark leaves out the segments that
+// start above it and cuts the last one left to its committed records.
+func TestListCommittedSegmentsEndsAtTheHighWatermark(t *testing.T) {
+	dir := t.TempDir()
+	buildMultiSegmentLog(t, dir, 6) // one record per segment, hwm 6
+	segs, err := ListCommittedSegments(dir, 3, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segs) != 4 || segs[3].BaseOffset != 3 || segs[3].SizeBytes != 0 || segs[3].Sealed {
+		t.Fatalf("listing at hwm 3 = %+v; want segments 0..3 with segment 3 empty and unsealed", segs)
+	}
+	for _, s := range segs[:3] {
+		if s.SizeBytes == 0 || !s.Sealed {
+			t.Fatalf("listing at hwm 3 = %+v; want segments 0..2 whole and sealed", segs)
+		}
+	}
+	all, err := ListCommittedSegments(dir, 6, func(int64) (int64, bool) { return 0, false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, _ := ListPartitionSegments(dir)
+	if len(all) != len(plain) || all[len(all)-1].SizeBytes != plain[len(plain)-1].SizeBytes {
+		t.Fatalf("listing at the log's high watermark = %+v, want %+v", all, plain)
+	}
+}
+
+// A staged copy with records past the high watermark it is promoted at
+// is cut back to it: segment files above it go, and the last one is
+// truncated before its first frame at or above it.
+func TestCutStagedCopyDropsRecordsPastTheHighWatermark(t *testing.T) {
+	dir := t.TempDir()
+	l := logWithHiddenFrames(t, dir, 5, 3, Options{})
+	committed, _ := l.CommittedBoundary(0, 5)
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSegmentFile(dir, 9, []byte("stray")); err != nil {
+		t.Fatal(err)
+	}
+	cut, err := CutStagedCopy(dir, 5)
+	if err != nil || !cut {
+		t.Fatalf("cut = %v (err %v), want a cut", cut, err)
+	}
+	segs, _ := ListPartitionSegments(dir)
+	if len(segs) != 1 || segs[0].SizeBytes != committed {
+		t.Fatalf("after the cut %+v, want one segment of %d bytes", segs, committed)
+	}
+	if again, err := CutStagedCopy(dir, 5); err != nil || again {
+		t.Fatalf("a second cut = %v (err %v), want nothing left to cut", again, err)
+	}
+	reopened, err := NewLog(dir, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if reopened.NextOffset() != 5 {
+		t.Fatalf("the cut copy recovers next offset %d, want 5", reopened.NextOffset())
 	}
 }

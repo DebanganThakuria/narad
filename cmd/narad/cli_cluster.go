@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 
 	"github.com/spf13/cobra"
 )
@@ -22,17 +25,25 @@ func newClusterCmd() *cobra.Command {
 }
 
 func clusterDecommissionCmd() *cobra.Command {
-	var cancel bool
+	var cancel, dryRun bool
 	cmd := &cobra.Command{
 		Use:   "decommission <node-id>",
 		Short: "drain a node's partitions off and remove it from the cluster",
 		Long: "Marks a node for decommission: the leader sheds every partition it owns\n" +
 			"onto the other nodes and, once drained, removes it from the Raft voter set.\n" +
-			"Use --cancel to stop an in-progress decommission (the node keeps its\n" +
-			"partitions and starts receiving again).",
+			"A decommission that could never complete safely is refused with the reasons.\n" +
+			"Use --dry-run to see the verdict without changing anything, and --cancel to\n" +
+			"stop an in-progress decommission (the node keeps its partitions and starts\n" +
+			"receiving again).",
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			path := "/v1/cluster/members/" + url.PathEscape(args[0]) + "/decommission"
+			switch {
+			case cancel && dryRun:
+				return errors.New("--dry-run and --cancel cannot be combined")
+			case dryRun:
+				return cliClient().postAndPrint(path+"?dry_run=true", nil)
+			}
 			method := http.MethodPost
 			if cancel {
 				method = http.MethodDelete
@@ -46,31 +57,78 @@ func clusterDecommissionCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&cancel, "cancel", false, "cancel an in-progress decommission")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report whether the node could be decommissioned, and why not, without changing anything")
 	return cmd
 }
 
 func clusterMovesCmd() *cobra.Command {
-	return &cobra.Command{
+	var detail bool
+	cmd := &cobra.Command{
 		Use:   "moves",
 		Short: "list partitions currently being moved between nodes",
-		Args:  cobra.NoArgs,
+		Long: "Lists every in-flight partition move with each side's liveness and why a\n" +
+			"move is blocked. --detail also asks each destination for its move worker's\n" +
+			"own report. Abort a move with: narad cluster moves abort <topic> <partition>.",
+		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return cliClient().getAndPrint("/v1/cluster/moves")
+			return cliClient().getAndPrint(withDetail("/v1/cluster/moves", detail))
 		},
 	}
+	cmd.Flags().BoolVar(&detail, "detail", false, "also ask each destination for its move worker's state")
+	cmd.AddCommand(clusterMovesAbortCmd())
+	return cmd
+}
+
+func clusterMovesAbortCmd() *cobra.Command {
+	var target string
+	cmd := &cobra.Command{
+		Use:   "abort <topic> <partition>",
+		Short: "abort an in-flight partition move; the partition stays with its owner",
+		Long: "Clears the move's target, so the partition stays with its current owner and\n" +
+			"the destination discards its copy. With --target, the abort is refused when\n" +
+			"the move now targets another node. The leader may plan a move for the\n" +
+			"partition again later.",
+		Args: cobra.ExactArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if _, err := strconv.Atoi(args[1]); err != nil {
+				return fmt.Errorf("partition must be a number, got %q", args[1])
+			}
+			path := "/v1/cluster/moves/" + url.PathEscape(args[0]) + "/" + url.PathEscape(args[1]) + "/abort"
+			if target != "" {
+				path += "?target=" + url.QueryEscape(target)
+			}
+			return cliClient().postAndPrint(path, nil)
+		},
+	}
+	cmd.Flags().StringVar(&target, "target", "", "the destination node the move must still target")
+	return cmd
 }
 
 func clusterMembersCmd() *cobra.Command {
+	var detail bool
 	cmd := &cobra.Command{
 		Use:   "members",
-		Short: "list cluster members with partition counts and drain status",
-		Args:  cobra.NoArgs,
+		Short: "list cluster members with partition counts, Raft role and drain status",
+		Long: "Lists every member with its partition counts, voter and leader flags,\n" +
+			"heartbeat age and, for a draining node, why its decommission is blocked.\n" +
+			"--detail also asks every member for its own status: dispatch backlog,\n" +
+			"quarantined partition copies and move workers.",
+		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return cliClient().getAndPrint("/v1/cluster/members")
+			return cliClient().getAndPrint(withDetail("/v1/cluster/members", detail))
 		},
 	}
+	cmd.Flags().BoolVar(&detail, "detail", false, "also ask every member for its own status")
 	cmd.AddCommand(clusterMembersForgetCmd())
 	return cmd
+}
+
+// withDetail adds ?detail=true to path when detail is set.
+func withDetail(path string, detail bool) string {
+	if detail {
+		return path + "?detail=true"
+	}
+	return path
 }
 
 func clusterMembersForgetCmd() *cobra.Command {

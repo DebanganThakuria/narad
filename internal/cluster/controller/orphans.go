@@ -36,7 +36,7 @@ func (c *Controller) pruneOrphanAssignments(ctx context.Context) {
 	}
 	orphans, err := c.store.OrphanAssignments()
 	if err != nil {
-		c.log().Warn("controller: could not list orphan assignment rows; the next pass retries", "err", err)
+		c.logger().Warn("controller: could not list orphan assignment rows; the next pass retries", "err", err)
 		return
 	}
 	c.orphanMu.Lock()
@@ -55,7 +55,7 @@ func (c *Controller) pruneOrphanAssignments(ctx context.Context) {
 		switch {
 		case !usable:
 			if !c.orphansLogged[key] {
-				c.log().Error(fmt.Sprintf("orphan assignment row for %s; it is pruned once every member runs 3.1.0", key),
+				c.logger().Error(fmt.Sprintf("orphan assignment row for %s; it is pruned once every member runs 3.1.0", key),
 					"topic", a.Topic, "partition", a.Partition, "owner", a.OwnerID)
 			}
 			logged[key] = true
@@ -65,12 +65,12 @@ func (c *Controller) pruneOrphanAssignments(ctx context.Context) {
 			// The partition exists again (the topic was recreated or
 			// grew), or the row went, since the list.
 		default:
-			c.log().Warn("controller: could not prune an orphan assignment row; the next pass retries",
+			c.logger().Warn("controller: could not prune an orphan assignment row; the next pass retries",
 				"topic", a.Topic, "partition", a.Partition, "err", err)
 		}
 	}
 	c.orphansLogged = logged
 	if pruned > 0 {
-		c.log().Info("controller: pruned assignment rows that belonged to no partition", "rows", pruned)
+		c.logger().Info("controller: pruned assignment rows that belonged to no partition", "rows", pruned)
 	}
 }

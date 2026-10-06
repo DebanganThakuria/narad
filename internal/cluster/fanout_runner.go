@@ -394,11 +394,22 @@ func (r *FanoutRunner) Reconcile(ctx context.Context) {
 	r.gate.finish(version, now, pending)
 }
 
-// cleanUpStoppedCursor removes the offset file and metric series of a
-// cursor whose link no longer exists. A cursor stopped for any other
-// reason (e.g. the runner shutting down) keeps its file so a restart
-// resumes where it left off.
+// cleanUpStoppedCursor removes the metric series of a cursor Reconcile
+// stopped, and its offset file when its link no longer exists. A cursor
+// stopped while its link lives (the parent partition moved to another
+// node) keeps its file so a move back resumes where it left off, but not
+// its lag series: the partition's new owner exports those now, and the
+// last values here would keep the fan-out lag alert firing and count the
+// partition twice. A cursor that starts again sets its series again.
+// Reconcile never runs a successor for the same parent partition and
+// child alongside a stopped one, so the series deleted here are this
+// cursor's.
 func (r *FanoutRunner) cleanUpStoppedCursor(key fanoutCursorKey, byName map[string]topic.Topic) {
+	if r.metrics != nil {
+		label := fanoutPartitionLabel(key.partition)
+		r.metrics.FanoutLagMessages.DeleteLabelValues(key.parent, key.child, label)
+		r.metrics.FanoutDueLagSeconds.DeleteLabelValues(key.parent, key.child, label)
+	}
 	child, ok := byName[key.child]
 	if ok && child.IsChild() && child.Parent == key.parent && child.AttachEpoch == key.epoch {
 		return // link still live; cursor stopped for another reason

@@ -99,9 +99,10 @@ func NewRouterWithOptions(h *handlers.Set, log *slog.Logger, m *metrics.Metrics,
 		// Cluster operations: partition rebalance/decommission control and
 		// placement visibility.
 		mux.HandleFunc("POST /v1/cluster/members/{id}/decommission", httpcluster.Decommission(h))
-		mux.HandleFunc("DELETE /v1/cluster/members/{id}/decommission", httpcluster.Decommission(h))
+		mux.HandleFunc("DELETE /v1/cluster/members/{id}/decommission", httpcluster.CancelDecommission(h))
 		mux.HandleFunc("POST /v1/cluster/members/{id}/forget", httpcluster.Forget(h))
 		mux.HandleFunc("GET /v1/cluster/moves", httpcluster.Moves(h))
+		mux.HandleFunc("POST /v1/cluster/moves/{topic}/{partition}/abort", httpcluster.AbortMove(h))
 		mux.HandleFunc("GET /v1/cluster/members", httpcluster.Members(h))
 	}
 

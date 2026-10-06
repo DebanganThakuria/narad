@@ -207,9 +207,13 @@ Inspect partition placement and drain nodes. Every command needs the `admin` gra
 
 | Command | What it does |
 |---|---|
-| `narad cluster members` | List members with their status, owned partitions and moves under way, as JSON. |
-| `narad cluster moves` | List partitions moving between nodes, as JSON. |
-| `narad cluster decommission <node-id>` | Mark a node for decommission: its partitions move to the other nodes, then it leaves the Raft voters. |
+| `narad cluster members` | List members with their status, owned partitions and moves under way, as JSON. Unreleased: also each member's voter and leader flags, heartbeat age and, while it drains, why its decommission is blocked. |
+| `narad cluster members --detail` (unreleased) | Also ask every member for its own status: dispatch backlog, quarantined partition copies and move workers. |
+| `narad cluster moves` | List partitions moving between nodes, as JSON. Unreleased: also each side's status and why a move is blocked. |
+| `narad cluster moves --detail` (unreleased) | Also ask each destination for its move worker's report. |
+| `narad cluster moves abort <topic> <partition>` (unreleased) | Clear a move's target, so the partition stays with its owner. `--target <node-id>` refuses the abort when the move now targets another node. |
+| `narad cluster decommission <node-id>` | Mark a node for decommission: its partitions move to the other nodes, then it leaves the Raft voters. Unreleased: refused, with every reason, when the node could never be removed safely. |
+| `narad cluster decommission <node-id> --dry-run` (unreleased) | Report whether the node could be decommissioned, and why not, without changing anything. |
 | `narad cluster decommission <node-id> --cancel` | Stop a decommission. The node keeps the partitions it still has and takes new ones again. |
 | `narad cluster members forget <node-id>` | **Unreleased.** Remove a Raft voter or non-voter that has no member record, such as a joiner that never registered. Refused for a server with a member record (decommission it instead), one a partition assignment names, or a voter whose removal could leave the cluster without a quorum. Prints `{"id":...,"voter":...}`. See [Troubleshooting](../operate/troubleshooting.md#raft-server-no-member-record). |
 
@@ -221,14 +225,61 @@ narad cluster members
 {
   "members": [
     {
-      "id": "narad-0",
-      "addr": "127.0.0.1:17970",
+      "id": "narad-1",
+      "addr": "127.0.0.1:18181",
       "status": "alive",
       "draining": false,
-      "owned_partitions": 6,
-      "outbound_moves": 0
+      "owned_partitions": 4,
+      "outbound_moves": 0,
+      "voter": true,
+      "leader": false,
+      "heartbeat_age_seconds": 3
+    },
+    {
+      "id": "narad-2",
+      "addr": "127.0.0.1:18182",
+      "status": "alive",
+      "draining": false,
+      "owned_partitions": 4,
+      "outbound_moves": 0,
+      "voter": true,
+      "leader": false,
+      "heartbeat_age_seconds": 4
+    },
+    {
+      "id": "narad-3",
+      "addr": "127.0.0.1:18183",
+      "status": "alive",
+      "draining": false,
+      "owned_partitions": 4,
+      "outbound_moves": 0,
+      "voter": true,
+      "leader": true,
+      "heartbeat_age_seconds": 4
     }
   ]
+}
+```
+
+This output comes from a three-node test cluster on one machine, built from master.
+
+```sh title="Command"
+narad cluster decommission narad-3 --dry-run
+```
+
+```text title="Output"
+{
+  "member": "narad-3",
+  "would_decommission": false,
+  "reasons": [
+    {
+      "code": "below_min_voters",
+      "message": "removing it would leave 2 voters, fewer than the 3 a cluster keeps; add a node first"
+    }
+  ],
+  "voter": true,
+  "owned_partitions": 4,
+  "inbound_moves": 0
 }
 ```
 

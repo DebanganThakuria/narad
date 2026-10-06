@@ -6,16 +6,46 @@ package controller
 // a draining node that owns nothing left and removes it from the Raft
 // configuration, so the pod can be torn down safely.
 //
-// Two guards apply to a voter, per the design (a non-voter, a joiner
-// staged and never promoted, has no vote and cannot lead, so neither
-// applies to it):
-//   - MinVoters: never remove a node if doing so would drop the voter count
-//     below MinVoters (default 3), so a decommission can't take the cluster
-//     below a quorum-safe size.
+// A node is drained only when no assignment names it at all: not as the
+// owner, and not as the target of a move still copying TO it. Moves aimed
+// at a draining node never help its drain, so the pass clears them (the
+// AbortMove compare-and-set) before it looks, and it holds the assignment
+// lock from reading placement until the removal is done, so a topic create
+// on this leader cannot place a partition on the node in between. Without
+// both, a flip or a create landing in that window left a partition owned
+// by a removed node that nothing could route to, move off or reassign.
+// A move whose source is dead or no longer a member is the exception: the
+// draining node may hold the only live copy, which it force-promotes once
+// the source has been dead long enough, and the partition then drains off
+// it as usual. The pass leaves such a move alone and the decommission
+// waits (move_target, at error, saying how to abort it by hand).
+//
+// Guards that apply to a voter (a non-voter, a joiner staged and never
+// promoted, has no vote and cannot lead, so none applies to it):
+//   - CheckVoterRemoval: never remove a voter unless at least MinVoters
+//     voters remain (default 3) and the voters left alive are a strict
+//     majority of them. Dead draining voters are removed before alive
+//     ones, which never lowers the alive count.
 //   - leader-off-departing: a node cannot be cleanly removed from its own
 //     Raft configuration while it leads, so if the drained node is the
 //     current leader the controller transfers leadership away and lets the
 //     new leader finish the removal on its next pass.
+//
+// And for every node: its ingress WAL must have handed every record it
+// accepted to its owner (a zero dispatch backlog, read with NodeStatus)
+// before it leaves Raft, since a removed node's replica freezes and it can
+// never dispatch them after. The backlog counts only once the node itself
+// reports that it refuses client produce and is answering none it
+// admitted before: a drain flip reaches the node's replica some time
+// after it commits, and a produce accepted in between would land in the
+// WAL after a zero backlog was read. A node whose release cannot report
+// its status (3.0.x) is removed without the check, with a warning, as
+// 3.0.x did.
+//
+// A decommission that cannot progress says why: DecommissionBlockers names
+// the reasons, each change is logged once (error when it needs an
+// operator, warn when it clears on its own), and
+// narad_decommission_blocked{node,reason} is 1 while it holds.
 //
 // Removal has two halves that must both land: RemoveServer takes the node
 // out of the Raft configuration, and RemoveMember deletes its member record
@@ -33,7 +63,10 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -45,76 +78,243 @@ func (c *Controller) reconcileDecommission(ctx context.Context) {
 	}
 	c.planMu.Lock()
 	defer c.planMu.Unlock()
+	t := c.term(ctx)
 	if err := c.store.Barrier(); err != nil {
 		return
 	}
+	c.noteBarrier(t)
 
 	members, err := c.store.ListMembers()
 	if err != nil {
 		return
 	}
-	var draining []string
-	for _, m := range members {
-		if m.Draining {
-			draining = append(draining, m.ID)
-		}
-	}
+	draining := drainingMembers(members)
 	if len(draining) == 0 {
+		c.syncDecomBlocked(t, nil)
 		return
 	}
+	// Ask the draining nodes for their status before taking the
+	// assignment lock, so a slow or unreachable node never holds topic
+	// creates up for the length of a status call.
+	statuses := c.drainingStatuses(ctx, draining)
 
-	// A draining node is "drained" when it owns no partition. In-flight moves
-	// off it keep it as OwnerID until the CAS flip, so this is only true once
-	// every move has completed.
-	stillOwns, ok := c.ownersInUse(ctx)
+	// From reading placement to the last removal, no topic create on this
+	// leader may place a partition: it could land on a node about to go.
+	unlock := c.store.LockAssignments()
+	defer unlock()
+
+	usage, ok := c.placementUsage(ctx)
 	if !ok {
 		return
 	}
-	for _, id := range draining {
-		if stillOwns[id] {
-			continue // moves still in flight; wait
-		}
-		c.removeDrainedNode(ctx, id)
+	drainingSet := make(map[string]bool, len(draining))
+	for _, m := range draining {
+		drainingSet[m.ID] = true
 	}
+	status := memberStatuses(members)
+	if c.abortMovesTo(ctx, usage.inFlight, drainingSet, status) > 0 {
+		// A flip may have landed before its abort: read placement again.
+		if usage, ok = c.placementUsage(ctx); !ok {
+			return
+		}
+	}
+
+	blocked := map[string][]Blocker{}
+	for _, m := range draining {
+		voters, err := c.store.Voters()
+		if err != nil {
+			return
+		}
+		leaderID := c.store.LeaderID()
+		nodeStatus := statuses[m.ID]
+		if nodeStatus == nil && c.cfg.NodeStatus != nil && m.ID != leaderID {
+			// Not asked this pass (it led when the statuses were read):
+			// never remove a node whose backlog was not read.
+			nodeStatus = &NodeStatusResult{Err: errors.New("its status was not read this pass")}
+		}
+		if bs := DecommissionBlockers(DecommissionView{
+			Node: m, Members: members, Voters: voters, LeaderID: leaderID,
+			MinVoters: c.cfg.MinVoters, MaxInFlightMoves: c.cfg.MaxInFlightMoves,
+			Owned: usage.owned[m.ID], Outbound: usage.outbound[m.ID], Inbound: usage.inbound[m.ID],
+			InFlight: len(usage.inFlight), Status: nodeStatus,
+			InboundFromDeadSource: inboundFromDeadSource(usage.inFlight, m.ID, status),
+		}); len(bs) > 0 {
+			blocked[m.ID] = bs
+			if bs[0].Code == BlockedLeaderTransfer {
+				// Can't remove the leader from its own config. Hand
+				// leadership off; the new leader finishes the removal.
+				_ = c.store.TransferLeadership()
+			}
+			continue
+		}
+		if usage.owned[m.ID] > 0 {
+			continue // moves off it still to run or in flight; wait
+		}
+		c.removeDrainedNode(ctx, m.ID, members, nodeStatus)
+	}
+	c.syncDecomBlocked(t, blocked)
 }
 
-// ownersInUse reports which nodes currently own at least one partition. ok is
-// false on a transient read failure — better to defer removals a tick than
-// remove a node whose remaining partitions we failed to see.
-func (c *Controller) ownersInUse(ctx context.Context) (map[string]bool, bool) {
+// drainingMembers returns the draining members in removal order: dead
+// ones first (removing a dead voter never lowers the alive count, and it
+// makes the next removal safer), then by ID.
+func drainingMembers(members []metastore.Member) []metastore.Member {
+	var draining []metastore.Member
+	for _, m := range members {
+		if m.Draining {
+			draining = append(draining, m)
+		}
+	}
+	slices.SortFunc(draining, func(a, b metastore.Member) int {
+		aDead, bDead := a.Status == metastore.MemberDead, b.Status == metastore.MemberDead
+		switch {
+		case aDead && !bDead:
+			return -1
+		case bDead && !aDead:
+			return 1
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return draining
+}
+
+// placement is who the assignments name: how many partitions each node
+// owns, how many of those are moving off it, how many moves aim at it,
+// and the in-flight moves.
+type placement struct {
+	owned    map[string]int
+	outbound map[string]int
+	inbound  map[string]int
+	inFlight []metastore.Assignment
+}
+
+// placementUsage reads every topic's assignments. ok is false on a
+// transient read failure: better to defer removals a tick than remove a
+// node whose remaining partitions we failed to see.
+func (c *Controller) placementUsage(ctx context.Context) (placement, bool) {
 	topics, _, err := c.store.ListTopics(ctx, metastore.ListOptions{})
 	if err != nil {
-		return nil, false
+		return placement{}, false
 	}
-	owners := map[string]bool{}
+	u := placement{owned: map[string]int{}, outbound: map[string]int{}, inbound: map[string]int{}}
 	for _, t := range topics {
 		assignments, err := c.store.ListAssignments(t.Name)
 		if err != nil {
-			return nil, false
+			return placement{}, false
 		}
 		for _, a := range assignments {
-			owners[a.OwnerID] = true
+			u.owned[a.OwnerID]++
+			if a.TargetID != "" {
+				u.outbound[a.OwnerID]++
+				u.inbound[a.TargetID]++
+				u.inFlight = append(u.inFlight, a)
+			}
 		}
 	}
-	return owners, true
+	return u, true
+}
+
+// abortMovesTo clears, through the AbortMove compare-and-set, every
+// in-flight move whose target is in targets, and returns how many it
+// cleared. The owner never changed, so the partition stays where its data
+// is; a destination that still finishes its copy finds its flip refused.
+// A move whose source is dead or no longer a member is left alone: its
+// target may hold the only live copy (the decommission reports it as a
+// move_target that needs an operator).
+func (c *Controller) abortMovesTo(ctx context.Context, inFlight []metastore.Assignment, targets map[string]bool, status map[string]metastore.MemberStatus) int {
+	cleared := 0
+	for _, a := range inFlight {
+		if !targets[a.TargetID] || sourceGone(a.OwnerID, status) {
+			continue
+		}
+		if err := c.store.AbortMove(ctx, a.Topic, a.Partition, a.TargetID); err != nil {
+			c.logger().Warn("controller: clearing a move aimed at a draining node failed; retrying next pass",
+				"topic", a.Topic, "partition", a.Partition, "target", a.TargetID, "err", err)
+			continue
+		}
+		c.logger().Info("controller: move target cleared: the target is being decommissioned",
+			"topic", a.Topic, "partition", a.Partition, "owner", a.OwnerID, "target", a.TargetID)
+		cleared++
+	}
+	return cleared
+}
+
+// inboundFromDeadSource counts the in-flight moves into node whose source
+// is dead or no longer a member.
+func inboundFromDeadSource(inFlight []metastore.Assignment, node string, status map[string]metastore.MemberStatus) int {
+	n := 0
+	for _, a := range inFlight {
+		if a.TargetID == node && sourceGone(a.OwnerID, status) {
+			n++
+		}
+	}
+	return n
+}
+
+// nodeStatusTimeout bounds one NodeStatus call, and nodeStatusConcurrency
+// how many run at once.
+const (
+	nodeStatusTimeout     = 2 * time.Second
+	nodeStatusConcurrency = 4
+)
+
+// drainingStatuses asks every draining node but the leader itself (which
+// hands leadership off before anything else) for its status. A node
+// marked dead is asked too: one that still answers can be checked. Nil
+// when NodeStatus is not configured: no status reasons apply then.
+func (c *Controller) drainingStatuses(ctx context.Context, draining []metastore.Member) map[string]*NodeStatusResult {
+	if c.cfg.NodeStatus == nil {
+		return nil
+	}
+	leaderID := c.store.LeaderID()
+	out := make(map[string]*NodeStatusResult, len(draining))
+	var (
+		mu  sync.Mutex
+		wg  sync.WaitGroup
+		sem = make(chan struct{}, nodeStatusConcurrency)
+	)
+	for _, m := range draining {
+		if m.ID == leaderID {
+			continue
+		}
+		if strings.TrimSpace(m.Addr) == "" {
+			out[m.ID] = &NodeStatusResult{Err: errors.New("it has no node RPC address on record")}
+			continue
+		}
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			sctx, cancel := context.WithTimeout(ctx, nodeStatusTimeout)
+			st, err := c.cfg.NodeStatus(sctx, m.Addr)
+			cancel()
+			if err != nil && m.Status == metastore.MemberDead && !errors.Is(err, ErrNodeStatusUnsupported) {
+				err = errors.New("it is dead and does not answer: " + err.Error())
+			}
+			mu.Lock()
+			out[m.ID] = &NodeStatusResult{Status: st, Err: err}
+			mu.Unlock()
+		})
+	}
+	wg.Wait()
+	return out
 }
 
 // removeDrainedNode removes a fully-drained node from the Raft
 // configuration, then forgets its member record. A voter is removed only
-// when the MinVoters and leader-off-departing guards allow. A non-voter
-// (a joiner that was staged and never promoted) is removed without
-// them: it carries no quorum weight and cannot be the leader. The record
-// is deleted only once the node is out of the configuration: it is the
-// tombstone that stops the departed pod's heartbeats from resurrecting
-// it.
-func (c *Controller) removeDrainedNode(ctx context.Context, id string) {
+// when CheckVoterRemoval and the leader-off-departing guard allow. A
+// non-voter (a joiner that was staged and never promoted) is removed
+// without them: it carries no quorum weight and cannot be the leader. The
+// record is deleted only once the node is out of the configuration: it is
+// the tombstone that stops the departed pod's heartbeats from resurrecting
+// it. The caller has already read the node's dispatch backlog.
+func (c *Controller) removeDrainedNode(ctx context.Context, id string, members []metastore.Member, status *NodeStatusResult) {
 	voters, err := c.store.Voters()
 	if err != nil {
 		return
 	}
 	if containsStr(voters, id) {
-		if len(voters) <= c.cfg.MinVoters {
-			return // removal would drop below the quorum-safe floor; leave it
+		if err := CheckVoterRemoval(voters, members, id, c.cfg.MinVoters); err != nil {
+			return // DecommissionBlockers reports why
 		}
 		if c.store.LeaderID() == id {
 			// Can't remove the leader from its own config. Hand leadership off;
@@ -122,21 +322,97 @@ func (c *Controller) removeDrainedNode(ctx context.Context, id string) {
 			_ = c.store.TransferLeadership()
 			return
 		}
+		c.warnBacklogUnchecked(id, status)
 		if err := c.store.RemoveServer(id); err != nil {
+			c.logger().Warn("controller: removing a drained voter from Raft failed; retrying next pass", "node", id, "err", err)
 			return // still a voter; retry next tick
 		}
+		c.logger().Warn("controller: decommissioned node removed from the Raft voters", "node", id, "voters_before", voters)
 	} else {
 		nonvoters, err := c.store.Nonvoters()
 		if err != nil {
 			return
 		}
 		if containsStr(nonvoters, id) {
+			c.warnBacklogUnchecked(id, status)
 			if err := c.store.RemoveServer(id); err != nil {
+				c.logger().Warn("controller: removing a drained non-voter from Raft failed; retrying next pass", "node", id, "err", err)
 				return // still a non-voter; retry next tick
+			}
+			c.logger().Warn("controller: decommissioned node removed from the Raft non-voters", "node", id)
+		}
+	}
+	if err := c.store.RemoveMember(ctx, id, c.clock().Unix()); err != nil {
+		c.logger().Warn("controller: forgetting a decommissioned member failed; retrying next pass", "node", id, "err", err)
+		return
+	}
+	c.logger().Info("controller: decommissioned member removed", "node", id)
+	if status != nil && status.Err == nil && status.Status.QuarantinedCopies > 0 {
+		c.logger().Error("controller: the decommissioned node holds quarantined partition copies that may be the only instance of some records; keep its volume until they are checked (troubleshooting: quarantined copies)",
+			"node", id, "copies", status.Status.QuarantinedCopies)
+	}
+}
+
+// warnBacklogUnchecked says that a node is leaving Raft without its
+// dispatch backlog read, because its release cannot report it.
+func (c *Controller) warnBacklogUnchecked(id string, status *NodeStatusResult) {
+	if status != nil && errors.Is(status.Err, ErrNodeStatusUnsupported) {
+		c.logger().Warn("controller: removing a drained node whose release cannot report its dispatch backlog; it was not checked (records only its ingress WAL holds are lost if its volume is deleted before it dispatches them)",
+			"node", id)
+	}
+}
+
+// syncDecomBlocked exports this pass's blocked decommissions: it logs
+// each reason that is new for its node (error when it needs an operator,
+// warn when it clears on its own), sets its series, and deletes the
+// series of reasons that no longer hold.
+func (c *Controller) syncDecomBlocked(t *leaderTerm, blocked map[string][]Blocker) {
+	t.mu.Lock()
+	prev := t.blocked
+	next := make(map[string]map[string]bool, len(blocked))
+	for node, bs := range blocked {
+		next[node] = make(map[string]bool, len(bs))
+		for _, b := range bs {
+			next[node][b.Code] = b.needsOperator()
+		}
+	}
+	t.blocked = next
+	t.mu.Unlock()
+
+	c.publish(t, func() {
+		for node, reasons := range prev {
+			for reason := range reasons {
+				if _, still := next[node][reason]; !still {
+					c.m.clearDecomBlocked(node, reason)
+				}
+			}
+		}
+		for node, reasons := range next {
+			for reason := range reasons {
+				c.m.setDecomBlocked(node, reason)
+			}
+		}
+	})
+	for node, reasons := range prev {
+		if _, still := next[node]; !still && len(reasons) > 0 {
+			c.logger().Info("controller: decommission no longer blocked", "node", node)
+		}
+	}
+	for node, bs := range blocked {
+		for _, b := range bs {
+			// Log a reason when it is new for the node, or when it
+			// turned from one that clears on its own into one that
+			// needs an operator (or back).
+			if was, seen := prev[node][b.Code]; seen && was == b.needsOperator() {
+				continue
+			}
+			if b.needsOperator() {
+				c.logger().Error("controller: decommission blocked", "node", node, "reason", b.Code, "detail", b.Message)
+			} else {
+				c.logger().Warn("controller: decommission waiting", "node", node, "reason", b.Code, "detail", b.Message)
 			}
 		}
 	}
-	_ = c.store.RemoveMember(ctx, id, time.Now().Unix())
 }
 
 func containsStr(ss []string, s string) bool {

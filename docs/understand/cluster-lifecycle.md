@@ -68,7 +68,7 @@ New nodes receive partition assignments for topics created *after* they join, an
 
 ## Decommission removal {#decommission-removal}
 
-A [decommission](../reference/glossary.md#decommission) ends with `RemoveServer`, which takes the node, voter or non-voter, out of the Raft configuration. That alone leaves the member record behind. The pod keeps running until the operator scales it away, its heartbeat keeps registering it again through the leader, and it stays listed as alive and draining forever, walked on every route-table rebuild and delete broadcast. After the pod is deleted, the record would linger as dead forever.
+A [decommission](../reference/glossary.md#decommission) ends with `RemoveServer`, which takes the node, voter or non-voter, out of the Raft configuration. Before it, the leader asks the node for its dispatch backlog over node RPC and waits until its ingress WAL has handed every accepted message to its owner (unreleased): once removed, the node's replica no longer follows the cluster and it could never dispatch them. A node on v3.0.1 cannot answer and is removed without the check, as before. That alone leaves the member record behind. The pod keeps running until the operator scales it away, its heartbeat keeps registering it again through the leader, and it stays listed as alive and draining forever, walked on every route-table rebuild and delete broadcast. After the pod is deleted, the record would linger as dead forever.
 
 So the controller applies a second Raft entry right after the configuration change: **remove member**, which deletes the record and leaves a tombstone for the ID. The state machine refuses to register a tombstoned ID, so no heartbeat can bring it back. The join handler answers `409` to the old incarnation of the node (still running, or restarted with its old volume), which therefore cannot undo its own decommission through the join loop.
 
@@ -76,7 +76,7 @@ A join request that declares an **empty data directory** is a deliberate re-add:
 
 ## Steady-state behaviour {#steady-state}
 
-- Every node heartbeats its membership to the leader every 5 s; 30 s of silence marks it dead. A heartbeat from a removed (tombstoned) ID is refused.
+- Every node heartbeats its membership to the leader every 5 s; 30 s of silence marks it dead. A heartbeat from a removed (tombstoned) ID is refused. The leader judges that silence on its own clock (unreleased): a new leader first runs a Raft `Barrier`, so it has applied every heartbeat earlier leaders committed, and then gives every member one full 30 s from its own election, since no leader stamps a heartbeat while the cluster has none ([Election grace and the dead-marking breaker](#election-grace)).
 - `/readyz` is live: a node answers ready only while it has a leader in view, has heard from it within 5 s (or is the leader), and its ownership view has caught up once since start. Losing the leader turns it not ready again.
 - A dead node's partitions are **not** reassigned, because their data is on that node's disk. Produce reroutes around them, and a consume pinned to one of them fails until the node returns.
 - Graceful shutdown transfers Raft leadership first, so planned restarts fail over in about 150 ms.
@@ -120,6 +120,16 @@ These scenarios ran under 300 messages per second of soak traffic, with a Redis 
 
 Every scenario ended with bounded duplicates (the at-least-once seams) and `OVERDUE = 0`, the harness's loss detector.
 
+## Election grace and the dead-marking breaker {#election-grace}
+
+**Unreleased:** in master, not in v3.0.1.
+
+A member's heartbeat is a Raft write the leader stamps with its own clock when it applies it, and the leader marks a member dead when that stamp is older than 30 s. Two things made a new leader misjudge stamps it inherited. Its state machine may still be applying entries earlier leaders committed, fresher heartbeats among them. And while the cluster had no leader, nobody stamped anything, so after a leaderless stretch longer than 30 s every stamp looked stale: v3.0.1 marked live members dead on the new leader's first pass, routing then treated their partitions as down, and past 2 minutes the leader aborted moves aimed at them.
+
+So each leadership term starts with a Raft `Barrier` before the leader reads the member table, and a member is marked dead only once the leader's own loop has run for the dead timeout, measured on its monotonic clock, and the member's stamp is older than that. The same rule holds for clearing a move to a dead destination after 2 minutes. A member that heartbeats within the grace is never marked.
+
+A heartbeat reaches the leader over the node RPC plane, while the leader's authority comes from Raft, and a Raft leader steps down once it has not heard from a quorum of voters for its lease. A leader that still runs its loop is therefore in touch with most voters over Raft. When a heartbeat pass would mark so many voters dead that fewer than a quorum stay alive (the leader counts itself), the leader refuses the verdict for every voter in it: the likelier fault is its own node RPC plane, a blocked port or a mismatched secret, and marking live voters dead would make every node route around live owners. It logs `controller: refusing to mark voters dead` at error once per refusing streak and sets `narad_dead_marking_refused` to 1 ([Troubleshooting](../operate/troubleshooting.md#log-dead-marking-refused)). Members that are not voters are judged as before. The breaker cannot hide a real failure: if most voters were down, this node could not still be leading. Five voters with two crashed leaves three alive, a quorum, and both are marked. It does nothing on its own beyond refusing: no leadership transfer, no switch.
+
 ## Lifecycle constants {#constants}
 
 | Thing | Value |
@@ -129,7 +139,7 @@ Every scenario ended with bounded duplicates (the at-least-once seams) and `OVER
 | Promotion request | every 2s once the non-voter's replica has caught up, until it is a voter |
 | Promotion rules | the leader has led 12s; its heartbeats to the joiner are not failing (a failure counts for 12s); the member record is alive and not draining |
 | Graceful leadership transfer | about 150ms; election after a crash about 1s |
-| Heartbeat / dead marking | 5s / 30s |
+| Heartbeat / dead marking | 5s / 30s; a new leader waits 30s on its own clock, after a `Barrier`, before marking anyone (unreleased) |
 | Startup reconcile wait for caught-up | up to 60s (the sweep is skipped on timeout, so data is never deleted in a hurry). The timeout never marks the node ready; it keeps waiting |
 | Readiness | live: leader in view, contact within 5s (or the node is the leader), ownership latch set |
 | Leaderless join | a node with no leader for 15s runs the join loop |

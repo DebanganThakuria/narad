@@ -48,6 +48,7 @@ const (
 	OpTokenRegister
 	OpTokenNotify
 	OpAckBatch
+	OpNodeStatus
 	// OpForgetServer asks the leader to remove a Raft server that has no
 	// member record (ForgetServerRequest).
 	OpForgetServer

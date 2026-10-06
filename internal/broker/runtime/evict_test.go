@@ -6,9 +6,11 @@ package runtime
 // its durable state (records + high watermark) intact.
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
@@ -211,5 +213,99 @@ func TestEvictionRacesProduceSafely(t *testing.T) {
 	}
 	if l.NextOffset() != records {
 		t.Fatalf("NextOffset = %d, want %d (records lost across evictions)", l.NextOffset(), records)
+	}
+}
+
+// sealedRetentionLog opens a 7d-retention partition holding three
+// sealed segments, idle for a day.
+func sealedRetentionLog(t *testing.T) *Logs {
+	t.Helper()
+	ms := newRuntimeFakeMetastore()
+	ms.topics["abandoned"] = topic.Topic{Name: "abandoned", Partitions: 1, RetentionMs: (7 * 24 * time.Hour).Milliseconds()}
+	g := NewLogs(t.TempDir(), storage.Options{
+		FlushInterval: 5 * time.Millisecond,
+		SegmentBytes:  1, // every synced frame seals a segment
+		Retention:     storage.RetentionConfig{CheckInterval: time.Minute},
+	}, ms, nil)
+	t.Cleanup(func() { _ = g.CloseAll() })
+	for _, rec := range []string{"a", "b", "c"} {
+		appendAndCommit(t, g, "abandoned", 0, rec)
+	}
+	l, _ := g.Peek("abandoned", 0)
+	if l.SegmentCount() <= 1 {
+		t.Fatalf("setup: want sealed segments, have %d", l.SegmentCount())
+	}
+	backdate(t, g, "abandoned", 0, 24*time.Hour)
+	return g
+}
+
+// With the cold walk running, an idle retention log with sealed
+// segments is evicted: the walk reaps a closed log, so keeping it open
+// only cost a flusher, descriptors and caches for up to its whole
+// retention.
+func TestIdleEvictionClosesAMultiSegmentRetentionLogWhenTheColdWalkRuns(t *testing.T) {
+	g := sealedRetentionLog(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		g.RunColdRetention(ctx, time.Hour)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for g.EvictIdleOnce(time.Nanosecond) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("an idle 7d log with sealed segments stayed open although the cold walk runs")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, open := g.Peek("abandoned", 0); open {
+		t.Fatal("the evicted log is still open")
+	}
+	cancel()
+	<-done
+}
+
+// Without the walk the old rule stands: closing would strand the sealed
+// segments until the partition is next opened.
+func TestIdleEvictionKeepsItWithoutTheColdWalk(t *testing.T) {
+	g := sealedRetentionLog(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	g.RunColdRetention(ctx, 0) // the walk is off: returns at once
+	for range 3 {
+		if n := g.EvictIdleOnce(time.Nanosecond); n != 0 {
+			t.Fatalf("EvictIdleOnce = %d with the cold walk off, want 0", n)
+		}
+	}
+	if _, open := g.Peek("abandoned", 0); !open {
+		t.Fatal("a log with sealed segments was evicted with the cold walk off")
+	}
+}
+
+// The walk reaps what eviction closed once it expires, and the offsets
+// carry on where they were.
+func TestColdWalkReapsAnEvictedMultiSegmentLog(t *testing.T) {
+	g := sealedRetentionLog(t)
+	g.coldWalkOn.Store(true)
+	l, _ := g.Peek("abandoned", 0)
+	next := l.NextOffset()
+	if n := g.EvictIdleOnce(time.Nanosecond); n != 1 {
+		t.Fatalf("EvictIdleOnce = %d, want 1", n)
+	}
+	ageSegments(t, g, "abandoned", 0, 8*24*time.Hour)
+	swept, err := g.ColdRetentionOnce(context.Background(), time.Now())
+	if err != nil || swept != 1 {
+		t.Fatalf("walk after expiry = %d, %v; want 1, nil", swept, err)
+	}
+	if got := segmentFiles(t, g, "abandoned", 0); len(got) != 1 {
+		t.Fatalf("after the walk want one active segment, have %v", got)
+	}
+	l2, err := g.Get("abandoned", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l2.NextOffset() != next {
+		t.Fatalf("NextOffset after the reap = %d, want %d", l2.NextOffset(), next)
 	}
 }

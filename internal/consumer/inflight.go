@@ -41,8 +41,10 @@ var (
 // write fails.
 type CommitFunc func(topic string, partition int, offset int64)
 
-// CapsResolver returns per-topic in-flight limits. Called once at shard
-// creation; update live shards via RefreshCaps when caps change.
+// CapsResolver returns per-topic in-flight limits. Called at shard
+// creation, and again for a topic whose record moved when a version
+// source is wired (SetCapsVersions); RefreshCaps updates live shards
+// directly.
 type CapsResolver func(ctx context.Context, topic string) (Caps, error)
 
 // CommittedRecoverFunc returns the durably committed consumer offset for
@@ -119,6 +121,10 @@ type InFlight struct {
 	// directory now at the path, or to be persisted into it. Reserves,
 	// acks and lookups of an existing shard never take it.
 	createMu sync.RWMutex
+
+	// capsFollowState lets live shards follow caps alters applied
+	// through the local replica (see SetCapsVersions).
+	capsFollowState
 }
 
 // NewInFlight creates an InFlight tracker. onCommit may be nil (no
@@ -287,6 +293,7 @@ func (f *InFlight) DropTopic(topic string) {
 		return true
 	})
 	f.createMu.Unlock()
+	f.forgetCaps(topic)
 	if f.onDrop != nil {
 		for _, p := range dropped {
 			f.onDrop(topic, p)
@@ -364,15 +371,23 @@ func (f *InFlight) shard(topic string, partition int) *partitionShard {
 // first shard stored wins and the loser is discarded.
 func (f *InFlight) shardOrCreate(ctx context.Context, topic string, partition int) (*partitionShard, error) {
 	if sh := f.shard(topic, partition); sh != nil {
+		f.checkCaps(ctx)
 		return sh, nil
 	}
 
+	// The version is read before the caps, so caps resolved from an
+	// older record than the version says are caught (noteShardCaps).
+	var version uint64
+	if f.capsVersions != nil {
+		version = f.capsVersions.TopicVersion(topic)
+	}
 	caps, err := f.resolvedCaps(ctx, topic)
 	if err != nil {
 		return nil, err
 	}
 
 	sh, stored, recovered, advanced := f.recoverShard(topic, partition, caps)
+	f.noteShardCaps(ctx, topic, version)
 	// Outside the create fence: onCommit is the committer's, and a drop
 	// must not wait on it.
 	if stored && advanced > recovered && f.onCommit != nil {

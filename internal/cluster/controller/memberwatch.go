@@ -19,9 +19,8 @@ const memberWatchInterval = 250 * time.Millisecond
 // after /readyz, so a topic created then gets no owners from the create
 // path; it used to wait up to a full reconcile interval (10 s) for the
 // sweep, with produces parked in the ingress WAL and consumers getting
-// empty answers. The same happens after a full-cluster restart that
-// outlasts DeadTimeout, when the new leader's first heartbeat check
-// marks every stale member dead.
+// empty answers. The same happens after a full-cluster restart, while
+// members are still re-registering with the new leader.
 //
 // The out-of-cycle pass is debounced. Members register a few hundred
 // milliseconds apart, and a pass run on the first arrival would hand

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"sync"
@@ -1428,5 +1429,114 @@ func TestMoveRunnerRollbackLeavesARecreatedTopicsPartitionAlone(t *testing.T) {
 				t.Fatalf("the rollback moved the partition's directory into the move's staging (stat err %v)", err)
 			}
 		})
+	}
+}
+
+// sourceRecordStore answers the move source's member record with status,
+// or with errs.ErrNotFound when gone is set.
+type sourceRecordStore struct {
+	*fakeMoveStore
+	status metastore.MemberStatus
+	gone   bool
+}
+
+func (s sourceRecordStore) GetMember(id string) (metastore.Member, error) {
+	if id != "narad-src" {
+		return s.fakeMoveStore.GetMember(id)
+	}
+	if s.gone {
+		return metastore.Member{}, fmt.Errorf("member %s: %w", id, errs.ErrNotFound)
+	}
+	return metastore.Member{ID: id, Addr: "srcaddr", Status: s.status}, nil
+}
+
+const deadSourceStagingLog = "move: set aside the staging copy of a move that ended while its source is dead"
+
+// A move that ends without a flip while its source is dead (its target
+// was cleared, or the node is shutting down) holds a copy of a
+// partition whose other copy is on a node that may never come back: the
+// worker sets it aside and says so at error instead of deleting it. A
+// live source still has the partition and an empty copy holds nothing,
+// so those are removed as before.
+func TestMoveEndedWhileTheSourceIsDeadSetsItsStagingAside(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		status       metastore.MemberStatus
+		gone         bool
+		records      int
+		wantSetAside bool
+	}{
+		{name: "the source is dead", status: metastore.MemberDead, records: 3, wantSetAside: true},
+		{name: "the source has no member record", gone: true, records: 3, wantSetAside: true},
+		{name: "the source is alive", status: metastore.MemberAlive, records: 3},
+		{name: "the copy holds no records", status: metastore.MemberDead},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The move was aborted: the source still owns the partition and
+			// nothing targets it.
+			store := sourceRecordStore{fakeMoveStore: &fakeMoveStore{
+				assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src"},
+			}, status: tc.status, gone: tc.gone}
+			logs := &recordedLog{}
+			dataDir := t.TempDir()
+			r := NewMoveRunner(store, "narad-dst", dataDir, movePeerFake{}, nil, nil, slog.New(logs), MoveConfig{})
+			w := &moveWorker{r: r, topic: "orders", partition: 0, source: "narad-src", staging: r.stagingDir("orders", 0)}
+			if tc.records > 0 {
+				buildSourcePartition(t, w.staging, tc.records)
+			} else if err := os.MkdirAll(w.staging, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			w.finish()
+			if _, err := os.Stat(w.staging); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the staging copy is still at the staging path (stat err %v): the next worker's start clears that path", err)
+			}
+			q := quarantinesOf(t, w.staging)
+			if got := len(q) == 1; got != tc.wantSetAside {
+				t.Fatalf("staging set aside = %v (quarantines %v), want %v", got, q, tc.wantSetAside)
+			}
+			if got := logs.count(slog.LevelError, deadSourceStagingLog); (got == 1) != tc.wantSetAside {
+				t.Fatalf("logged %q %d times at error, want set aside %v", deadSourceStagingLog, got, tc.wantSetAside)
+			}
+			if tc.wantSetAside {
+				if n := nextOffsetAt(t, q[0]); n != int64(tc.records) {
+					t.Fatalf("the copy set aside recovers next offset %d, want %d", n, tc.records)
+				}
+			}
+		})
+	}
+}
+
+const deadSourceBehindLog = "cannot force-promote"
+
+// A destination whose copy is behind a dead source's last high
+// watermark cannot force-promote and waits for the source. It says so
+// once at error each time the source dies, not at warn every
+// RetryBackoff.
+func TestMoveLogsADeadSourceWithACopyBehindOnce(t *testing.T) {
+	logs := &recordedLog{}
+	store, clock, _, _, _, _, stop := startDeadSourceScenario(t, 3, slog.New(logs))
+	defer stop()
+	died := func() {
+		t.Helper()
+		store.dead.Store(true)
+		store.awaitReads(t, 3)
+		clock.Advance(3 * time.Minute)
+		store.awaitReads(t, 10) // each read past ForcePromoteAfter tries a force-promote
+	}
+	died()
+	if got := logs.count(slog.LevelWarn, deadSourceBehindLog); got != 0 {
+		t.Fatalf("logged %q %d times at warn while the source stayed dead, want none", deadSourceBehindLog, got)
+	}
+	if got := logs.count(slog.LevelError, deadSourceBehindLog); got != 1 {
+		t.Fatalf("logged %q %d times at error while the source stayed dead, want once", deadSourceBehindLog, got)
+	}
+	store.dead.Store(false)
+	store.awaitReads(t, 3)
+	died()
+	if got := logs.count(slog.LevelError, deadSourceBehindLog); got != 2 {
+		t.Fatalf("logged %q %d times at error after the source died a second time, want twice", deadSourceBehindLog, got)
+	}
+	if store.flipped() {
+		t.Fatal("force-promoted a copy behind the source's last high watermark")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -367,3 +368,105 @@ func (stubBroker) RegisterRemoteDemand(context.Context, string, brokermsg.Remote
 func (stubBroker) DropRemoteDemand(string, brokermsg.RemoteDemand) {}
 
 func (stubBroker) NoteRemoteClaim(string) {}
+
+// An alter reaches a non-leader owner only through its replica, where
+// nothing calls RefreshCaps: the InFlight serve builds must read the
+// replica's topic versions, so a live shard follows the applied caps.
+func TestServeGivesInFlightTheTopicVersions(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.Storage.DataDir = t.TempDir()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := singleNodeStore(t)
+	bc, err := buildBroker(cfg, "node-1", store, schema.NewAlwaysValid(), metrics.New(prometheus.NewRegistry()), log)
+	if err != nil {
+		t.Fatalf("buildBroker() error = %v", err)
+	}
+	t.Cleanup(func() { _ = bc.broker.Close() })
+
+	if err := store.CreateTopic(ctx, topic.Topic{
+		Name: "orders", Partitions: 1, RetentionMs: topic.MinRetentionMs,
+		MaxInFlightPerPartition: 1, MaxAckedAheadPerPartition: 100,
+	}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if r, err := bc.offsets.ReserveNext(ctx, "orders", 0, time.Minute, 100); err != nil || !r.Reserved {
+		t.Fatalf("first reserve = %+v, %v", r, err)
+	}
+	if r, err := bc.offsets.ReserveNext(ctx, "orders", 0, time.Minute, 100); err != nil || r.SkipReason != "cap" {
+		t.Fatalf("second reserve under cap 1 = %+v, %v", r, err)
+	}
+
+	rec, err := store.GetTopic(ctx, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.MaxInFlightPerPartition = 10
+	if err := store.UpdateTopic(ctx, rec); err != nil {
+		t.Fatalf("UpdateTopic() error = %v", err)
+	}
+	if r, err := bc.offsets.ReserveNext(ctx, "orders", 0, time.Minute, 100); err != nil || !r.Reserved {
+		t.Fatalf("the live shard is still capped at 1 after the replica applied cap 10: %+v, %v", r, err)
+	}
+}
+
+// The cold retention walk serve builds opens only partitions the local
+// assignment gives this node: a due copy of a partition another node
+// owns stays as it is.
+func TestServeKeepsTheColdWalkToOwnedPartitions(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.Storage.DataDir = t.TempDir()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := singleNodeStore(t)
+	bc, err := buildBroker(cfg, "node-1", store, schema.NewAlwaysValid(), metrics.New(prometheus.NewRegistry()), log)
+	if err != nil {
+		t.Fatalf("buildBroker() error = %v", err)
+	}
+	t.Cleanup(func() { _ = bc.broker.Close() })
+
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2, RetentionMs: topic.MinRetentionMs}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	for p, owner := range []string{"node-1", "node-2"} {
+		if err := store.AssignPartition(ctx, "orders", p, owner); err != nil {
+			t.Fatalf("AssignPartition(%d) error = %v", p, err)
+		}
+		l, err := bc.logs.Get("orders", p)
+		if err != nil {
+			t.Fatalf("Get(%d) error = %v", p, err)
+		}
+		if _, err := l.Append(storage.EncodeKeyedRecord("", 1, []byte("x"))); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.AdvanceHighWatermark(l.NextOffset()); err != nil {
+			t.Fatal(err)
+		}
+		if err := bc.logs.ClosePartition("orders", p); err != nil {
+			t.Fatal(err)
+		}
+		dir := storage.TopicPartitionDir(cfg.Storage.DataDir, "orders", p)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-2 * time.Hour)
+		for _, e := range entries {
+			if e.Type().IsRegular() {
+				if err := os.Chtimes(filepath.Join(dir, e.Name()), old, old); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	swept, err := bc.logs.ColdRetentionOnce(ctx, time.Now())
+	if err != nil {
+		t.Fatalf("ColdRetentionOnce() error = %v", err)
+	}
+	if swept != 1 {
+		t.Fatalf("the walk swept %d partitions, want 1: it must leave node-2's partition alone", swept)
+	}
+}
