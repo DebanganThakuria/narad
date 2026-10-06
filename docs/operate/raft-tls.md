@@ -67,11 +67,11 @@ Create both secrets (the security secret from [Deploy on Kubernetes](deploy-kube
 helm install narad ./charts/narad -n narad \
   --set replicaCount=3 \
   --set persistence.size=50Gi \
-  --set image.tag=v3.0.1 \
+  --set image.tag=v3.1.0 \
   --set security.clusterTLS.enabled=true
 ```
 
-With TLS on, the chart never tells the node that plaintext Raft is fenced, so `security.allowPlaintextRaft` does not matter. The chart's NetworkPolicy, on by default, still keeps the node RPC plane (7942/udp) and Raft to the Narad pods ([Fence the cluster ports](production-checklist.md#network-policy); unreleased, the v3.0.1 chart has no policy).
+With TLS on, the chart never tells the node that plaintext Raft is fenced, so `security.allowPlaintextRaft` does not matter. The chart's NetworkPolicy, on by default, still keeps the node RPC plane (7942/udp) and Raft to the Narad pods ([Fence the cluster ports](production-checklist.md#network-policy); new in v3.1.0: the v3.0.1 chart has no policy).
 
 Each node logs which transport it runs. Check one:
 
@@ -127,7 +127,7 @@ A node on TLS and a node on plaintext cannot talk Raft to each other, so the swi
 
 ## Watch the expiry {#expiry}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 Each node exports when its certificate and the earliest-expiring CA in its bundle expire, as `narad_raft_tls_cert_not_after_seconds` with `kind="leaf"` and `kind="ca"` ([Metrics reference](../reference/metrics.md#metastore-raft)). Alert well ahead, for example on `narad_raft_tls_cert_not_after_seconds - time() < 7 * 86400` ([Monitor and alert](monitoring.md#node-health-alerts)). The node also checks the dates at startup and then every hour, and logs:
 

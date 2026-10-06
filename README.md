@@ -78,7 +78,7 @@ Terminate TLS at an ingress in front of Narad. Details in
 ## Container image
 
 ```sh
-docker run --rm -p 7942:7942 -p 7943:7943 ghcr.io/debanganthakuria/narad:v3.0.1
+docker run --rm -p 7942:7942 -p 7943:7943 ghcr.io/debanganthakuria/narad:v3.1.0
 ```
 
 Port `7942` is the API, `7943` is cluster traffic, `/var/lib/narad` is the data directory.

@@ -71,7 +71,7 @@ Three primitives implement this:
 
 ## Snapshots {#snapshots}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 Raft compacts its log into a snapshot of the metadata database once 8192 entries have piled up since the last one (checked about every 120 s; both are [configurable](../reference/configuration.md#cluster)), and keeps the newest two. A node that falls too far behind gets the leader's latest snapshot instead of the entries it missed, and a restarting node may restore its own.
 
@@ -81,7 +81,7 @@ The copy needs free disk equal to `fsm.db`'s size (`narad_metastore_fsm_bytes`),
 
 ## Restarts {#restarts}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 `fsm.db` outlives the process, and Raft hands the FSM its log again on every start: from index 1 when there is no snapshot yet, or the tail after the latest snapshot. Each entry's index is written into `fsm.db` (the `fsm_meta` bucket) in the same transaction as its effects, and a refused entry's index in a small transaction of its own, so the FSM skips every entry the database already holds. No entry is applied twice, and an entry that was refused when it first applied (an attach whose schemas did not match, say) cannot succeed on one node's replay.
 
@@ -101,7 +101,7 @@ A snapshot is not taken while `fsm.db` is ahead of what the replay has handed it
 
 ## When a node stops applying {#fail-stop}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 Every node must apply every committed entry, in order, or its replica parts from the others for good. Two failures are local to one node, and that node stops instead of skipping the entry:
 
@@ -116,7 +116,7 @@ A database or snapshot that has applied an entry type newer than the build knows
 
 ## Raft entry types and upgrades {#entry-types}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 Each metadata change is a Raft entry of one type (create topic, register member, and so on), and a release that adds a type must not propose it while a node that does not know it is in the cluster. A 3.0.x node skips such an entry silently, and a later release stops applying ([above](#fail-stop)). So during a rolling upgrade the cluster keeps writing the entry types every member knows:
 
@@ -160,7 +160,7 @@ Leadership transfer on graceful shutdown makes planned restarts nearly seamless 
 
 A dead node's partitions are **not reassigned**, because their data lives only on that node's disk. The cluster waits for the node, and its volume, to come back, and the produce path routes around the dead [owner](../reference/glossary.md#owner) meanwhile (see [Produce path](produce-path.md#dispatch)). Assignments do move in a [rebalance or decommission](rebalance.md), which copies each partition to its new owner before ownership changes.
 
-The first seconds of a cluster need care. A partition placed on the only member registered so far is soon moved by rebalance, and a topic created before any member registered used to wait for the controller's 10 s tick, with produces parked and consumers answered `204`. So (unreleased):
+The first seconds of a cluster need care. A partition placed on the only member registered so far is soon moved by rebalance, and a topic created before any member registered used to wait for the controller's 10 s tick, with produces parked and consumers answered `204`. So, from v3.1.0:
 
 - A node retries its member registration every 250 ms until it first succeeds, then heartbeats at the normal 5 s.
 - The leader watches membership every 250 ms, and runs its assignment and rebalance passes outside the 10 s tick when a member turns alive (new, or back after a restart). The pass waits until every Raft voter is alive, or until 1 s after the latest arrival if a voter is still missing.
@@ -187,7 +187,7 @@ The first seconds of a cluster need care. A partition placed on the only member 
 | Joiner older than every member | refused with `409`, code `older_release`; the leader logs it at error at most once a minute per joiner |
 | Startup reconcile wait for caught-up | up to 60s, then the destructive sweep is skipped rather than rushed |
 
-Schema history is **append-only** and capped at 1000 versions per topic, and (unreleased) at 4 MiB of stored versions per topic and 256 MiB for every schema in the cluster, counting each fan-out child's copy; the leader checks the byte budgets before it proposes, and once every member applies the [compare-and-set schema entry types](#new-entry-types) the state machine checks them again. `opPutSchema` is applied only when the version is exactly the topic's persisted latest plus one and within the cap (and the same for every fan-out child's copy). The proposer (the topics manager on the leader) reads the persisted history, checks compatibility against the persisted latest, and proposes latest plus one. A proposer working from a stale view can therefore never overwrite an earlier version on any replica; it gets `ErrAlreadyExists`, reads again and retries.
+Schema history is **append-only** and capped at 1000 versions per topic, and (from v3.1.0) at 4 MiB of stored versions per topic and 256 MiB for every schema in the cluster, counting each fan-out child's copy; the leader checks the byte budgets before it proposes, and once every member applies the [compare-and-set schema entry types](#new-entry-types) the state machine checks them again. `opPutSchema` is applied only when the version is exactly the topic's persisted latest plus one and within the cap (and the same for every fan-out child's copy). The proposer (the topics manager on the leader) reads the persisted history, checks compatibility against the persisted latest, and proposes latest plus one. A proposer working from a stale view can therefore never overwrite an earlier version on any replica; it gets `ErrAlreadyExists`, reads again and retries.
 
 The produce path keys its loaded schema by the topic's schema version counter and reloads when that moves. So a version registered on another node, a delete and recreate under the same name, or a schema adopted at attach time is picked up on the next produce. A reload reads only the latest version and runs as one flight per topic: every produce waiting on it shares one metastore read and one compile, and a flight that raced a newer schema change loads again, so the last schema compiled on a node is always the newest.
 

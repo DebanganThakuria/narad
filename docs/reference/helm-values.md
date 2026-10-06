@@ -34,8 +34,8 @@ The chart lives in the repository at [`charts/narad`](https://github.com/Debanga
 | `servicemonitor.yaml`<br>ServiceMonitor | `serviceMonitor.enabled` | Scraping by the Prometheus Operator. |
 | `pdb.yaml`<br>PodDisruptionBudget | `podDisruptionBudget.enabled` | At most one pod down at a time during voluntary evictions, whatever the cluster size. |
 | `serviceaccount.yaml`<br>ServiceAccount | `serviceAccount.create` | A service account that mounts no API token. |
-| `networkpolicy.yaml`<br>NetworkPolicy | `networkPolicy.enabled`, on by default | Admits Raft and the node RPC plane from the release's own pods only (unreleased); see [Network policy](#network-policy). |
-| `scalein-guard-job.yaml`<br>Job `<name>-scale-in-guard`, a hook | `scaleInGuard.enabled` | Runs before every `helm upgrade` and `helm rollback`, and refuses one that would delete pods that are still cluster members (unreleased); see [Scale in](../operate/scaling.md#scale-in). |
+| `networkpolicy.yaml`<br>NetworkPolicy | `networkPolicy.enabled`, on by default | Admits Raft and the node RPC plane from the release's own pods only (from v3.1.0); see [Network policy](#network-policy). |
+| `scalein-guard-job.yaml`<br>Job `<name>-scale-in-guard`, a hook | `scaleInGuard.enabled` | Runs before every `helm upgrade` and `helm rollback`, and refuses one that would delete pods that are still cluster members (from v3.1.0); see [Scale in](../operate/scaling.md#scale-in). |
 | `validate.yaml`<br>none | always | Stops a render that would break the cluster; see below. |
 
 `validate.yaml` fails the install or upgrade when:
@@ -43,8 +43,8 @@ The chart lives in the repository at [`charts/narad`](https://github.com/Debanga
 - `initialClusterSize` is less than 1 or even;
 - `replicaCount` is less than `initialClusterSize`;
 - `clusterPeerCount` (when set) is less than `initialClusterSize`;
-- `security.enabled` is on, `security.clusterTLS.enabled` is off, `networkPolicy.enabled` is turned off, and `security.allowPlaintextRaft` does not say the Raft port is fenced some other way (unreleased). The message names the three fixes; see [Production checklist](../operate/production-checklist.md#raft-tls).
-- `replicaCount` is lower than the running StatefulSet's replicas and `allowScaleInTo` is not that new `replicaCount` (unreleased; it used to be `allowScaleIn: true`, which is no longer read). `helm template` cannot see the running StatefulSet, so this check runs only on a real install or upgrade, and `helm rollback` never runs it: the scale-in guard Job covers rollbacks.
+- `security.enabled` is on, `security.clusterTLS.enabled` is off, `networkPolicy.enabled` is turned off, and `security.allowPlaintextRaft` does not say the Raft port is fenced some other way (from v3.1.0). The message names the three fixes; see [Production checklist](../operate/production-checklist.md#raft-tls).
+- `replicaCount` is lower than the running StatefulSet's replicas and `allowScaleInTo` is not that new `replicaCount` (from v3.1.0; it used to be `allowScaleIn: true`, which is no longer read). `helm template` cannot see the running StatefulSet, so this check runs only on a real install or upgrade, and `helm rollback` never runs it: the scale-in guard Job covers rollbacks.
 
 For example, an even `initialClusterSize`:
 
@@ -69,8 +69,8 @@ Each table lists the value with its default in `values.yaml` under it, and what 
 | `replicaCount`<br>default `3` | The number of nodes. The only number you change to scale. Raising it adds nodes that join the existing cluster. Lowering it is a scale-in, and so is a rollback to a revision with fewer replicas: decommission the highest-numbered pods first, then set `allowScaleInTo`. See [Scale out and in](../operate/scaling.md). |
 | `initialClusterSize`<br>default `3` | The pods (`narad-0` up to `narad-N-1`) that may bootstrap a new Raft cluster; the rest join it. Odd, at least 1. Set it once at the first install and never change it. Sets [`cluster.initial_members`](configuration.md#cluster). |
 | `clusterPeerCount`<br>default `0` | The size of the peer list every pod gets. `0` means `initialClusterSize`. It is part of the pod template, so changing it rolls every pod; each pod also advertises its own address, so pods beyond the list work normally. Sets [`cluster.peers`](configuration.md#cluster). |
-| `allowScaleInTo`<br>default `0` | Allows lowering a running StatefulSet's replicas to this one `replicaCount` (unreleased). Set it to the new size once `narad cluster members` no longer lists the pods being removed. It approves that size only, so a value kept by `--reuse-values` does not approve a later scale-in to another size. It replaces `allowScaleIn`, which is no longer read. |
-| `scaleInGuard.enabled`<br>default `true` | Renders the scale-in guard, a hook Job that runs before every `helm upgrade` and `helm rollback` (unreleased). A change that deletes no pod passes without calling the API. On a scale-in the guard reads `narad cluster members` as `admin` with the security Secret's `admin-password` key, and refuses while a pod being deleted is still listed, when it cannot read the list (a list with no members counts as unreadable), or when DNS lookups fail so it cannot tell which pods exist (it checks DNS with the API server's Service, `kubernetes.default.svc`, so a release with no pod yet, as on a first Argo CD sync, deletes none and passes). It needs no Kubernetes API access and runs as the namespace's `default` ServiceAccount with no token mounted (the account `serviceAccount.name` names when `serviceAccount.create=false`), so a first Argo CD sync does not wait for the ServiceAccount this chart creates. `--no-hooks` skips it for one command. See [Scale in](../operate/scaling.md#scale-in). |
+| `allowScaleInTo`<br>default `0` | Allows lowering a running StatefulSet's replicas to this one `replicaCount` (from v3.1.0). Set it to the new size once `narad cluster members` no longer lists the pods being removed. It approves that size only, so a value kept by `--reuse-values` does not approve a later scale-in to another size. It replaces `allowScaleIn`, which is no longer read. |
+| `scaleInGuard.enabled`<br>default `true` | Renders the scale-in guard, a hook Job that runs before every `helm upgrade` and `helm rollback` (from v3.1.0). A change that deletes no pod passes without calling the API. On a scale-in the guard reads `narad cluster members` as `admin` with the security Secret's `admin-password` key, and refuses while a pod being deleted is still listed, when it cannot read the list (a list with no members counts as unreadable), or when DNS lookups fail so it cannot tell which pods exist (it checks DNS with the API server's Service, `kubernetes.default.svc`, so a release with no pod yet, as on a first Argo CD sync, deletes none and passes). It needs no Kubernetes API access and runs as the namespace's `default` ServiceAccount with no token mounted (the account `serviceAccount.name` names when `serviceAccount.create=false`), so a first Argo CD sync does not wait for the ServiceAccount this chart creates. `--no-hooks` skips it for one command. See [Scale in](../operate/scaling.md#scale-in). |
 | `clusterDomain`<br>default `cluster.local` | The Kubernetes cluster domain, used in the pods' DNS names. |
 | `nameOverride`, `fullnameOverride`<br>default `""` | Rename the chart's objects. |
 
@@ -81,7 +81,7 @@ The three sizes are separate on purpose. A fresh install with `replicaCount: 7` 
 | Value | What it does |
 |---|---|
 | `image.repository`<br>default `ghcr.io/debanganthakuria/narad` | The image. |
-| `image.tag`<br>default `latest` | The image tag. Pin a release, such as `v3.0.1`, so every pod runs the same build. |
+| `image.tag`<br>default `latest` | The image tag. Pin a release, such as `v3.1.0`, so every pod runs the same build. |
 | `image.pullPolicy`<br>default `IfNotPresent` |  |
 | `imagePullSecrets`<br>default `[]` | Pull secrets for a private registry. |
 
@@ -106,7 +106,7 @@ A values file that turns compression on:
 
 ```yaml title="values-prod.yaml"
 image:
-  tag: v3.0.1
+  tag: v3.1.0
 narad:
   config:
     storage:
@@ -126,7 +126,7 @@ narad:
 | `security.clusterTLS.secretName`<br>default `narad-cluster-tls` | The Secret holding the Raft CA and node certificate. |
 | `security.clusterTLS.mountPath`<br>default `/etc/narad/cluster-tls` | Where that Secret is mounted. |
 | `security.clusterTLS.certKey`, `.keyKey`, `.caKey`<br>default `tls.crt`, `tls.key`, `ca.crt` | The keys in that Secret. Set [the three `cluster_tls_*` files](configuration.md#logging-and-security). |
-| `security.allowPlaintextRaft`<br>default `false` | Says that something outside the chart fences 7943/tcp and 7942/udp to the Narad pods: your own NetworkPolicy, a service mesh, a firewall. While `clusterTLS` is off, it or `networkPolicy.enabled` sets [`security.allow_plaintext_raft`](configuration.md#logging-and-security); with neither, a secured install fails. The default was `true` before (unreleased). |
+| `security.allowPlaintextRaft`<br>default `false` | Says that something outside the chart fences 7943/tcp and 7942/udp to the Narad pods: your own NetworkPolicy, a service mesh, a firewall. While `clusterTLS` is off, it or `networkPolicy.enabled` sets [`security.allow_plaintext_raft`](configuration.md#logging-and-security); with neither, a secured install fails. The default was `true` before v3.1.0. |
 | `security.allowInsecureCluster`<br>default `false` | With `security.enabled: false`, sets [`security.allow_insecure_cluster`](configuration.md#logging-and-security), without which several nodes refuse to start with security off. |
 | `security.allowLegacyClusterAuth`<br>default `false` | Sets [`security.allow_legacy_cluster_auth`](configuration.md#logging-and-security), for one rolling upgrade across the change in node-to-node authentication. Not needed for a fresh install. |
 
@@ -134,7 +134,7 @@ What to set before production traffic is in the [Production checklist](../operat
 
 ### Network policy {#network-policy}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 | Value | What it does |
 |---|---|
@@ -195,7 +195,7 @@ Narad keeps one copy of each partition, on the volume of the node that owns it. 
 
 | Value | What it does |
 |---|---|
-| `resources`<br>default requests `cpu: 500m`, `memory: 512Mi`; no limits | Container resources. A memory limit also sets Go's soft memory limit to 90% of it (unreleased; see [Go runtime](configuration.md#go-runtime)). |
+| `resources`<br>default requests `cpu: 500m`, `memory: 512Mi`; no limits | Container resources. A memory limit also sets Go's soft memory limit to 90% of it (from v3.1.0; see [Go runtime](configuration.md#go-runtime)). |
 | `terminationGracePeriodSeconds`<br>default `30` | Time a stopping pod gets before it is killed. Give it enough to shut down cleanly: the HTTP drain (up to `http.shutdown_grace`, 10 s by default), then up to about 2 ms per partition written to since it was opened (measured on local disk under Linux; more on a network volume), so the default covers roughly 10,000 such partitions. |
 | `podManagementPolicy`<br>default `Parallel` | Pods start and stop together rather than one by one. |
 | `updateStrategy`<br>default `type: RollingUpdate` |  |
@@ -262,7 +262,7 @@ The chart reads credentials from a Secret named `<name>-security` (`narad-securi
 | Key | Required | Meaning |
 |---|---|---|
 | `cluster-secret` | yes, with `security.enabled` | The secret nodes prove to each other on the node-to-node port ([`NARAD_CLUSTER_SECRET`](configuration.md#logging-and-security)). A pod does not start without it. |
-| `admin-password` | no | The root admin's password ([`NARAD_ADMIN_PASSWORD`](configuration.md#logging-and-security)). Left out, the node that creates the root admin generates one and writes it to `/var/lib/narad/admin-password` on its own volume (unreleased; it used to be logged once). See [Manage the root user](../operate/users.md#root-admin). |
+| `admin-password` | no | The root admin's password ([`NARAD_ADMIN_PASSWORD`](configuration.md#logging-and-security)). Left out, the node that creates the root admin generates one and writes it to `/var/lib/narad/admin-password` on its own volume (from v3.1.0; it used to be logged once). See [Manage the root user](../operate/users.md#root-admin). |
 
 ```sh title="Command"
 kubectl create secret generic narad-security \

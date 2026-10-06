@@ -18,12 +18,12 @@ Everything the CLI does is also plain HTTP, so you never need it in production c
     brew install debanganthakuria/narad/narad
     ```
 
-    The formula builds v3.0.1 from source, which takes a minute or more, and installs shell completions for bash, zsh and fish.
+    The formula builds v3.1.0 from source, which takes a minute or more, and installs shell completions for bash, zsh and fish.
 
 === "From source"
 
     ```sh
-    git clone --branch v3.0.1 --depth 1 https://github.com/DebanganThakuria/narad
+    git clone --branch v3.1.0 --depth 1 https://github.com/DebanganThakuria/narad
     cd narad
     make build
     ./bin/narad version
@@ -70,7 +70,7 @@ narad pub demo '{"hello":"narad"}' --count 100 --rate 20
 accepted 100 messages in 5.008s (20 msg/s)
 ```
 
-The messages appear in the second terminal as they are committed, one line each: partition, offset, the local time the message was committed (to the second) and the payload. The CLI of v3.0.1 prints a wrong time there, a time of day from January 1970 (unreleased fix).
+The messages appear in the second terminal as they are committed, one line each: partition, offset, the local time the message was committed (to the second) and the payload. The CLI of v3.0.1 prints a wrong time there, a time of day from January 1970 (fixed in v3.1.0).
 
 ```text title="Output in the second terminal, first lines"
 [p0 @0] 03:07:33 {"hello":"narad"}
@@ -91,7 +91,7 @@ Stop it with Ctrl-C, and it prints how many messages it saw.
 
 Both print payloads as they are: JSON verbatim, other text as text, and binary data as a hex dump with its size. `--raw` prints payloads only, for piping into other tools.
 
-**Unreleased:** in master, not in v3.0.1. A key that is not valid UTF-8 prints in hex, marked `(binary)`. While a partition's owner is down, `--peek` refuses to start (unless `--partition` and `--from` give the start), and `narad replay` of that partition fails, both naming the partition and its owner, rather than starting it at offset 0. `narad server report` marks such a topic `[k of n partitions unavailable]` and leaves those partitions out of its totals.
+**New in v3.1.0.** A key that is not valid UTF-8 prints in hex, marked `(binary)`. While a partition's owner is down, `--peek` refuses to start (unless `--partition` and `--from` give the start), and `narad replay` of that partition fails, both naming the partition and its owner, rather than starting it at offset 0. `narad server report` marks such a topic `[k of n partitions unavailable]` and leaves those partitions out of its totals.
 
 ## Switch clusters with contexts {#contexts}
 

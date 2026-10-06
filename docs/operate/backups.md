@@ -86,7 +86,7 @@ So check the placement after you create a replica and after every change to the 
 - **Nothing fails over on its own.** If the parent's node is lost for good, point consumers at `orders-replica` yourself. They receive every message the replica still holds, including ones already handled through the parent, because the replica has its own consumer position. Handlers must be idempotent anyway.
 - **It costs what a second topic costs:** twice the disk and twice the write I/O, for the topics that have a replica.
 - **Create it in one call.** A child created on its own and attached later keeps the placement it got at creation, which ignores the parent.
-- **Some records can share a node.** A record that does not sit on the partition its key hashes to (produced with an explicit `partition`, or moved to a sibling while its owner was unreachable) is copied by key, to another index, so its two copies can share a node. A message without a key keeps its parent partition's index (unreleased; v3.0.1 gives it a generated key, which behaves like any other key).
+- **Some records can share a node.** A record that does not sit on the partition its key hashes to (produced with an explicit `partition`, or moved to a sibling while its owner was unreachable) is copied by key, to another index, so its two copies can share a node. A message without a key keeps its parent partition's index (from v3.1.0; v3.0.1 gives it a generated key, which behaves like any other key).
 
 ## Take volume snapshots {#volume-snapshots}
 

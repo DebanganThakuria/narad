@@ -2,7 +2,7 @@
 
 > Narad is a message broker in one Go binary: POST a message to any node over HTTP and get 202 once it is fsynced; consumers pull it under a lease and ack. Delivery is at least once, with no ordering guarantee.
 
-These docs track the master branch; the latest release is v3.0.1, and anything newer is marked "Unreleased" on its page.
+These docs track the master branch; the latest release is v3.1.0, what it added is marked "New in v3.1.0", and anything newer is marked "Unreleased" on its page.
 
 ## Start here
 

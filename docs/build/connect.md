@@ -134,7 +134,7 @@ Date: Mon, 28 Sep 2026 19:18:45 GMT
 | Request body | 1 MiB (1,048,576 bytes) | [`413`](../reference/status-codes.md#status-413) |
 | Request headers | 64 KiB, `http.max_header_bytes` | `431`, with a plain-text body from Go's HTTP server |
 | Concurrent consume requests per identity, per node | 1024, `http.max_consume_in_flight_per_identity` | [`429`](../reference/status-codes.md#status-429) |
-| Concurrent produce requests per identity, per node (unreleased) | off, `http.max_produce_in_flight_per_identity` | [`429`](../reference/status-codes.md#status-429) |
+| Concurrent produce requests per identity, per node (v3.1.0) | off, `http.max_produce_in_flight_per_identity` | [`429`](../reference/status-codes.md#status-429) |
 | Long-poll `wait` on a consume | 10 s, `http.max_consume_wait` | clamped, with an `X-Narad-Wait-Clamped` response header |
 | Open connections per node | 4096, `http.max_connections` | extra connections wait to be accepted |
 

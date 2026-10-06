@@ -100,7 +100,7 @@ What the Narad row is and is not: the run ended because the **load generator sat
 
 ### Same compute, measured ourselves {#same-compute-measured-ourselves}
 
-Published numbers come from different hardware, years and vendors. So in August 2026 we also ran every self-hostable system here on **identical resources**, and reran Narad on 2026-10-01 from master (**Unreleased**: the produce, consume and ack work since v3.0.1): one broker at a time in Docker, 2 CPUs and 2 GB each, with the same driver and workload. The workload was 50,000 messages of 256 bytes. Every produce waited for the system's per-message confirmation, then a full consume and ack drain followed. Each system ran as a single node with no replication, in its default durable configuration.
+Published numbers come from different hardware, years and vendors. So in August 2026 we also ran every self-hostable system here on **identical resources**, and reran Narad on 2026-10-01 from master (the produce, consume and ack work since v3.0.1, which shipped in **v3.1.0**): one broker at a time in Docker, 2 CPUs and 2 GB each, with the same driver and workload. The workload was 50,000 messages of 256 bytes. Every produce waited for the system's per-message confirmation, then a full consume and ack drain followed. Each system ran as a single node with no replication, in its default durable configuration.
 
 The runs were laptop-grade (the Narad row is the median of three runs, the others are single runs), so treat the ordering as directional. It is still the only table on this page where "similar compute" is literally true.
 
@@ -113,7 +113,7 @@ The runs were laptop-grade (the Narad row is the median of three runs, the other
 | **Narad** (October 2026) | 10,454 | 1.5 / 2.5 ms | 9,239 | **fsynced** (group commit) before the 202 |
 | **Pulsar** (standalone) | 7,632 | 2.0 / 3.0 ms | 10,984 | standalone disables the journal fsync |
 
-The ordering mostly follows the durability column: the systems that do not fsync per confirm lead the produce column. Within the fsync-per-confirm class, RabbitMQ's quorum queue produced about 1.25 times faster than Narad on this workload and consumed and acked about 1.55 times faster. Narad's plain-HTTP consume also pays two round trips per message (consume, then ack) where binary protocols pipeline; the batch forms (**Unreleased**), which carry up to 100 messages a round trip, were not used here. Both are real costs of the plain-HTTP design. Every system finished with zero produce failures and a full drain.
+The ordering mostly follows the durability column: the systems that do not fsync per confirm lead the produce column. Within the fsync-per-confirm class, RabbitMQ's quorum queue produced about 1.25 times faster than Narad on this workload and consumed and acked about 1.55 times faster. Narad's plain-HTTP consume also pays two round trips per message (consume, then ack) where binary protocols pipeline; the batch forms (**v3.1.0**), which carry up to 100 messages a round trip, were not used here. Both are real costs of the plain-HTTP design. Every system finished with zero produce failures and a full drain.
 
 ## Running cost {#running-cost}
 

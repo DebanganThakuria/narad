@@ -34,7 +34,7 @@ A metrics listener also serves `/healthz` and `/readyz`. Keep it inside the clus
 
 Gauges that describe partitions (lag, sizes, segments) are refreshed by a poller every 5 seconds. A partition that moved to another node loses its series on this node at the next refresh, so summing across nodes by `topic` and `partition` does not count it twice.
 
-**Unreleased:** the poller runs two loops, both every 5 seconds. The vitals loop refreshes `narad_ingress_wal_failed`, `narad_ingress_dispatch_backlog_records`, `narad_open_partition_logs`, `narad_reaper_restarts` and `narad_data_dir_available_bytes`, each with a 2-second limit, so a slow broker snapshot or a hung volume does not freeze the others. The inventory loop refreshes everything that comes from the broker snapshot and the data-directory walk. Each loop's last finished pass is in `narad_poller_last_success_timestamp_seconds` ([below](#cluster-misc)).
+**New in v3.1.0:** the poller runs two loops, both every 5 seconds. The vitals loop refreshes `narad_ingress_wal_failed`, `narad_ingress_dispatch_backlog_records`, `narad_open_partition_logs`, `narad_reaper_restarts` and `narad_data_dir_available_bytes`, each with a 2-second limit, so a slow broker snapshot or a hung volume does not freeze the others. The inventory loop refreshes everything that comes from the broker snapshot and the data-directory walk. Each loop's last finished pass is in `narad_poller_last_success_timestamp_seconds` ([below](#cluster-misc)).
 
 ## Traffic {#traffic}
 
@@ -53,11 +53,11 @@ Gauges that describe partitions (lag, sizes, segments) are refreshed by a poller
 | `narad_http_response_bytes_out_total`<br>counter; labels `route` | Response bytes. |
 | `narad_http_requests_in_flight`<br>gauge; no labels | HTTP requests being served. |
 
-The HTTP series count requests, not messages. A batch produce (**Unreleased**) has its own route, `POST /v1/topics/{topic}/produce/batch`. A batch consume and a batch ack use the single-message routes, and a batch ack answers `200` where a single ack answers `204`. One batch carries up to 100 messages, so take message rates from `narad_messages_produced_total` and `narad_messages_consumed_total`. A panel that selects `route=~".*/produce"` misses batch produces, and one that counts acks as `status="204"` misses batch acks.
+The HTTP series count requests, not messages. A batch produce (**v3.1.0**) has its own route, `POST /v1/topics/{topic}/produce/batch`. A batch consume and a batch ack use the single-message routes, and a batch ack answers `200` where a single ack answers `204`. One batch carries up to 100 messages, so take message rates from `narad_messages_produced_total` and `narad_messages_consumed_total`. A panel that selects `route=~".*/produce"` misses batch produces, and one that counts acks as `status="204"` misses batch acks.
 
 ## Schema validation {#schema-validation}
 
-**Unreleased.** These series are process-wide on each node, with no `topic` label.
+**New in v3.1.0.** These series are process-wide on each node, with no `topic` label.
 
 | Series | Meaning |
 |---|---|
@@ -94,7 +94,7 @@ The ack answers that found no lease (`410`):
 narad_http_requests_total{route="POST /v1/topics/{topic}/ack",status="410"}
 ```
 
-**Unreleased:** in master, the per-partition gauges on this page (queue health, and the partition size and segment counts) are also exported for partitions whose log is closed, read from disk at most every 30 seconds. A partition with no consumer state loaded reports its stored frontier rather than 0. `narad_partitions_total` and `narad_topic_bytes` count those partitions too, so both can step up after an upgrade to master without any growth.
+**New in v3.1.0:** the per-partition gauges on this page (queue health, and the partition size and segment counts) are also exported for partitions whose log is closed, read from disk at most every 30 seconds. A partition with no consumer state loaded reports its stored frontier rather than 0. `narad_partitions_total` and `narad_topic_bytes` count those partitions too, so both can step up after an upgrade to v3.1.0 without any growth.
 
 ## Fan-out {#fan-out}
 
@@ -114,7 +114,7 @@ narad_http_requests_total{route="POST /v1/topics/{topic}/ack",status="410"}
 | `narad_storage_fsync_duration_seconds`<br>histogram; labels `topic`, `partition` | Time spent syncing partition files to disk. |
 | `narad_storage_flush_duration_seconds`<br>histogram; labels `topic`, `partition` | Time spent writing buffered records to segment files. |
 | `narad_storage_flush_bytes_total`<br>counter; labels `topic`, `partition` | Bytes written to segment files. |
-| `narad_storage_high_watermark_persist_duration_seconds`<br>histogram; labels `topic`, `partition`, `outcome` | Time spent writing a partition's `hwm` file (`outcome` `ok` or `error`). In master this happens at most once per log open and once per close, not once per commit, so its rate does not follow commits. |
+| `narad_storage_high_watermark_persist_duration_seconds`<br>histogram; labels `topic`, `partition`, `outcome` | Time spent writing a partition's `hwm` file (`outcome` `ok` or `error`). From v3.1.0 this happens at most once per log open and once per close, not once per commit, so its rate does not follow commits. |
 | `narad_storage_retention_bytes_deleted_total`<br>counter; labels `topic`, `partition`, `reason` | Bytes deleted by retention (`reason="age"`). |
 | `narad_storage_retention_messages_deleted_total`<br>counter; labels `topic`, `partition`, `reason` | Messages deleted by retention. |
 | `narad_storage_retention_run_duration_seconds`<br>histogram; labels `topic`, `partition` | Time one retention pass took. |
@@ -133,15 +133,15 @@ narad_http_requests_total{route="POST /v1/topics/{topic}/ack",status="410"}
 | `narad_cold_retention_swept_total`<br>counter; no labels | Closed partitions opened to delete expired data, then closed again. |
 | `narad_cold_retention_panics_total`<br>counter; no labels | Closed partitions whose open, sweep or close panicked during the cold retention walk. Each panic was contained: logged at error with the partition and the stack, the partition left alone for 30 minutes, the walk carried on. Any value above 0 is worth a look at the logs. |
 | `narad_reaper_restarts`<br>gauge; no labels | Times the retention loop was replaced because it stopped. Any value above 0 is worth a look at the logs. |
-| `narad_ingress_wal_failed` (unreleased)<br>gauge; no labels | `1` once a write or sync of the node's [ingress WAL](glossary.md#ingress-wal) failed, else `0`. While it is `1`, every produce to the node gets `500` until the node restarts; consume and `/readyz` are not affected, so alert on this gauge. |
-| `narad_ingress_dispatch_backlog_records` (unreleased)<br>gauge; no labels | Records in the ingress WAL that a restart would replay: accepted, but not yet confirmed at their partition owner. Small on a healthy node; a value that stays above 0 while producers are idle means records are not reaching their owners. Wait for 0 on every node before a rollback ([Upgrade Narad](../operate/upgrade.md#roll-back)). |
-| `narad_quarantined_copies` (unreleased)<br>gauge; no labels | Partition copies this node set aside instead of deleting: a stale copy or an earlier copy a move found that the new owner cannot vouch for (`topics/<topic>/p<N>.quarantine*`), a set-aside move staging copy (`.moves/<topic>-<N>.quarantine*`), and a deleted topic incarnation's directory (`topics/<topic>.stale-<id>*`). Any of them may hold the only instance of some records, and Narad never removes one on its own except a deleted incarnation's directory, once the leader confirms the incarnation gone. Refreshed every stale-copy sweep (about 30 s) and at startup, never on a scrape; absent until the first inventory. Alert on a value above 0 ([Troubleshooting](../operate/troubleshooting.md#quarantined-copies)). |
-| `narad_quarantined_bytes` (unreleased)<br>gauge; no labels | Bytes those copies hold. |
-| `narad_orphan_topic_dirs` (unreleased)<br>gauge; no labels | Topic directories of topics this node's replica no longer knows (a deleted topic whose purge never reached this node) that the last sweep left in place: directories without an incarnation marker, which only a restart removes, and directories the leader has not yet confirmed gone. A value that stays above 0 needs a look ([Troubleshooting](../operate/troubleshooting.md#orphan-topic-directories)). |
+| `narad_ingress_wal_failed` (v3.1.0)<br>gauge; no labels | `1` once a write or sync of the node's [ingress WAL](glossary.md#ingress-wal) failed, else `0`. While it is `1`, every produce to the node gets `500` until the node restarts; consume and `/readyz` are not affected, so alert on this gauge. |
+| `narad_ingress_dispatch_backlog_records` (v3.1.0)<br>gauge; no labels | Records in the ingress WAL that a restart would replay: accepted, but not yet confirmed at their partition owner. Small on a healthy node; a value that stays above 0 while producers are idle means records are not reaching their owners. Wait for 0 on every node before a rollback ([Upgrade Narad](../operate/upgrade.md#roll-back)). |
+| `narad_quarantined_copies` (v3.1.0)<br>gauge; no labels | Partition copies this node set aside instead of deleting: a stale copy or an earlier copy a move found that the new owner cannot vouch for (`topics/<topic>/p<N>.quarantine*`), a set-aside move staging copy (`.moves/<topic>-<N>.quarantine*`), and a deleted topic incarnation's directory (`topics/<topic>.stale-<id>*`). Any of them may hold the only instance of some records, and Narad never removes one on its own except a deleted incarnation's directory, once the leader confirms the incarnation gone. Refreshed every stale-copy sweep (about 30 s) and at startup, never on a scrape; absent until the first inventory. Alert on a value above 0 ([Troubleshooting](../operate/troubleshooting.md#quarantined-copies)). |
+| `narad_quarantined_bytes` (v3.1.0)<br>gauge; no labels | Bytes those copies hold. |
+| `narad_orphan_topic_dirs` (v3.1.0)<br>gauge; no labels | Topic directories of topics this node's replica no longer knows (a deleted topic whose purge never reached this node) that the last sweep left in place: directories without an incarnation marker, which only a restart removes, and directories the leader has not yet confirmed gone. A value that stays above 0 needs a look ([Troubleshooting](../operate/troubleshooting.md#orphan-topic-directories)). |
 
 ## Metastore and Raft {#metastore-raft}
 
-Every node holds a full replica of the [metastore](glossary.md#metastore), kept in step by Raft ([Metastore and Raft](../understand/metastore-and-raft.md)). These series are read when Prometheus scrapes, without waiting on Raft, so they still answer while the node's Raft is stuck. All of them are unreleased: in master, not in v3.0.1.
+Every node holds a full replica of the [metastore](glossary.md#metastore), kept in step by Raft ([Metastore and Raft](../understand/metastore-and-raft.md)). These series are read when Prometheus scrapes, without waiting on Raft, so they still answer while the node's Raft is stuck. All of them are new in v3.1.0; v3.0.1 exports none.
 
 | Series | Meaning |
 |---|---|
@@ -169,7 +169,7 @@ Every node holds a full replica of the [metastore](glossary.md#metastore), kept 
 
 | Series | Meaning |
 |---|---|
-| `narad_auth_verify_queued`<br>gauge; no labels | Password checks (bcrypt) admitted and not yet finished, waiting for one of the node's 4 verification slots or running (unreleased). It includes checks whose clients have already gone: they still run. A sustained value above 0 with a rising rate of `401` and `429` answers is a failed-login flood ([Failed-login throttle](../understand/networking-and-security.md#auth-throttle)). |
+| `narad_auth_verify_queued`<br>gauge; no labels | Password checks (bcrypt) admitted and not yet finished, waiting for one of the node's 4 verification slots or running (from v3.1.0). It includes checks whose clients have already gone: they still run. A sustained value above 0 with a rising rate of `401` and `429` answers is a failed-login flood ([Failed-login throttle](../understand/networking-and-security.md#auth-throttle)). |
 
 ## Cluster and other series {#cluster-misc}
 
@@ -181,20 +181,20 @@ Every node holds a full replica of the [metastore](glossary.md#metastore), kept 
 | `narad_moves_total`<br>counter; labels `outcome` | Finished moves: `completed`, or `force_promoted` when the source died and the copy took over. |
 | `narad_moves_duration_seconds`<br>histogram; no labels | Time from a move starting to the ownership change. |
 | `narad_moves_bytes_total`<br>counter; no labels | Bytes copied by finished moves. |
-| `narad_moves_blocked` (unreleased)<br>gauge; labels `reason` | Moves that cannot finish on their own. On a move's destination: `copy_unverifiable` (the staged copy failed verification twice, the second time after a fresh copy, so the node stopped freezing the source; or a dead source's copy fails it) and `source_dead_copy_behind` (the source is dead and the copy is behind its last high watermark, so it cannot be force-promoted). On the leader only: `source_dead` and `target_dead`, the in-flight moves whose source or destination member is dead. Every reason is exported at 0. Alert on a value above 0 ([Troubleshooting](../operate/troubleshooting.md#moves-blocked)). |
+| `narad_moves_blocked` (v3.1.0)<br>gauge; labels `reason` | Moves that cannot finish on their own. On a move's destination: `copy_unverifiable` (the staged copy failed verification twice, the second time after a fresh copy, so the node stopped freezing the source; or a dead source's copy fails it) and `source_dead_copy_behind` (the source is dead and the copy is behind its last high watermark, so it cannot be force-promoted). On the leader only: `source_dead` and `target_dead`, the in-flight moves whose source or destination member is dead. Every reason is exported at 0. Alert on a value above 0 ([Troubleshooting](../operate/troubleshooting.md#moves-blocked)). |
 | `narad_topics_total`<br>gauge; no labels | Topics in the cluster. |
 | `narad_partitions_total`<br>gauge; no labels | Partitions this node owns. |
 | `narad_errors_total`<br>counter; labels `component`, `kind` | Errors by where they happened, for example `http`/`5xx`, `storage`/`fsync_poisoned` or `storage`/`retention_unlink`. |
 | `narad_boot_duration_seconds`<br>gauge; no labels | Time from process start to the API listening, set once. |
-| `narad_poller_last_success_timestamp_seconds` (unreleased)<br>gauge; labels `loop` | When the metrics poller's `vitals` or `inventory` loop last finished a pass, in Unix seconds; until the first, when the poller started. Both loops run every 5 seconds, so more than 30 seconds old means the gauges that loop feeds are frozen. The vitals loop does not count a pass in which a source failed or did not answer within 2 seconds; `narad_errors_total{component="metrics"}` says which source (kind `<source>_timeout`, `<source>_panic` or `<source>`). |
-| `narad_member_heartbeat_failures` (unreleased)<br>gauge; no labels | This node's consecutive failed member heartbeats to the Raft leader, `0` after a success. Heartbeats run every 5 seconds, and the leader marks a member dead after 30 seconds without one. |
-| `narad_member_heartbeat_last_success_timestamp_seconds` (unreleased)<br>gauge; no labels | When this node's last member heartbeat succeeded, in Unix seconds; `0` until the first. |
+| `narad_poller_last_success_timestamp_seconds` (v3.1.0)<br>gauge; labels `loop` | When the metrics poller's `vitals` or `inventory` loop last finished a pass, in Unix seconds; until the first, when the poller started. Both loops run every 5 seconds, so more than 30 seconds old means the gauges that loop feeds are frozen. The vitals loop does not count a pass in which a source failed or did not answer within 2 seconds; `narad_errors_total{component="metrics"}` says which source (kind `<source>_timeout`, `<source>_panic` or `<source>`). |
+| `narad_member_heartbeat_failures` (v3.1.0)<br>gauge; no labels | This node's consecutive failed member heartbeats to the Raft leader, `0` after a success. Heartbeats run every 5 seconds, and the leader marks a member dead after 30 seconds without one. |
+| `narad_member_heartbeat_last_success_timestamp_seconds` (v3.1.0)<br>gauge; no labels | When this node's last member heartbeat succeeded, in Unix seconds; `0` until the first. |
 
 The RPC series count requests, not messages. Under heavy load, forwarded acks, extends and nacks to one owner travel together as one `op="ack_batch"` request (always, for a batch ack with two or more handles for one owner), which `op="ack"`, `op="extend_ack"` and `op="nack"` do not count. Add `ack_batch` to a panel that reads those as the forwarded-ack rate.
 
 ### Cluster controller {#cluster-controller}
 
-**Unreleased:** in master, not in v3.0.1. The controller runs on the Raft leader only, so these series hold a value only there: every other node, and a node that lost leadership, reports 0 or no series.
+**New in v3.1.0.** The controller runs on the Raft leader only, so these series hold a value only there: every other node, and a node that lost leadership, reports 0 or no series.
 
 | Series | Meaning |
 |---|---|
