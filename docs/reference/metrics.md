@@ -122,6 +122,7 @@ A [remote child](glossary.md#remote-child) exports its link per parent partition
 | `narad_fanout_remote_last_success_timestamp_seconds`<br>gauge; labels `parent`, `child` | Unix time of the last request the remote accepted. |
 | `narad_fanout_remote_check_failures_total`<br>counter; labels `parent`, `child` | Target checks while the link runs that errored. A check that errors never stops sending. |
 | `narad_fanout_remote_skipped_records_total`<br>counter; labels `parent`, `child` | Parent records dropped because an admin skipped them: each is a record not copied. |
+| `narad_fanout_remote_rereads_total`<br>counter; labels `parent`, `child` | Slabs read again from disk because `remotes.max_held_bytes` could not keep a waiting lane's records. Records the target already accepted are not sent again. A steady rate means the budget is too small for the outages it rides out. |
 | `narad_remote_requests_total`<br>counter; labels `remote`, `code` | Requests this node sent to a remote, by status code (`error` for a transport failure). |
 | `narad_remote_request_seconds`<br>histogram; labels `remote` | Round-trip time of those requests. |
 | `narad_remote_rtt_seconds`<br>gauge; labels `remote` | TCP connect time to the remote, as the last check measured it. |

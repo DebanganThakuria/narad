@@ -48,6 +48,10 @@ type remoteCursor struct {
 	published string
 	// caps holds each lane's adaptive chunk cap across slabs.
 	caps map[int]*sink.ChunkCap
+	// progress is what the target accepted (or an admin skipped) of the
+	// records at the cursor's unadvanced position, kept across re-reads
+	// of that slab; cleared once the cursor advances.
+	progress slabProgress
 	// targetState is what the last successful target check found
 	// (target_replaced, target_has_remote_children or ""), and
 	// verifiedMs when a target check last succeeded. The check writes
@@ -281,4 +285,59 @@ func (r *FanoutRunner) OverlayRemoteCursorStats(parent string, stats []topic.Fan
 		stat.State = topic.RemoteStateUnknown
 	}
 	return stats
+}
+
+// slabProgress records, for each lane of a slab the cursor has not yet
+// advanced past, the highest offset the target accepted or an admin
+// skipped. A lane sends its records in order, so every record of that
+// lane at or below the mark is done. The marks are only valid under the
+// lane count they were taken with.
+type slabProgress struct {
+	lanes int
+	marks map[int]int64
+}
+
+// unshipped drops from records those the target already has: a re-read
+// of the slab (the held budget could not keep a waiting lane's records,
+// or a pass that left records unsent) sends only what is still missing.
+// It never changes records itself.
+func (c *remoteCursor) unshipped(records []topic.KeyedRecord) []topic.KeyedRecord {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.progress.marks) == 0 {
+		return records
+	}
+	out := make([]topic.KeyedRecord, 0, len(records))
+	for _, r := range records {
+		if mark, ok := c.progress.marks[sink.LaneOf(r, c.progress.lanes)]; ok && r.Offset <= mark {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// noteProgress merges what one pass over the slab got done. Under the
+// same lane count a lane's mark only grows; under a new one the old
+// marks no longer name lanes and are replaced (records they covered may
+// be sent again: duplicates, never loss).
+func (c *remoteCursor) noteProgress(lanes int, marks map[int]int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.progress.lanes != lanes || c.progress.marks == nil {
+		c.progress = slabProgress{lanes: lanes, marks: map[int]int64{}}
+	}
+	for lane, off := range marks {
+		if prev, ok := c.progress.marks[lane]; !ok || off > prev {
+			c.progress.marks[lane] = off
+		}
+	}
+}
+
+// clearProgress forgets the slab's progress once every record of it is
+// on the target and the cursor advances past it.
+func (c *remoteCursor) clearProgress() {
+	c.mu.Lock()
+	c.progress = slabProgress{}
+	c.mu.Unlock()
 }

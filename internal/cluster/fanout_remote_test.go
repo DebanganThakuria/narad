@@ -529,3 +529,36 @@ func TestRemoteChildCursorTravelsWithAPartitionMove(t *testing.T) {
 		t.Fatalf("move marker children = %v, want the stub with epoch %s", children, rg.stub.AttachEpoch)
 	}
 }
+
+// With no room in the held budget, a lane blocked on a refused record
+// makes the slab re-read after every stall interval. The other lanes'
+// records, already accepted, are not sent again on each re-read: the
+// target holds each good record once while the link waits on the skip.
+func TestRemoteChildRereadDoesNotResendAcceptedLanes(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{lanes: 4, rigSourceOpts: rigSourceOpts{heldBudget: -1, stallRetry: 200 * time.Millisecond}})
+	schema := []byte(`{"type":"object","required":["seq"],"properties":{"seq":{"type":"integer"}}}`)
+	if _, err := rg.target.broker.UpdateTopicSchema(context.Background(), "orders", schema, 0); err != nil {
+		t.Fatal(err)
+	}
+	good := rg.src.produce(t, 0, 40, 8, 0)
+	rg.src.producePayload(t, 0, "bad", []byte(`{"not_seq":true}`))
+	rg.src.start()
+	defer rg.src.stop()
+
+	rg.waitState(t, 0, topic.RemoteStateRejectedRecord, 20*time.Second)
+	rg.waitDelivered(t, good, 10*time.Second)
+	// Several stall intervals, each one a re-read of the slab.
+	time.Sleep(2 * time.Second)
+	got := rg.target.records(t, "orders")
+	if len(got) != len(good) {
+		t.Fatalf("the target holds %d records for %d good ones: re-reads sent accepted records again", len(got), len(good))
+	}
+	if v := counterValue(rg.src.metrics.RemoteLink.RereadsTotal.WithLabelValues("orders", "orders-to-b")); v == 0 {
+		t.Fatal("no re-read counted while the held budget was full")
+	}
+	rg.setState(t, metastore.RemoteChildStateOp{Skip: &metastore.RemoteSkip{Partition: 0, Offset: 40}})
+	rigWait(t, "cursor past the skipped record", 10*time.Second, func() bool { return rg.src.cursorOffset(t, 0) == 41 })
+	if got := rg.target.records(t, "orders"); len(got) != len(good) {
+		t.Fatalf("the target holds %d records after the skip, want %d", len(got), len(good))
+	}
+}

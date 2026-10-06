@@ -185,8 +185,9 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 			return // stopped mid-commit; the cursor stays at next
 		case commitReread:
 			// A remote lane could not hold its records across a wait: read
-			// the slab again from the unadvanced cursor. What the target
-			// already accepted is sent again (duplicates, never loss).
+			// the slab again from the unadvanced cursor. The cursor keeps
+			// what the target already accepted of it, so only a request
+			// cut off in flight is sent again (duplicates, never loss).
 			continue
 		}
 

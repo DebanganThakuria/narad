@@ -464,20 +464,30 @@ func (s *remoteSender) commit(ctx context.Context, key fanoutCursorKey, child to
 		// caller bug, and holding the records is always safe.
 		return records, false
 	}
+	var slabStart int64
+	if len(records) > 0 {
+		slabStart = records[0].Offset
+	}
+	// What an earlier pass over this slab got onto the target is not
+	// sent again.
+	records = cur.unshipped(records)
+	if len(records) == 0 {
+		cur.clearProgress()
+		cur.clearLanes()
+		return nil, false
+	}
 	shipCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	sh := &slabShip{s: s, cur: cur, key: key, cancel: cancel, link: child, linkVersion: s.r.store.TopicVersion(key.child)}
-	if len(records) > 0 {
-		sh.slabStart = records[0].Offset
-	}
+	sh := &slabShip{s: s, cur: cur, key: key, cancel: cancel, link: child, linkVersion: s.r.store.TopicVersion(key.child), slabStart: slabStart}
 	if parent, err := s.r.store.GetTopic(ctx, key.parent); err == nil {
 		sh.retentionMs = parent.RetentionMs
 	}
-	for i, recs := range sink.SplitLanes(records, child.Remote.EffectiveLanes()) {
+	lanes := child.Remote.EffectiveLanes()
+	for i, recs := range sink.SplitLanes(records, lanes) {
 		if len(recs) == 0 {
 			continue
 		}
-		lane := &laneShip{idx: i, recs: recs, cap: cur.chunkCap(i), backoff: sink.LaneBackoff(), b64: map[int64]bool{}}
+		lane := &laneShip{idx: i, recs: recs, done: -1, cap: cur.chunkCap(i), backoff: sink.LaneBackoff(), b64: map[int64]bool{}}
 		lane.oldestMs.Store(recs[0].CommittedAtUnixMs)
 		sh.lanes = append(sh.lanes, lane)
 	}
@@ -496,17 +506,30 @@ func (s *remoteSender) commit(ctx context.Context, key fanoutCursorKey, child to
 	sh.releaseHeld()
 	s.r.publishRemoteState(cur)
 
+	var remaining []topic.KeyedRecord
+	marks := map[int]int64{}
+	for _, lane := range sh.lanes {
+		remaining = append(remaining, lane.recs...)
+		if lane.done >= 0 {
+			marks[lane.idx] = lane.done
+		}
+	}
+	if len(remaining) == 0 {
+		cur.clearProgress()
+		cur.clearLanes()
+		return nil, false
+	}
+	cur.noteProgress(lanes, marks)
 	if sh.reread.Load() && ctx.Err() == nil {
+		if rl := s.r.remoteMetrics(); rl != nil {
+			rl.RereadsTotal.WithLabelValues(key.parent, key.child).Inc()
+		}
+		s.r.logger.Error("remote child could not hold a waiting lane's records (remotes.max_held_bytes is full): it reads them again after the wait and sends only what the target does not have yet",
+			"parent", key.parent, "partition", key.partition, "child", key.child,
+			"remote", child.Remote.Name, "unsent_records", len(remaining))
 		sh.waitBeforeReread(ctx)
 		cur.clearLanes()
 		return nil, true
-	}
-	var remaining []topic.KeyedRecord
-	for _, lane := range sh.lanes {
-		remaining = append(remaining, lane.recs...)
-	}
-	if len(remaining) == 0 {
-		cur.clearLanes()
 	}
 	return remaining, false
 }
@@ -536,8 +559,11 @@ type slabShip struct {
 
 // laneShip is one lane of a slab.
 type laneShip struct {
-	idx     int
-	recs    []topic.KeyedRecord
+	idx  int
+	recs []topic.KeyedRecord
+	// done is the highest offset of this lane the target accepted or an
+	// admin skipped in this slab, -1 for none yet.
+	done    int64
 	held    bool
 	heldN   int64
 	cap     *sink.ChunkCap
@@ -951,6 +977,9 @@ func (sh *slabShip) act(ctx context.Context, lane *laneShip, rs *remoteState, e 
 		rs.gate.Succeeded(probe)
 		lane.cap.Accepted()
 		lane.backoff.Reset()
+		if n > 0 {
+			lane.done = lane.recs[n-1].Offset
+		}
 		lane.recs = lane.recs[n:]
 		lane.consumePlan(n)
 		if len(lane.recs) > 0 {
@@ -1109,6 +1138,7 @@ func (sh *slabShip) block(lane *laneShip, state string) {
 // skip drops the lane's blocked front record, which an admin skipped.
 func (sh *slabShip) skip(lane *laneShip) {
 	rec := lane.recs[0]
+	lane.done = rec.Offset
 	lane.recs = lane.recs[1:]
 	lane.consumePlan(1)
 	lane.blocked = nil

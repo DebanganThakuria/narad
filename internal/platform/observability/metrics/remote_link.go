@@ -23,6 +23,9 @@ type RemoteLinkMetrics struct {
 	CheckFailuresTotal *prometheus.CounterVec
 	// SkippedRecordsTotal counts records an admin skipped. parent, child.
 	SkippedRecordsTotal *prometheus.CounterVec
+	// RereadsTotal counts slabs a remote child read again because the
+	// held budget could not keep a waiting lane's records. parent, child.
+	RereadsTotal *prometheus.CounterVec
 	// ErrorsTotal counts failed chunks by class. remote, class.
 	ErrorsTotal *prometheus.CounterVec
 	// ResentRecordsTotal counts records resent after an ambiguous
@@ -74,6 +77,10 @@ func newRemoteLinkMetrics() *RemoteLinkMetrics {
 			Namespace: Namespace, Subsystem: "fanout", Name: "remote_skipped_records_total",
 			Help: "Parent records an admin skipped on a remote child. Each is one record not replicated.",
 		}, link),
+		RereadsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: Namespace, Subsystem: "fanout", Name: "remote_rereads_total",
+			Help: "Slabs a remote child read again because remotes.max_held_bytes could not keep a waiting lane's records. Records the target already accepted are not sent again.",
+		}, link),
 		ErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace, Subsystem: "remote", Name: "errors_total",
 			Help: "Failed chunks sent to a remote, by class.",
@@ -117,7 +124,7 @@ func newRemoteLinkMetrics() *RemoteLinkMetrics {
 func (r *RemoteLinkMetrics) collectors() []prometheus.Collector {
 	return []prometheus.Collector{
 		r.State, r.LagSeconds, r.RetentionHeadroomSeconds, r.LastSuccessTimestampSeconds,
-		r.CheckFailuresTotal, r.SkippedRecordsTotal,
+		r.CheckFailuresTotal, r.SkippedRecordsTotal, r.RereadsTotal,
 		r.ErrorsTotal, r.ResentRecordsTotal, r.GateBackoffSeconds, r.HeldBytes,
 		r.InflightWaitSeconds, r.ChunkBytesLimit, r.WireBytesTotal, r.BodyBytesTotal,
 		r.BatchBodyBudgetRejectionsTotal,
@@ -134,6 +141,7 @@ func (r *RemoteLinkMetrics) PruneLink(parent, child string) {
 	for _, c := range []interface{ DeletePartialMatch(prometheus.Labels) int }{
 		r.State, r.LagSeconds, r.RetentionHeadroomSeconds,
 		r.LastSuccessTimestampSeconds, r.CheckFailuresTotal, r.SkippedRecordsTotal,
+		r.RereadsTotal,
 	} {
 		c.DeletePartialMatch(sel)
 	}
