@@ -5,11 +5,13 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/remote/sink"
 )
 
 // With no held budget a stalled lane cannot keep its records, so its
@@ -56,4 +58,51 @@ func TestRemoteChildStalledLinkRetriesAtOnceAfterAResume(t *testing.T) {
 	})
 	rg.setState(t, metastore.RemoteChildStateOp{Pause: &metastore.RemotePauseState{Paused: false}})
 	rg.waitDelivered(t, want, 4*time.Second)
+}
+
+// A lane that shipped everything gives its held records back at once:
+// a sibling blocked on a refused record must not keep the whole slab's
+// bytes in the node's held budget until an admin skips it.
+func TestRemoteChildFinishedLaneReleasesItsHeldRecords(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{lanes: 2, rigSourceOpts: rigSourceOpts{stallRetry: 300 * time.Millisecond}})
+	schema := []byte(`{"type":"object","required":["seq"],"properties":{"seq":{"type":"integer"}}}`)
+	if _, err := rg.target.broker.UpdateTopicSchema(context.Background(), "orders", schema, 0); err != nil {
+		t.Fatal(err)
+	}
+	const badKey = "bad"
+	var otherLane []string
+	for i := range 32 {
+		key := fmt.Sprintf("key-%d", i)
+		if sink.LaneOf(topic.KeyedRecord{Key: key}, 2) != sink.LaneOf(topic.KeyedRecord{Key: badKey}, 2) {
+			otherLane = append(otherLane, key)
+		}
+	}
+	if len(otherLane) == 0 {
+		t.Fatal("every key maps to the bad record's lane")
+	}
+	// Every record is in the parent before the cursor starts, so one
+	// slab carries them all.
+	var finished []topic.KeyedRecord
+	for i, key := range otherLane {
+		payload := fmt.Appendf(nil, `{"seq":%d}`, i)
+		rg.src.producePayload(t, 0, key, payload)
+		finished = append(finished, topic.KeyedRecord{Key: key, Payload: payload})
+	}
+	rg.src.producePayload(t, 0, badKey, []byte(`{"not_seq":true}`))
+	rg.target.faults.set("down")
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitState(t, 0, topic.RemoteStateUnavailable, 15*time.Second)
+	rigWait(t, "the lanes holding their records", 10*time.Second, func() bool {
+		return rg.src.runner.remote.held.Used() > 0
+	})
+	time.Sleep(time.Second)
+	both := rg.src.runner.remote.held.Used()
+
+	rg.target.faults.set("")
+	rg.waitDelivered(t, finished, 60*time.Second)
+	rg.waitState(t, 0, topic.RemoteStateRejectedRecord, 15*time.Second)
+	rigWait(t, "the finished lane's held bytes released", 5*time.Second, func() bool {
+		return rg.src.runner.remote.held.Used() < both
+	})
 }

@@ -992,6 +992,15 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 		sh.sendChunk(ctx, lane, entry, rs, link, probe)
 	}
 	sh.cur.setLane(lane.idx, "")
+	// Every record is on the target or skipped: give the held bytes back
+	// now, not when the slab ends, which a sibling blocked on a refused
+	// record can put off for days.
+	// Dropping the emptied slice lets the held copy go too.
+	lane.recs = nil
+	if lane.held {
+		s.held.Release(lane.heldN)
+		lane.held, lane.heldN = false, 0
+	}
 }
 
 // checkTarget runs the runtime target check when it is due and reports
