@@ -213,6 +213,13 @@ func newAPINode(t *testing.T, o apiOpts) *apiNode {
 			t.Fatal(err)
 		}
 	}
+	// The leader re-authorizes every registry write against its own
+	// users: the admin the tests call as exists there.
+	if _, err := ms.GetUser(context.Background(), admin.Username); err != nil {
+		if err := ms.CreateUser(context.Background(), user.User{Username: admin.Username, PasswordHash: []byte("$2a$04$unused"), Grants: admin.Grants}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	n.ms, n.dir = ms, o.dataDir
 	n.target, n.ca = fakeTarget(t)
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(n.target.URL, "https://"))
