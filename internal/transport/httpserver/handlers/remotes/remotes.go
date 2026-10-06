@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -197,7 +198,13 @@ func (c *call) prepareError(err error) {
 	case errors.Is(err, errs.ErrRemoteSecretWeak), errors.Is(err, errs.ErrRemoteSecretMissing):
 		c.fail(http.StatusPreconditionFailed, err.Error())
 	case errors.Is(err, errs.ErrRemoteThrottled):
-		c.w.Header().Set("Retry-After", "6")
+		// When the sliding minute frees a slot, so a client that honours
+		// it succeeds on its retry.
+		retry := int64(1)
+		if te, ok := errors.AsType[*remote.WriteThrottledError](err); ok {
+			retry = max(int64((te.RetryAfter+time.Second-1)/time.Second), 1)
+		}
+		c.w.Header().Set("Retry-After", strconv.FormatInt(retry, 10))
 		c.fail(http.StatusTooManyRequests, "at most 10 remote writes a minute on this node")
 	default:
 		c.s.Deps.Logger.Error("remote write preparation failed", "event", c.event, "err", err)
@@ -217,13 +224,16 @@ func Create(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 		svc := s.Deps.Remote.Service
-		if err := svc.AllowWrite(); err != nil {
-			c.prepareError(err)
-			return
-		}
 		var req remote.CreateRequest
 		if !c.decode(&req, false) {
 			req.Password.Wipe()
+			return
+		}
+		// After the decode, so a body that does not parse costs no slot;
+		// before the seal, which is what the limit protects.
+		if err := svc.AllowWrite(); err != nil {
+			req.Password.Wipe()
+			c.prepareError(err)
 			return
 		}
 		c.target = req.Name
@@ -255,15 +265,20 @@ func Update(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 		svc := s.Deps.Remote.Service
-		if err := svc.AllowWrite(); err != nil {
-			c.prepareError(err)
-			return
-		}
 		var req remote.UpdateRequest
 		if !c.decode(&req, false) {
 			if req.Password != nil {
 				req.Password.Wipe()
 			}
+			return
+		}
+		// After the decode, so a body that does not parse costs no slot;
+		// before the seal, which is what the limit protects.
+		if err := svc.AllowWrite(); err != nil {
+			if req.Password != nil {
+				req.Password.Wipe()
+			}
+			c.prepareError(err)
 			return
 		}
 		up, err := svc.PrepareUpdate(r.Context(), c.target, req)

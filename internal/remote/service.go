@@ -181,10 +181,11 @@ type SealedUpdate struct {
 }
 
 // AllowWrite takes one of this node's remote writes (10 a minute),
-// reporting errs.ErrRemoteThrottled when the minute is full.
+// reporting a *WriteThrottledError (errs.ErrRemoteThrottled) with the
+// wait until a slot frees when the minute is full.
 func (s *Service) AllowWrite() error {
-	if !s.writes.Allow() {
-		return errs.ErrRemoteThrottled
+	if wait, ok := s.writes.Take(); !ok {
+		return &WriteThrottledError{RetryAfter: wait}
 	}
 	return nil
 }

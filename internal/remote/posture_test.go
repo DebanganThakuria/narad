@@ -62,7 +62,11 @@ func TestWriteLimiterSlidingMinute(t *testing.T) {
 	if l.Allow() {
 		t.Fatal("11th write in a minute allowed")
 	}
-	now = now.Add(time.Minute + time.Millisecond)
+	now = now.Add(20 * time.Second)
+	if wait, ok := l.Take(); ok || wait != 40*time.Second {
+		t.Fatalf("Take 20 s after a full burst = (%s, %v), want (40s, false): the oldest write leaves the minute then", wait, ok)
+	}
+	now = now.Add(40*time.Second + time.Millisecond)
 	if !l.Allow() {
 		t.Fatal("a write after the minute refused")
 	}

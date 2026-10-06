@@ -2448,7 +2448,7 @@ remote writes a minute, and a cluster holds at most 64 remotes.
 | [`412`](status-codes.md#status-412) | Nothing was sealed or stored: this node does not attest an encrypted API hop (`remotes.api_hop_encrypted`); the cluster secret is missing or decodes to fewer than 32 bytes; the current key's seal budget is spent (rotate the cluster secret); a member does not apply the remote Raft entry types, did not answer, or reports a posture that forbids remotes (the body names it in `members`); or the leader runs an older release. |
 | [`413`](status-codes.md#status-413) | The body is over 128 KiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
-| [`429`](status-codes.md#status-429) | This node took 10 remote writes in the last minute; retry after `Retry-After: 6`. |
+| [`429`](status-codes.md#status-429) | This node took 10 remote writes in the last minute; retry after `Retry-After`, the seconds until the oldest of them leaves the minute. |
 | [`500`](status-codes.md#status-500) | The node failed to seal the password; logged on the node. |
 | [`501`](status-codes.md#status-501) | The answering node has no remote plane. |
 | [`503`](status-codes.md#status-503) | The leader could not be reached, or could not write the change; the request ID in the node's audit line joins it to the leader's. Read the remote back before retrying. |
@@ -2816,7 +2816,7 @@ change live; a limit named with `0` or `""` is refused.
 | [`412`](status-codes.md#status-412) | As for [register a remote](#create-remote); the hop and secret rules apply only to a change that carries a password. |
 | [`413`](status-codes.md#status-413) | The body is over 128 KiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
-| [`429`](status-codes.md#status-429) | This node took 10 remote writes in the last minute; retry after `Retry-After: 6`. |
+| [`429`](status-codes.md#status-429) | This node took 10 remote writes in the last minute; retry after `Retry-After`, the seconds until the oldest of them leaves the minute. |
 | [`500`](status-codes.md#status-500) | The node failed to seal the password; logged on the node. |
 | [`501`](status-codes.md#status-501) | The answering node has no remote plane. |
 | [`503`](status-codes.md#status-503) | The leader could not be reached, or could not write the change. Read the remote back before retrying. |
@@ -2932,7 +2932,7 @@ an emergency, revoke the user on the target first
 | [`404`](status-codes.md#status-404) | No remote of that name. |
 | [`409`](status-codes.md#status-409) | Remote children use the remote; the body lists them in `links`. |
 | [`412`](status-codes.md#status-412) | A member does not apply the remote Raft entry types (the body names it), or the leader runs an older release. |
-| [`429`](status-codes.md#status-429) | This node took 10 remote writes in the last minute; retry after `Retry-After: 6`. |
+| [`429`](status-codes.md#status-429) | This node took 10 remote writes in the last minute; retry after `Retry-After`, the seconds until the oldest of them leaves the minute. |
 | [`501`](status-codes.md#status-501) | The answering node has no remote plane. |
 | [`503`](status-codes.md#status-503) | The leader could not be reached, or could not write the change. Read the remotes back before retrying. |
 
@@ -3102,7 +3102,7 @@ Empty, or `{}`. Content types: `application/json`.
 | [`412`](status-codes.md#status-412) | The leader's cluster secret is missing or decodes to fewer than 32 bytes, a member does not apply the remote Raft entry types, did not answer, or reports a posture that forbids remotes (the body names it in `members`), or the leader runs an older release. Nothing was re-sealed. |
 | [`413`](status-codes.md#status-413) | The body is over 128 KiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
-| [`429`](status-codes.md#status-429) | This node took 10 remote writes in the last minute; retry after `Retry-After: 6`. |
+| [`429`](status-codes.md#status-429) | This node took 10 remote writes in the last minute; retry after `Retry-After`, the seconds until the oldest of them leaves the minute. |
 | [`501`](status-codes.md#status-501) | The answering node has no remote plane. |
 | [`503`](status-codes.md#status-503) | The leader could not be reached; it is safe to repeat. |
 

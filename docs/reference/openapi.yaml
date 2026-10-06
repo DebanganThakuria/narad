@@ -2075,7 +2075,7 @@ paths:
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '429':
-          description: 'This node took 10 remote writes in the last minute; retry after `Retry-After: 6`.'
+          description: 'This node took 10 remote writes in the last minute; retry after `Retry-After`, the seconds until the oldest of them leaves the minute.'
         '500':
           description: The node failed to seal the password; logged on the node.
         '501':
@@ -2244,7 +2244,7 @@ paths:
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '429':
-          description: 'This node took 10 remote writes in the last minute; retry after `Retry-After: 6`.'
+          description: 'This node took 10 remote writes in the last minute; retry after `Retry-After`, the seconds until the oldest of them leaves the minute.'
         '500':
           description: The node failed to seal the password; logged on the node.
         '501':
@@ -2309,7 +2309,7 @@ paths:
         '412':
           description: A member does not apply the remote Raft entry types (the body names it), or the leader runs an older release.
         '429':
-          description: 'This node took 10 remote writes in the last minute; retry after `Retry-After: 6`.'
+          description: 'This node took 10 remote writes in the last minute; retry after `Retry-After`, the seconds until the oldest of them leaves the minute.'
         '501':
           description: The answering node has no remote plane.
         '503':
@@ -2449,7 +2449,7 @@ paths:
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '429':
-          description: 'This node took 10 remote writes in the last minute; retry after `Retry-After: 6`.'
+          description: 'This node took 10 remote writes in the last minute; retry after `Retry-After`, the seconds until the oldest of them leaves the minute.'
         '501':
           description: The answering node has no remote plane.
         '503':

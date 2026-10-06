@@ -3,6 +3,8 @@ package remote
 import (
 	"sync"
 	"time"
+
+	"github.com/debanganthakuria/narad/internal/errs"
 )
 
 // Rate limits of the registry (ch. 5.10).
@@ -31,6 +33,13 @@ func NewWriteLimiter() *WriteLimiter {
 
 // Allow takes one write, reporting false when the minute is full.
 func (l *WriteLimiter) Allow() bool {
+	_, ok := l.Take()
+	return ok
+}
+
+// Take takes one write, or reports false and how long until the
+// sliding minute frees a slot (when its oldest write leaves it).
+func (l *WriteLimiter) Take() (wait time.Duration, ok bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
@@ -43,11 +52,21 @@ func (l *WriteLimiter) Allow() bool {
 	}
 	l.times = kept
 	if len(l.times) >= l.limit {
-		return false
+		return l.times[len(l.times)-l.limit].Add(time.Minute).Sub(now), false
 	}
 	l.times = append(l.times, now)
-	return true
+	return 0, true
 }
+
+// WriteThrottledError is errs.ErrRemoteThrottled from the write limit,
+// with the wait until it frees a slot (the 429's Retry-After).
+type WriteThrottledError struct {
+	RetryAfter time.Duration
+}
+
+func (e *WriteThrottledError) Error() string { return errs.ErrRemoteThrottled.Error() }
+
+func (e *WriteThrottledError) Unwrap() error { return errs.ErrRemoteThrottled }
 
 // CheckLimiter lets one check per remote run at a time on this member,
 // and at most one start per CheckInterval. The limit lives on the node

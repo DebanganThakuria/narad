@@ -820,3 +820,29 @@ func TestListWithoutNodesHasNoLingeringFields(t *testing.T) {
 		}
 	}
 }
+
+// The 429 of the write limit says when the sliding minute frees a slot,
+// so a client that honours Retry-After succeeds on its retry instead of
+// meeting a 429 every 6 s for a minute; a body that does not decode
+// costs no slot.
+func TestWriteLimitRetryAfterCoversTheMinute(t *testing.T) {
+	n := newAPINode(t, apiOpts{writes: remote.WritesPerMinute})
+	for range remote.WritesPerMinute + 2 {
+		if res := n.do(t, admin, http.MethodPatch, "/v1/remotes/missing", `{"limits":`); res.status != http.StatusBadRequest {
+			t.Fatalf("malformed body: %d %s, want 400", res.status, res.body)
+		}
+	}
+	var last answer
+	for i := range remote.WritesPerMinute + 1 {
+		last = n.do(t, admin, http.MethodPatch, "/v1/remotes/missing", `{"limits":{"max_in_flight":`+strconv.Itoa(i+1)+`}}`)
+		if i < remote.WritesPerMinute && last.status == http.StatusTooManyRequests {
+			t.Fatalf("write %d refused with 429: malformed bodies used up the limit", i+1)
+		}
+	}
+	if last.status != http.StatusTooManyRequests {
+		t.Fatalf("11th write: %d %s, want 429", last.status, last.body)
+	}
+	if after := mustAtoi(last.header.Get("Retry-After")); after < 50 || after > 60 {
+		t.Fatalf("Retry-After %q after a burst of 10 writes, want the rest of the minute (50 to 60 s)", last.header.Get("Retry-After"))
+	}
+}
