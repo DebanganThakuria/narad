@@ -105,9 +105,31 @@ func (s *remoteSender) remoteState(name string) *remoteState {
 			sem:      sink.NewSemaphore(16),
 			laneCaps: map[*sink.ChunkCap]int{},
 		}
+		if rl := s.r.remoteMetrics(); rl != nil {
+			backoff := rl.GateBackoffSeconds.WithLabelValues(name)
+			rs.gate.ObserveBackoff(func(d time.Duration) { backoff.Set(d.Seconds()) })
+		}
 		s.remotes[name] = rs
 	}
 	return rs
+}
+
+// forgetRemote drops a remote the registry no longer holds: this node's
+// pacing state for it (its gate, its in-flight slots and its last entry,
+// which pins an HTTP client) and its per-remote series. A link that
+// still names it builds fresh state on its next lookup and holds in
+// remote_missing.
+func (s *remoteSender) forgetRemote(rs *remoteState) {
+	s.mu.Lock()
+	if s.remotes[rs.name] != rs {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.remotes, rs.name)
+	s.mu.Unlock()
+	if rl := s.r.remoteMetrics(); rl != nil {
+		rl.PruneRemote(rs.name)
+	}
 }
 
 // watchChanges re-reads every known remote's entry each time the
@@ -132,8 +154,12 @@ func (s *remoteSender) watchChanges(ctx context.Context) {
 		}
 		s.mu.Unlock()
 		for _, rs := range states {
-			if e, err := s.lookup.Get(rs.name); err == nil {
+			e, err := s.lookup.Get(rs.name)
+			switch {
+			case err == nil:
 				rs.observe(e)
+			case errors.Is(err, remote.ErrRemoteMissing):
+				s.forgetRemote(rs)
 			}
 		}
 	}

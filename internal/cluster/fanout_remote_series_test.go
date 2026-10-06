@@ -88,3 +88,79 @@ func TestMovedPartitionDropsItsRemoteSeries(t *testing.T) {
 		}
 	}
 }
+
+// gatherRemoteGauge reads a per-remote gauge or counter of one remote:
+// its value and whether the series exists.
+func gatherRemoteGauge(t *testing.T, c prometheus.Collector, name, remoteName string) (float64, bool) {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(c)
+	fams, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range fams {
+		if f.GetName() != name {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "remote" && lp.GetValue() == remoteName {
+					if m.GetGauge() != nil {
+						return m.GetGauge().GetValue(), true
+					}
+					return m.GetCounter().GetValue(), true
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+// narad_remote_gate_backoff_seconds follows the remote's gate: above 0
+// while the gate backs off, 0 once the remote answers again.
+func TestRemoteGateBackoffIsExported(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{stallRetry: 300 * time.Millisecond}})
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitDelivered(t, rg.src.produce(t, 0, 10, 3, 0), 15*time.Second)
+	gauge := rg.src.metrics.RemoteLink.GateBackoffSeconds
+	rg.target.faults.set("down")
+	rg.src.produce(t, 0, 10, 3, 100)
+	rigWait(t, "a gate backoff above 0", 20*time.Second, func() bool {
+		v, ok := gatherRemoteGauge(t, gauge, "narad_remote_gate_backoff_seconds", "b")
+		return ok && v > 0
+	})
+	rg.target.faults.set("")
+	rigWait(t, "the gate backoff back at 0", 30*time.Second, func() bool {
+		v, ok := gatherRemoteGauge(t, gauge, "narad_remote_gate_backoff_seconds", "b")
+		return ok && v == 0
+	})
+}
+
+// A remote that disappears from the registry takes its per-remote series
+// and this node's sender state for it along.
+func TestDeletedRemoteDropsItsSeriesAndSenderState(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{})
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitDelivered(t, rg.src.produce(t, 0, 10, 3, 0), 15*time.Second)
+	rl := rg.src.metrics.RemoteLink
+	if _, ok := gatherRemoteGauge(t, rl.ChunkBytesLimit, "narad_remote_chunk_bytes_limit", "b"); !ok {
+		t.Fatal("precondition: no chunk_bytes_limit series for b")
+	}
+	// The link goes first (a detach), then the remote.
+	ctx := context.Background()
+	if err := rg.src.store.DetachChild(ctx, "orders", "orders-to-b"); err != nil {
+		t.Fatal(err)
+	}
+	rigWait(t, "the cursor to stop", 20*time.Second, func() bool {
+		return rg.src.runner.remoteCursorFor("orders", 0, "orders-to-b") == nil
+	})
+	rg.src.lookup.Delete("b")
+	rigWait(t, "b's series and state to go", 10*time.Second, func() bool {
+		_, chunk := gatherRemoteGauge(t, rl.ChunkBytesLimit, "narad_remote_chunk_bytes_limit", "b")
+		_, wire := gatherRemoteGauge(t, rl.WireBytesTotal, "narad_remote_wire_bytes_total", "b")
+		return !chunk && !wire && rg.src.runner.sender().remoteStateIfAny("b") == nil
+	})
+}

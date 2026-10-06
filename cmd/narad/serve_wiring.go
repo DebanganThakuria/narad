@@ -24,6 +24,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/transport/httpserver"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/health"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/messaging"
 )
 
 // buildMetrics builds the process registry: the Go and process
@@ -235,6 +236,9 @@ func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, l
 	}
 	for _, fn := range extra {
 		fn(&deps)
+	}
+	if m != nil {
+		messaging.InstrumentBatchBodyBudget(m.RemoteLink.BatchBodyBudgetRejectionsTotal)
 	}
 	handlerSet := handlers.New(deps)
 	opts := apiRouterOptions(cfg.HTTP)

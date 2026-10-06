@@ -16,13 +16,17 @@ const DefaultHeldBytes int64 = 256 << 20
 // failure (remotes.max_held_bytes), first come first served. A lane that
 // must wait copies its unsent records off the parent log so an outage
 // pins no log frames; when the budget cannot take them the cursor keeps
-// nothing and re-reads its slab later, which only costs resending what
-// the target already accepted. A limit of 0 or less holds nothing.
+// nothing and re-reads its slab later, skipping what the target already
+// accepted. A limit of 0 or less holds nothing.
 type HeldBudget struct {
 	limit int64
 	used  atomic.Int64
 	// observe, when set, receives the bytes held after every change.
-	observe func(int64)
+	// reportMu orders the reports: each reads the budget under it, so
+	// the last one always carries what is held now, however the changes
+	// and their reports interleave.
+	observe  func(int64)
+	reportMu sync.Mutex
 }
 
 // NewHeldBudget returns a budget of limit bytes; observe may be nil.
@@ -41,7 +45,7 @@ func (b *HeldBudget) TryReserve(n int64) bool {
 			return false
 		}
 		if b.used.CompareAndSwap(used, used+n) {
-			b.report(used + n)
+			b.report()
 			return true
 		}
 	}
@@ -52,7 +56,8 @@ func (b *HeldBudget) Release(n int64) {
 	if b == nil || n == 0 {
 		return
 	}
-	b.report(b.used.Add(-n))
+	b.used.Add(-n)
+	b.report()
 }
 
 // Used is the bytes held now.
@@ -63,10 +68,13 @@ func (b *HeldBudget) Used() int64 {
 	return b.used.Load()
 }
 
-func (b *HeldBudget) report(v int64) {
-	if b.observe != nil {
-		b.observe(v)
+func (b *HeldBudget) report() {
+	if b.observe == nil {
+		return
 	}
+	b.reportMu.Lock()
+	defer b.reportMu.Unlock()
+	b.observe(b.used.Load())
 }
 
 // HeldSize is what holding recs costs.

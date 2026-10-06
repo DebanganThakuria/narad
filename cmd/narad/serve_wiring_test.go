@@ -5,12 +5,16 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
@@ -23,6 +27,8 @@ import (
 	"github.com/debanganthakuria/narad/internal/platform/config"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
+	httpmessaging "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/messaging"
 )
 
 func TestBuildBrokerRejectsNonStoreMetastore(t *testing.T) {
@@ -469,4 +475,38 @@ func TestServeKeepsTheColdWalkToOwnedPartitions(t *testing.T) {
 	if swept != 1 {
 		t.Fatalf("the walk swept %d partitions, want 1: it must leave node-2's partition alone", swept)
 	}
+}
+
+// The API server wires the batch body budget's refusals to
+// narad_http_batch_body_budget_rejections_total, so the documented alert
+// can fire.
+func TestBuildAPIServerCountsBatchBodyBudgetRejections(t *testing.T) {
+	cfg := config.Default()
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	_ = buildAPIServer(context.Background(), cfg, stubBroker{}, nil, nil, nil, m, reg, nil, log)
+	t.Cleanup(func() { httpmessaging.InstrumentBatchBodyBudget(nil) })
+
+	set := handlers.New(handlers.Deps{Broker: batchStubBroker{}, Logger: log, BatchBodyBudget: 1})
+	payload := `"` + strings.Repeat("z", 900<<10) + `"`
+	body := `{"messages":[{"payload":` + payload + `},{"payload":` + payload + `},{"payload":` + payload + `}]}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce/batch", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	r.SetPathValue("topic", "orders")
+	w := httptest.NewRecorder()
+	httpmessaging.ProduceBatch(set, nil)(w, r)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("a body past the budget: %d %s, want 503", w.Code, w.Body)
+	}
+	if v := testutil.ToFloat64(m.RemoteLink.BatchBodyBudgetRejectionsTotal); v != 1 {
+		t.Fatalf("narad_http_batch_body_budget_rejections_total = %v, want 1", v)
+	}
+}
+
+// batchStubBroker is stubBroker that also takes batch produce.
+type batchStubBroker struct{ stubBroker }
+
+func (batchStubBroker) AcceptProduceBatch(context.Context, string, []brokermsg.ProduceMessage) ([]ingress.AcceptedProduce, error) {
+	return nil, nil
 }

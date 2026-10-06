@@ -36,6 +36,25 @@ type Gate struct {
 	epoch    uint64
 	wake     chan struct{}
 	now      func() time.Time
+	// observe, when set, is told the backoff each time the gate closes
+	// and 0 when it opens (narad_remote_gate_backoff_seconds).
+	observe func(time.Duration)
+}
+
+// ObserveBackoff makes the gate report its backoff to fn: the backoff
+// each time it closes, 0 when it opens. fn runs under the gate's lock
+// and must not call back into the gate.
+func (g *Gate) ObserveBackoff(fn func(time.Duration)) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.observe = fn
+	if fn != nil {
+		if g.closed {
+			fn(g.backoff)
+		} else {
+			fn(0)
+		}
+	}
 }
 
 // NewGate returns an open gate.
@@ -120,6 +139,9 @@ func (g *Gate) Succeeded(probe bool) {
 	if g.closed || g.backoff != 0 {
 		g.closed, g.backoff = false, 0
 		g.signalLocked()
+		if g.observe != nil {
+			g.observe(0)
+		}
 	}
 }
 
@@ -213,6 +235,9 @@ func (g *Gate) closeLocked(backoff time.Duration, exact bool) {
 	}
 	g.until = g.now().Add(wait)
 	g.signalLocked()
+	if g.observe != nil {
+		g.observe(backoff)
+	}
 }
 
 func (g *Gate) signalLocked() {

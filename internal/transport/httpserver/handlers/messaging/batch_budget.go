@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/prometheus/client_golang/prometheus"
@@ -121,10 +122,22 @@ func (h *budgetHold) release() {
 	h.held = 0
 }
 
-// writeBudgetFull answers a body the budget could not take.
+// budgetFullLoggedAt rate-limits the budget's warning to one line per
+// budgetFullLogEvery (unix nanoseconds of the last line).
+var budgetFullLoggedAt atomic.Int64
+
+const budgetFullLogEvery = 10 * time.Second
+
+// writeBudgetFull answers a body the budget could not take, counts it,
+// and logs it at most once per budgetFullLogEvery.
 func writeBudgetFull(s *handlers.Set, w http.ResponseWriter) {
 	if c := budgetRejections.Load(); c != nil {
 		(*c).Inc()
+	}
+	now := time.Now().UnixNano()
+	if last := budgetFullLoggedAt.Load(); now-last >= int64(budgetFullLogEvery) && budgetFullLoggedAt.CompareAndSwap(last, now) {
+		s.Deps.Logger.Warn("batch produce refused with 503: the node's batch body budget (http.max_batch_body_bytes_in_flight) is full; see narad_http_batch_body_budget_rejections_total",
+			"limit_bytes", s.Deps.BatchBodyBudget)
 	}
 	w.Header().Set("Retry-After", "1")
 	s.WriteError(w, http.StatusServiceUnavailable, "batch produce bodies in flight on this node are at their limit; retry")
