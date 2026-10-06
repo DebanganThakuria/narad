@@ -372,3 +372,41 @@ func TestRemoteBatchZstdFramesAfterTheFirstDrawFromTheBudget(t *testing.T) {
 		t.Fatalf("a multi-frame zstd body decoding to 15 MiB with a 4 MiB budget: status %d (%s), want 503", res.Code, res.Body)
 	}
 }
+
+// A body sent without Content-Length (chunked, or HTTP/2 with no
+// content-length) is charged for the bytes it actually sends: a small
+// one never touches the budget, even when the budget is full, and a
+// large one still cannot read past it.
+func TestRemoteBatchBodyWithoutLengthTakesOnlyWhatItSends(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{}, 4)
+	br := &blockingBatchProducer{recordingBatchProducer: recordingBatchProducer{fakeBroker: &fakeBroker{}}, entered: entered, release: release}
+	s := handlers.New(handlers.Deps{Broker: br, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), BatchBodyBudget: 4 << 20})
+	h := ProduceBatch(s, nil)
+
+	big := batchOf(5, `"`+strings.Repeat("z", 900<<10)+`"`) // takes the whole 4 MiB budget
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		if res := postBatchWith(t, h, big, "", 0); res.Code != http.StatusAccepted {
+			t.Errorf("big body: %d", res.Code)
+		}
+	})
+	<-entered
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- postBatchWith(t, h, batchOf(20, `"small"`), "", -1) }()
+	select {
+	case <-entered:
+	case res := <-done:
+		t.Fatalf("a 2 KiB body without Content-Length while the budget is full: %d (%s), want 202", res.Code, res.Body)
+	}
+	close(release)
+	if res := <-done; res.Code != http.StatusAccepted {
+		t.Fatalf("a small body without Content-Length: %d, want 202", res.Code)
+	}
+	wg.Wait()
+
+	tooBig := batchOf(7, `"`+strings.Repeat("z", 900<<10)+`"`) // about 6 MiB: needs 5 MiB of 4
+	if res := postBatchWith(t, h, tooBig, "", -1); res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("a 6 MiB body without Content-Length on a 4 MiB budget: %d, want 503", res.Code)
+	}
+}

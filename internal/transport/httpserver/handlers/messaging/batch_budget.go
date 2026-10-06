@@ -157,19 +157,26 @@ func readBatchBody(s *handlers.Set, w http.ResponseWriter, r *http.Request, hold
 		s.WriteError(w, http.StatusUnsupportedMediaType, "unsupported Content-Encoding: want zstd, gzip or none")
 		return nil, false
 	}
-	// A declared length above the free size, or an undeclared one,
-	// takes its share of the budget before a byte is read.
-	declared := r.ContentLength
-	if declared < 0 {
-		declared = MaxBatchBodyBytes
-	}
-	if !hold.grow(min(declared, MaxBatchBodyBytes)) {
-		writeBudgetFull(s, w)
-		return nil, false
-	}
-	body, ok := s.ReadBody(w, r, MaxBatchBodyBytes)
-	if !ok {
-		return nil, false
+	var body []byte
+	if r.ContentLength < 0 {
+		// An undeclared length (chunked, or HTTP/2 without
+		// content-length) is charged for the bytes as they arrive: a
+		// small body never touches the budget.
+		var ok bool
+		if body, ok = readUndeclaredBody(s, w, r, hold); !ok {
+			return nil, false
+		}
+	} else {
+		// A declared length above the free size takes its share of the
+		// budget before a byte is read.
+		if !hold.grow(min(r.ContentLength, MaxBatchBodyBytes)) {
+			writeBudgetFull(s, w)
+			return nil, false
+		}
+		var ok bool
+		if body, ok = s.ReadBody(w, r, MaxBatchBodyBytes); !ok {
+			return nil, false
+		}
 	}
 	if encoding == "" || encoding == "identity" {
 		return body, true
@@ -188,6 +195,44 @@ func readBatchBody(s *handlers.Set, w http.ResponseWriter, r *http.Request, hold
 	}
 	return plain, true
 }
+
+// readUndeclaredBody reads a body of undeclared length under the 16 MiB
+// cap, growing hold as the bytes arrive. It answers the request itself
+// and returns false on any failure.
+func readUndeclaredBody(s *handlers.Set, w http.ResponseWriter, r *http.Request, hold *budgetHold) ([]byte, bool) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, &budgetedReader{r: r.Body, hold: hold}, MaxBatchBodyBytes))
+	if err == nil {
+		return body, true
+	}
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		s.WriteError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return nil, false
+	}
+	if errors.Is(err, errBudgetFull) {
+		writeBudgetFull(s, w)
+		return nil, false
+	}
+	s.WriteError(w, http.StatusBadRequest, "read body: "+err.Error())
+	return nil, false
+}
+
+// budgetedReader grows hold for every byte read through it.
+type budgetedReader struct {
+	r    io.ReadCloser
+	hold *budgetHold
+	n    int64
+}
+
+func (b *budgetedReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	b.n += int64(n)
+	if !b.hold.grow(min(b.n, MaxBatchBodyBytes)) {
+		return n, errBudgetFull
+	}
+	return n, err
+}
+
+func (b *budgetedReader) Close() error { return b.r.Close() }
 
 // zstdDecoders recycles decoders whose decoded size and window are
 // capped at the batch body size.
