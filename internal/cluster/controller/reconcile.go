@@ -141,8 +141,23 @@ func (c *Controller) assignTopic(ctx context.Context, listed topic.Topic, active
 		if !ok {
 			return
 		}
-		if err := c.store.AssignPartition(ctx, t.Name, p, owner); err != nil {
+		if err := c.placePartition(ctx, t, p, owner); err != nil {
 			continue
 		}
 	}
+}
+
+// placePartition records owner for partition p of t, which this pass
+// found without one. Once every member applies insert-only placement it
+// never replaces an owner placed since the read; until then it is a
+// plain assignment.
+func (c *Controller) placePartition(ctx context.Context, t topic.Topic, p int, owner string) error {
+	err := c.store.AssignPartitionIfAbsent(ctx, t.Name, p, owner, t.ID)
+	switch {
+	case errors.Is(err, metastore.ErrEntryTypeNotYetUsable):
+		return c.store.AssignPartition(ctx, t.Name, p, owner)
+	case errors.Is(err, metastore.ErrPartitionAssigned):
+		return nil
+	}
+	return err
 }

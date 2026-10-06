@@ -16,9 +16,11 @@ import (
 // would take a topic's stored history past topicSchemaBudgetBytes (a
 // child's copy counts against the child) or every topic's schemas
 // together past clusterSchemaBudgetBytes.
+// The state machine checks the same budgets again for the entry types
+// newer than 3.0.x (metastore.SchemaTopicBudgetBytes).
 const (
-	topicSchemaBudgetBytes   int64 = 4 << 20
-	clusterSchemaBudgetBytes int64 = 256 << 20
+	topicSchemaBudgetBytes   = metastore.SchemaTopicBudgetBytes
+	clusterSchemaBudgetBytes = metastore.SchemaClusterBudgetBytes
 )
 
 // schemaBudgets are the budgets a Manager enforces: the constants

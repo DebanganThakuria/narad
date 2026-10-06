@@ -56,6 +56,7 @@ func TestWriteJSONLargePayloadStillServed(t *testing.T) {
 // The leader's ownership refusal is a 403 carrying its reason, and a
 // wrapped topic-exists conflict (a name that differs from an existing
 // one only in letter case) says why; the bare sentinel keeps its text.
+// A topic that changed under the request is a 409 that says how.
 func TestBrokerErrorsMapForbiddenAndExplainedConflicts(t *testing.T) {
 	s := newTestSet(&fakeBroker{})
 	cases := []struct {
@@ -66,6 +67,9 @@ func TestBrokerErrorsMapForbiddenAndExplainedConflicts(t *testing.T) {
 		{err: fmt.Errorf("refused: %w", errs.ErrForbidden), wantStatus: http.StatusForbidden, wantBody: "refused: forbidden"},
 		{err: errs.ErrTopicAlreadyExists, wantStatus: http.StatusConflict, wantBody: "topic already exists"},
 		{err: fmt.Errorf("%w: \"Orders\" differs only in letter case", errs.ErrTopicAlreadyExists), wantStatus: http.StatusConflict, wantBody: "differs only in letter case"},
+		// A write the leader checked against a topic that was recreated
+		// before it applied.
+		{err: fmt.Errorf("%w: topic \"orders\" was recreated", errs.ErrTopicChanged), wantStatus: http.StatusConflict, wantBody: "was recreated"},
 	}
 	for _, tc := range cases {
 		res := httptest.NewRecorder()

@@ -149,13 +149,14 @@ A topic change is checked twice: by the node that receives it, and again by the 
 
 ## 409 Conflict {#status-409}
 
-**Where:** create a topic, change a topic, attach a child, create a user, and produce to a delay child.
+**Where:** create, change or delete a topic, attach or detach a child, create a user, and produce to a delay child.
 
 **Meaning:** the request conflicts with the current state:
 
 - The topic or user already exists, or a topic exists whose name differs from the requested one only in letter case (`Orders` next to `orders`): on a case-insensitive filesystem both would share one directory. The message names the existing topic.
 - The attach breaks a [fan-out](glossary.md#fan-out-child) rule: a child has exactly one parent and no children of its own, and a parent has at most 108 children.
-- The child's schema history is not identical to the parent's.
+- The child's schema history is not identical to the parent's: version by version the same JSON values once every member runs this release (**Unreleased**), byte for byte before.
+- The topic changed under the request twice in a row (**Unreleased**): it was deleted and recreated, or grew, after the leader checked the request against it, and again after the leader read it a second time (`topic changed since it was read`). Nothing was written. Read the topic again before you decide whether the change still applies.
 - A delay child's delay is longer than the parent's retention can hold, on attach, on create with `parent`, or when the parent's retention shrinks.
 - `schema_base_version` is not the current schema version, the topic already holds 1000 schema versions, or the topic is an attached child whose schema its parent manages.
 - A schema change, a create with a schema, or a create-as-child or attach that adopts a parent's schema history would take the topic's stored history past 4 MiB, or every schema in the cluster past 256 MiB (**Unreleased**). The message names the budget and what is stored, and says when the history (or the cluster) is already over the budget, stored before it applied, so that no new version fits ([Compatibility](schema-rules.md#compatibility)).

@@ -2,13 +2,16 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/errs"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
@@ -56,5 +59,16 @@ func TestForwardedAlterOfOneCapKeepsTheOtherCapCommittedBefore(t *testing.T) {
 	if br.stored.MaxInFlightPerPartition != 50 || br.stored.MaxAckedAheadPerPartition != 10 {
 		t.Fatalf("caps after the forwarded alter = in-flight %d, acked-ahead %d; want 50 and the committed 10",
 			br.stored.MaxInFlightPerPartition, br.stored.MaxAckedAheadPerPartition)
+	}
+}
+
+// A forwarded topic write the leader refuses because the topic changed
+// under it (deleted and recreated, or grown, after the check) answers
+// 409 with the reason, as the HTTP layer does, not an opaque 500.
+func TestTopicChangedIsAConflictOverRPC(t *testing.T) {
+	s := &RPCServer{}
+	status, msg := s.brokerErrorStatus("alter topic", fmt.Errorf("%w: topic \"orders\" was recreated", errs.ErrTopicChanged))
+	if status != http.StatusConflict || !strings.Contains(msg, "was recreated") {
+		t.Fatalf("brokerErrorStatus(topic changed) = %d %q, want 409 with the reason", status, msg)
 	}
 }

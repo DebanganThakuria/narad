@@ -240,6 +240,35 @@ func TestLegacyHeartbeatClearsTheReportedVersion(t *testing.T) {
 	}
 }
 
+// A member that stops heartbeating keeps the report it sent last for as
+// long as it is down, marked dead or not: only its own heartbeat
+// replaces it. So a node stopped to be rolled back still counts as this
+// release, and the leader may use a new entry type while it is down,
+// starting with the dead mark it writes for that node. That is why a
+// rollback is unsupported once every member has reported this release,
+// whether or not a new type has been used yet.
+func TestADownMemberCountsWithItsLastReport(t *testing.T) {
+	ctx := context.Background()
+	s, _ := singleVoter(t, "down-0")
+	m := Member{
+		ID: "down-1", Addr: "down-1:7942", ClusterAddr: "down-1:7943", Status: MemberAlive,
+		LastHeartbeat: 1000, Build: "narad test-build", EntryTypes: MaxEntryType,
+	}
+	if err := s.RegisterMember(ctx, m); err != nil {
+		t.Fatalf("RegisterMember: %v", err)
+	}
+	if err := s.MarkMemberDeadIf(ctx, "down-1", m.LastHeartbeat); err != nil {
+		t.Fatalf("MarkMemberDeadIf = %v; want the new entry type used for a member down since its last report", err)
+	}
+	got, err := s.GetMember("down-1")
+	if err != nil || got.Status != MemberDead || got.EntryTypes != MaxEntryType {
+		t.Fatalf("down-1 after the dead mark = %+v, %v; want dead, still reporting entry type %d", got, err, MaxEntryType)
+	}
+	if ok, reason := s.EveryMemberKnows(MaxEntryType); !ok {
+		t.Fatalf("EveryMemberKnows(%d) = false (%s); want true: the dead member's last report applies it", MaxEntryType, reason)
+	}
+}
+
 // The newest entry type the database has applied is the newest the
 // cluster has used: an entry of a newer type moves it, and an older one
 // never moves it back.

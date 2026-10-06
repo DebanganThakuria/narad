@@ -236,6 +236,15 @@ func (v *metadataDomainVersions) retireTopic(name string) {
 	v.schemas.retire(name, v.next.Add(1), &v.next)
 }
 
+// retireAssignments advances a deleted topic's assignment version and
+// keeps its cell a tombstone (see retireTopic): a prune of a row left
+// behind under a deleted name must not bring the name's cell back.
+func (v *metadataDomainVersions) retireAssignments(name string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.assignments.retire(name, v.next.Add(1), &v.next)
+}
+
 func (v *metadataDomainVersions) bumpKey(domain *keyedVersions, key string) {
 	v.mu.Lock()
 	domain.set(key, v.next.Add(1))

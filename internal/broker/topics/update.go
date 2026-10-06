@@ -58,29 +58,19 @@ func (m *Manager) IncreaseTopicPartitions(ctx context.Context, name string, newP
 		return topic.Topic{}, err
 	}
 
-	current, err := m.GetTopic(ctx, name)
-	if err != nil {
-		return topic.Topic{}, err
-	}
-	if err := authorizeManage(ctx, current); err != nil {
-		return topic.Topic{}, err
-	}
-	if newPartitions <= current.Partitions {
-		return topic.Topic{}, fmt.Errorf("%w: new partition count (%d) must be greater than current (%d); decrease is not supported",
-			ErrInvalid, newPartitions, current.Partitions)
-	}
-
-	if err := m.checkPlacement(); err != nil {
-		return topic.Topic{}, err
-	}
-
-	updated := current
-	updated.Partitions = newPartitions
-
-	if err = m.metastore.UpdateTopic(ctx, updated); err != nil {
-		if errors.Is(err, errs.ErrNotFound) {
-			return topic.Topic{}, ErrNotFound
+	current, updated, err := m.alterTopic(ctx, name, func(current topic.Topic) (topic.Topic, error) {
+		if newPartitions <= current.Partitions {
+			return topic.Topic{}, fmt.Errorf("%w: new partition count (%d) must be greater than current (%d); decrease is not supported",
+				ErrInvalid, newPartitions, current.Partitions)
 		}
+		if err := m.checkPlacement(); err != nil {
+			return topic.Topic{}, err
+		}
+		updated := current
+		updated.Partitions = newPartitions
+		return updated, nil
+	})
+	if err != nil {
 		return topic.Topic{}, err
 	}
 	if m.assigner != nil {
@@ -120,21 +110,12 @@ func (m *Manager) UpdateTopicRetention(ctx context.Context, name string, retenti
 		return topic.Topic{}, err
 	}
 
-	current, err := m.GetTopic(ctx, name)
+	current, updated, err := m.alterTopic(ctx, name, func(current topic.Topic) (topic.Topic, error) {
+		updated := current
+		updated.RetentionMs = retentionMs
+		return updated, nil
+	})
 	if err != nil {
-		return topic.Topic{}, err
-	}
-	if err := authorizeManage(ctx, current); err != nil {
-		return topic.Topic{}, err
-	}
-
-	updated := current
-	updated.RetentionMs = retentionMs
-
-	if err := m.metastore.UpdateTopic(ctx, updated); err != nil {
-		if errors.Is(err, errs.ErrNotFound) {
-			return topic.Topic{}, ErrNotFound
-		}
 		return topic.Topic{}, err
 	}
 
@@ -178,22 +159,13 @@ func (m *Manager) UpdateTopicCaps(ctx context.Context, name string, maxInFlight,
 		return topic.Topic{}, err
 	}
 
-	current, err := m.GetTopic(ctx, name)
+	_, updated, err := m.alterTopic(ctx, name, func(current topic.Topic) (topic.Topic, error) {
+		updated := current
+		updated.MaxInFlightPerPartition = resolveCap(maxInFlight, current.MaxInFlightPerPartition, m.cfg.DefaultMaxInFlightPerPartition)
+		updated.MaxAckedAheadPerPartition = resolveCap(maxAckedAhead, current.MaxAckedAheadPerPartition, m.cfg.DefaultMaxAckedAheadPerPartition)
+		return updated, nil
+	})
 	if err != nil {
-		return topic.Topic{}, err
-	}
-	if err := authorizeManage(ctx, current); err != nil {
-		return topic.Topic{}, err
-	}
-
-	updated := current
-	updated.MaxInFlightPerPartition = resolveCap(maxInFlight, current.MaxInFlightPerPartition, m.cfg.DefaultMaxInFlightPerPartition)
-	updated.MaxAckedAheadPerPartition = resolveCap(maxAckedAhead, current.MaxAckedAheadPerPartition, m.cfg.DefaultMaxAckedAheadPerPartition)
-
-	if err := m.metastore.UpdateTopic(ctx, updated); err != nil {
-		if errors.Is(err, errs.ErrNotFound) {
-			return topic.Topic{}, ErrNotFound
-		}
 		return topic.Topic{}, err
 	}
 
@@ -229,6 +201,26 @@ func resolveCap(requested *int64, stored, def int64) int64 {
 // UpdateTopicSchema when the metastore refuses a version because
 // another put landed between reading the history and proposing.
 const schemaPutAttempts = 3
+
+// schemaTopic reads the topic whose schema a request changes, under its
+// name lock, and checks that the request identity manages it and that
+// its schema is its own (an attached child's is its parent's).
+func (m *Manager) schemaTopic(ctx context.Context, name string) (topic.Topic, error) {
+	t, err := m.GetTopic(ctx, name)
+	if err != nil {
+		return topic.Topic{}, err
+	}
+	if err := authorizeManage(ctx, t); err != nil {
+		return topic.Topic{}, err
+	}
+	if t.IsChild() {
+		// The FSM also rejects this; checking here gives the caller a
+		// named error before a Raft round-trip.
+		return topic.Topic{}, fmt.Errorf("%w: schema of %q is managed by parent %q; detach to manage it independently",
+			errs.ErrFanoutSchemaManaged, name, t.Parent)
+	}
+	return t, nil
+}
 
 // UpdateTopicSchema registers a new JSON Schema version for the topic.
 //
@@ -275,18 +267,9 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 		return topic.Topic{}, err
 	}
 
-	t, err := m.GetTopic(ctx, name)
+	t, err := m.schemaTopic(ctx, name)
 	if err != nil {
 		return topic.Topic{}, err
-	}
-	if err := authorizeManage(ctx, t); err != nil {
-		return topic.Topic{}, err
-	}
-	if t.IsChild() {
-		// The FSM also rejects this; checking here gives the caller a
-		// named error before a Raft round-trip.
-		return topic.Topic{}, fmt.Errorf("%w: schema of %q is managed by parent %q; detach to manage it independently",
-			errs.ErrFanoutSchemaManaged, name, t.Parent)
 	}
 
 	if err := m.schemas.ValidateDefinition(ctx, name, rawSchema); err != nil {
@@ -294,6 +277,7 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 	}
 
 	var version int
+	reread := false
 	for attempt := 1; ; attempt++ {
 		history, err := schema.PersistedHistory(ctx, m.metastore, name)
 		if err != nil {
@@ -331,9 +315,16 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 			return topic.Topic{}, err
 		}
 
-		err = m.metastore.PutSchema(ctx, name, version, rawSchema)
+		err = m.putSchemaRecord(ctx, name, version, rawSchema, t.ID)
 		if err == nil {
 			break
+		}
+		if !reread && m.retryTopicChanged(err, 1, "schema", name) {
+			reread = true
+			if t, err = m.schemaTopic(ctx, name); err != nil {
+				return topic.Topic{}, err
+			}
+			continue
 		}
 		if errors.Is(err, errs.ErrAlreadyExists) && attempt < schemaPutAttempts {
 			m.logger.Warn("schema version conflict; re-reading history",

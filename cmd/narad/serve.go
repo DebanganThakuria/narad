@@ -337,7 +337,7 @@ type clusterStack struct {
 var _ handlers.LeaderSyncer = (*cluster.Router)(nil)
 
 func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, bc *brokerComponents, reg prometheus.Registerer, log *slog.Logger) *clusterStack {
-	ctrl := controller.New(ms, controller.Config{})
+	ctrl := controller.New(ms, controller.Config{Logger: log})
 
 	// One peer client for the whole process: the router, dispatcher,
 	// fan-out runner, mover, heartbeater, and join loop all forward

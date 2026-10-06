@@ -51,38 +51,54 @@ func (m *Manager) AttachChild(ctx context.Context, parent, child string, delayMs
 	if err := m.leaderBarrier(ctx); err != nil {
 		return err
 	}
-	p, err := m.getExistingTopic(ctx, parent)
-	if err != nil {
-		return err
-	}
-	c, err := m.getExistingTopic(ctx, child)
-	if err != nil {
-		return err
-	}
-	if err := authorizeManage(ctx, p); err != nil {
-		return err
-	}
-	if err := authorizeManage(ctx, c); err != nil {
-		return err
-	}
-	// A child with no schema adopts a copy of the parent's history.
-	childBytes, err := m.topicSchemaBytes(ctx, child)
-	if err != nil {
-		return err
-	}
-	if childBytes == 0 {
-		if err := m.checkAdoptSchemaBudget(ctx, parent, child); err != nil {
+	for attempt := 1; ; attempt++ {
+		p, c, err := m.attachSides(ctx, parent, child)
+		if err != nil {
 			return err
 		}
-	}
-	if err := m.metastore.AttachChild(ctx, parent, child, delayMs); err != nil {
+		err = m.attachChildRecord(ctx, parent, child, delayMs, p.ID, c.ID)
+		if m.retryTopicChanged(err, attempt, "attach", parent+"/"+child) {
+			continue
+		}
 		if errors.Is(err, errs.ErrNotFound) {
 			return fmt.Errorf("%w: %v", ErrNotFound, err)
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		break
 	}
 	m.logger.Info("fan-out child attached", "parent", parent, "child", child, "delay_ms", delayMs)
 	return nil
+}
+
+// attachSides reads both topics of an attach under their name locks,
+// checks that the request identity manages both, and that a child with
+// no schema of its own can adopt a copy of the parent's history within
+// the schema byte budgets.
+func (m *Manager) attachSides(ctx context.Context, parent, child string) (p, c topic.Topic, err error) {
+	if p, err = m.getExistingTopic(ctx, parent); err != nil {
+		return p, c, err
+	}
+	if c, err = m.getExistingTopic(ctx, child); err != nil {
+		return p, c, err
+	}
+	if err := authorizeManage(ctx, p); err != nil {
+		return p, c, err
+	}
+	if err := authorizeManage(ctx, c); err != nil {
+		return p, c, err
+	}
+	childBytes, err := m.topicSchemaBytes(ctx, child)
+	if err != nil {
+		return p, c, err
+	}
+	if childBytes == 0 {
+		if err := m.checkAdoptSchemaBudget(ctx, parent, child); err != nil {
+			return p, c, err
+		}
+	}
+	return p, c, nil
 }
 
 // DetachChild unlinks child from parent. The child keeps everything it
@@ -101,30 +117,47 @@ func (m *Manager) DetachChild(ctx context.Context, parent, child string) error {
 	if err := m.leaderBarrier(ctx); err != nil {
 		return err
 	}
+	for attempt := 1; ; attempt++ {
+		ids, err := m.detachSides(ctx, parent, child)
+		if err != nil {
+			return err
+		}
+		err = m.detachChildRecord(ctx, parent, child, ids[0], ids[1])
+		if m.retryTopicChanged(err, attempt, "detach", parent+"/"+child) {
+			continue
+		}
+		if errors.Is(err, errs.ErrNotFound) {
+			return fmt.Errorf("%w: %v", ErrNotFound, err)
+		}
+		if err != nil {
+			return err
+		}
+		break
+	}
+	m.logger.Info("fan-out child detached", "parent", parent, "child", child)
+	return nil
+}
+
+// detachSides reads both topics of a detach under their name locks and
+// checks that the request identity manages at least one of them. It
+// returns the incarnations read, parent first; a side that is missing
+// has none (the detach is then refused as not found).
+func (m *Manager) detachSides(ctx context.Context, parent, child string) (ids [2]string, err error) {
 	var sides []topic.Topic
-	for _, name := range []string{parent, child} {
+	for i, name := range []string{parent, child} {
 		t, err := m.getExistingTopic(ctx, name)
 		switch {
 		case err == nil:
 			sides = append(sides, t)
+			ids[i] = t.ID
 		case !errors.Is(err, ErrNotFound):
-			return err
+			return ids, err
 		}
 	}
 	if len(sides) == 0 {
-		return fmt.Errorf("%w: neither %q nor %q exists", ErrNotFound, parent, child)
+		return ids, fmt.Errorf("%w: neither %q nor %q exists", ErrNotFound, parent, child)
 	}
-	if err := authorizeManageAny(ctx, sides...); err != nil {
-		return err
-	}
-	if err := m.metastore.DetachChild(ctx, parent, child); err != nil {
-		if errors.Is(err, errs.ErrNotFound) {
-			return fmt.Errorf("%w: %v", ErrNotFound, err)
-		}
-		return err
-	}
-	m.logger.Info("fan-out child detached", "parent", parent, "child", child)
-	return nil
+	return ids, authorizeManageAny(ctx, sides...)
 }
 
 // getExistingTopic reads the topic, with a not-found error that names

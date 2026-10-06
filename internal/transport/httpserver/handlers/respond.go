@@ -205,6 +205,9 @@ func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 		// current state, not a malformed request.
 		errors.Is(err, errs.ErrSchemaVersionConflict),
 		errors.Is(err, errs.ErrSchemaHistoryFull),
+		// The topic changed under the request (deleted and recreated,
+		// or grown) after the leader checked it, twice in a row.
+		errors.Is(err, errs.ErrTopicChanged),
 		errors.Is(err, errs.ErrAlreadyExists):
 		s.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errs.ErrNotFound):

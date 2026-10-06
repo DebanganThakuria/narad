@@ -8,13 +8,15 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/debanganthakuria/narad/internal/errs"
-
 	bolt "go.etcd.io/bbolt"
+
+	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/errs"
 )
 
 // ErrNoAliveMembers is returned by AssignNewPartitions when no member is
@@ -193,6 +195,12 @@ func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromP
 	if err != nil {
 		return err
 	}
+	// The incarnation the placement is computed for: an insert-only
+	// placement is refused for any other.
+	var topicID string
+	if t, err := s.GetTopic(ctx, topicName); err == nil {
+		topicID = t.ID
+	}
 
 	existing, err := s.ListAssignments(topicName)
 	if err != nil {
@@ -214,11 +222,107 @@ func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromP
 		if !ok {
 			return nil
 		}
-		if err := s.AssignPartition(ctx, topicName, partition, owner); err != nil {
+		if err := s.placePartition(ctx, topicName, topicID, partition, owner); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// placePartition records owner for a partition the caller found without
+// one. Once every member applies insert-only placement it never replaces
+// an owner placed in between (the partition is placed: nil); until then
+// it is a plain AssignPartition.
+func (s *Store) placePartition(ctx context.Context, topicName, topicID string, partition int, owner string) error {
+	err := s.AssignPartitionIfAbsent(ctx, topicName, partition, owner, topicID)
+	switch {
+	case errors.Is(err, ErrEntryTypeNotYetUsable):
+		return s.AssignPartition(ctx, topicName, partition, owner)
+	case errors.Is(err, ErrPartitionAssigned):
+		return nil
+	}
+	return err
+}
+
+// AssignPartitionIfAbsent records ownerID as the owner of a partition
+// that has none on record, through Raft. It is refused when the
+// partition already has an owner (ErrPartitionAssigned: placement never
+// replaces one; moves change owners through CompleteMove), when the
+// topic is gone (ErrNotFound) or is not incarnation expectID
+// (errs.ErrTopicChanged), when the partition is out of range or the
+// owner is empty or was removed from the cluster (errs.ErrInvalidArgument).
+// While some member does not apply it, it proposes nothing and returns
+// ErrEntryTypeNotYetUsable.
+func (s *Store) AssignPartitionIfAbsent(ctx context.Context, topicName string, partition int, ownerID, expectID string) error {
+	return s.applyIfUsable(ctx, opAssignPartitionIfAbsent, assignIfAbsentPayload{Topic: topicName, Partition: partition, OwnerID: ownerID, ExpectID: expectID})
+}
+
+// PruneAssignment deletes the assignment row of a partition that does
+// not exist: its topic is gone, or the index is at or beyond the
+// topic's partition count. A row that belongs to a partition is refused
+// with ErrAssignmentLive, so a prune computed from a lagging read never
+// removes an owner; a row already gone answers ErrNotFound. While some
+// member does not apply it, it proposes nothing and returns
+// ErrEntryTypeNotYetUsable.
+func (s *Store) PruneAssignment(ctx context.Context, topicName string, partition int) error {
+	return s.applyIfUsable(ctx, opPruneAssignment, pruneAssignmentPayload{Topic: topicName, Partition: partition})
+}
+
+// OrphanAssignments lists, from the local replica, the assignment rows
+// that belong to no partition: their topic is gone, or the partition
+// index is at or beyond the topic's count. Releases before 3.1.0 could
+// leave such rows behind a topic delete; the leader prunes them
+// (PruneAssignment), which re-checks each row as it applies.
+func (s *Store) OrphanAssignments() ([]Assignment, error) {
+	s.fsm.mu.RLock()
+	defer s.fsm.mu.RUnlock()
+	var out []Assignment
+	err := s.fsm.view(func(tx *bolt.Tx) error {
+		partitions := map[string]int{}
+		if err := tx.Bucket(bucketTopics).ForEach(func(k, v []byte) error {
+			var t topic.Topic
+			if err := json.Unmarshal(v, &t); err != nil {
+				return err
+			}
+			partitions[string(k)] = t.Partitions
+			return nil
+		}); err != nil {
+			return err
+		}
+		// The key names the row ("<topic>:<partition>"), so only the
+		// orphans' values are decoded.
+		return tx.Bucket(bucketAssignments).ForEach(func(k, v []byte) error {
+			name, partition, ok := splitAssignmentKey(k)
+			if !ok {
+				return nil
+			}
+			if n, exists := partitions[name]; exists && partition < n {
+				return nil
+			}
+			a := Assignment{Topic: name, Partition: partition}
+			var stored Assignment
+			if json.Unmarshal(v, &stored) == nil {
+				a.OwnerID = stored.OwnerID
+			}
+			out = append(out, a)
+			return nil
+		})
+	})
+	return out, err
+}
+
+// splitAssignmentKey parses an assignment key, "<topic>:<partition>".
+// Topic names cannot contain ':', so the last one separates the two.
+func splitAssignmentKey(key []byte) (topicName string, partition int, ok bool) {
+	i := bytes.LastIndexByte(key, ':')
+	if i <= 0 {
+		return "", 0, false
+	}
+	p, err := strconv.Atoi(string(key[i+1:]))
+	if err != nil || p < 0 {
+		return "", 0, false
+	}
+	return string(key[:i]), p, true
 }
 
 // awaitVotersRegistered waits until every Raft voter has a member record,

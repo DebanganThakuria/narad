@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 )
 
 // PurgeError reports a DeleteTopic that removed the topic's metadata
@@ -58,16 +60,24 @@ func (m *Manager) DeleteTopicID(ctx context.Context, name string) (string, error
 		return "", err
 	}
 
-	t, err := m.GetTopic(ctx, name)
-	if err != nil {
-		return "", err
-	}
-	if err := authorizeManage(ctx, t); err != nil {
-		return "", err
-	}
-
-	if err := m.deleteTopicMetadata(ctx, name); err != nil {
-		return "", err
+	var t topic.Topic
+	for attempt := 1; ; attempt++ {
+		var err error
+		t, err = m.GetTopic(ctx, name)
+		if err != nil {
+			return "", err
+		}
+		if err := authorizeManage(ctx, t); err != nil {
+			return "", err
+		}
+		err = m.deleteTopicMetadata(ctx, name, t.ID)
+		if m.retryTopicChanged(err, attempt, "delete", name) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		break
 	}
 	if err := m.purgeTopicLocked(ctx, name, t.ID); err != nil {
 		return t.ID, PurgeError{Topic: name, Err: err}
@@ -83,19 +93,20 @@ type assignmentLocker interface {
 }
 
 // deleteTopicMetadata deletes the topic's record (and with it its
-// schemas and assignment rows) under the metastore's assignment lock.
+// schemas and assignment rows), read as incarnation id, under the
+// metastore's assignment lock.
 // The controller's placement pass re-reads each topic under that lock
 // before writing owners, so holding it here means the pass either
 // finishes first (and the delete removes its rows) or sees the topic
 // gone; without it a pass could write rows for the deleted topic that a
 // later same-named topic inherited. The caller holds the topic's name
 // lock: the lock order is name lock, then assignment lock, everywhere.
-func (m *Manager) deleteTopicMetadata(ctx context.Context, name string) error {
+func (m *Manager) deleteTopicMetadata(ctx context.Context, name, id string) error {
 	if l, ok := m.metastore.(assignmentLocker); ok {
 		unlock := l.LockAssignments()
 		defer unlock()
 	}
-	return m.metastore.DeleteTopic(ctx, name)
+	return m.deleteTopicRecord(ctx, name, id)
 }
 
 // PurgeTopic drops all local state of one incarnation of a topic
