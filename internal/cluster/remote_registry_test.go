@@ -21,6 +21,7 @@ import (
 	"time"
 
 	domremote "github.com/debanganthakuria/narad/internal/domain/remote"
+	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
@@ -158,10 +159,14 @@ func startRegCluster(t *testing.T, secret string, targetPort int, postures map[s
 			t.Fatal(err)
 		}
 	}
+	// The actor of every registry write these tests send: the leader
+	// re-authorizes it against its own replica.
+	rigSeedUser(t, leader, "alice", rigRandomString(18), user.Grant{Action: user.ActionAdmin}, false)
 	for _, n := range nodes {
 		for _, m := range ids {
 			waitForMember(t, n.store, m)
 		}
+		regWaitFor(t, func() bool { _, err := n.store.GetUser(context.Background(), "alice"); return err == nil })
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	var served sync.WaitGroup

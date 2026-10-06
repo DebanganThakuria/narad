@@ -171,27 +171,35 @@ func (l *RemoteLinks) ServeWrite(ctx context.Context, req nodewire.RemoteWriteRe
 	return errorResponse(http.StatusBadRequest, "unsupported remote write")
 }
 
-// actorContext is the context a remote write runs under: the actor the
-// ingress named, as this node, the leader, knows it, looked up after the
-// once-per-term leader barrier, as RPCServer.actorContext does for a
-// forwarded topic write. A user the leader does not know is refused with
-// 403 before anything runs. Without an actor (security off on the
-// ingress) the write runs with no identity.
+// actorContext is the context a remote child write runs under
+// (leaderActorContext). Without an actor (security off on the ingress)
+// the write runs with no identity.
 func (l *RemoteLinks) actorContext(ctx context.Context, actor string) (context.Context, *nodewire.Response) {
 	if actor == "" {
 		return ctx, nil
 	}
-	if err := l.d.Store.LeaderBarrier(ctx); err != nil {
+	return leaderActorContext(ctx, l.d.Store, l.d.Log, actor)
+}
+
+// leaderActorContext resolves the actor the ingress named as this node,
+// the leader, knows it, looked up after the once-per-term leader
+// barrier, as RPCServer.actorContext does for a forwarded topic write.
+// A user the leader does not know is refused with 403 before anything
+// runs. Every forwarded remote write, registry and children alike, goes
+// through it, so the ingress replica's view of the caller never decides
+// alone.
+func leaderActorContext(ctx context.Context, store *metastore.Store, log *slog.Logger, actor string) (context.Context, *nodewire.Response) {
+	if err := store.LeaderBarrier(ctx); err != nil {
 		res := errorResponse(http.StatusServiceUnavailable, "control plane temporarily unavailable; retry")
 		return nil, &res
 	}
-	u, err := l.d.Store.GetUser(ctx, actor)
+	u, err := store.GetUser(ctx, actor)
 	if errors.Is(err, errs.ErrNotFound) {
 		res := errorResponse(http.StatusForbidden, "caller unknown to the leader")
 		return nil, &res
 	}
 	if err != nil {
-		l.d.Log.Error("remote child write: look up the caller", "actor", actor, "err", err)
+		log.Error("remote write: look up the caller", "actor", actor, "err", err)
 		res := errorResponse(http.StatusServiceUnavailable, "control plane temporarily unavailable; retry")
 		return nil, &res
 	}

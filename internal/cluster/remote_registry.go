@@ -62,7 +62,16 @@ const checkFanoutTimeout = remote.CheckTimeout + 5*time.Second
 const statusFanoutTimeout = 5 * time.Second
 
 // ServeWrite implements RegistryLeader.
+//
+// Every registry write is re-authorized here against the leader's own
+// user records (leaderActorContext, then admin), as a remote child write
+// is: the ingress checked a replica that may lag the leader. A write
+// with no caller is refused too; the ingress requires security for
+// these routes, so an empty actor is never legitimate.
 func (r *RemoteRegistry) ServeWrite(ctx context.Context, req nodewire.RemoteWriteRequest) nodewire.Response {
+	if refusal := r.authorize(ctx, req); refusal != nil {
+		return *refusal
+	}
 	switch req.SubOp {
 	case nodewire.RemoteSubCreate:
 		return r.create(ctx, req)
@@ -75,6 +84,29 @@ func (r *RemoteRegistry) ServeWrite(ctx context.Context, req nodewire.RemoteWrit
 	default:
 		return errorResponse(http.StatusBadRequest, "unsupported remote write")
 	}
+}
+
+// authorize refuses (403, with a refused audit line of class denied) a
+// registry write whose caller the leader does not know, or knows but
+// not as an admin, or that names no caller.
+func (r *RemoteRegistry) authorize(ctx context.Context, req nodewire.RemoteWriteRequest) *nodewire.Response {
+	deny := func(res nodewire.Response) *nodewire.Response {
+		if res.Status == http.StatusForbidden {
+			remote.LeaderAudit(r.d.Log, remote.AuditEvent{Event: req.SubOp, Actor: req.Actor, RequestID: req.RequestID, Outcome: remote.OutcomeRefused, Class: "denied"})
+		}
+		return &res
+	}
+	if req.Actor == "" {
+		return deny(errorResponse(http.StatusForbidden, "caller required: remotes need security on"))
+	}
+	actx, refusal := leaderActorContext(ctx, r.d.Store, r.d.Log, req.Actor)
+	if refusal != nil {
+		return deny(*refusal)
+	}
+	if refusal := requireAdmin(actx); refusal != nil {
+		return deny(*refusal)
+	}
+	return nil
 }
 
 // create proposes opPutRemote.
