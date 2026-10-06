@@ -182,6 +182,18 @@ func (rs *remoteState) observe(e *remote.Entry) {
 	rs.sem.Resize(e.Limits().MaxInFlight)
 }
 
+// superseded reports whether a newer entry for the remote (another
+// remote under the name, or a newer credential version) arrived since e
+// was looked up. An answer to e then says nothing about the remote as it
+// now stands.
+func (rs *remoteState) superseded(e *remote.Entry) bool {
+	rs.mu.Lock()
+	cur := rs.entry
+	rs.mu.Unlock()
+	return cur != nil && cur != e &&
+		(cur.RemoteID() != e.RemoteID() || cur.CredentialVersion() > e.CredentialVersion())
+}
+
 // capabilities is what the remote's batch produce takes, probed once
 // per remote per node and credential version. While a probe runs, or
 // after one proved nothing, the conservative defaults apply.
@@ -915,6 +927,16 @@ func (sh *slabShip) sendChunk(ctx context.Context, lane *laneShip, e *remote.Ent
 		}
 		return
 	}
+	if rs.superseded(e) {
+		// A password rotation (or a new remote under the name) arrived
+		// while the lane waited for a slot: send nothing with the old
+		// credential; the lane looks the entry up again.
+		rs.sem.Release()
+		if probe {
+			rs.gate.Released()
+		}
+		return
+	}
 	caps := s.capabilities(ctx, rs, e, link.Topic)
 	maxMessages := caps.MaxMessages
 	if len(lane.plan) > 0 {
@@ -1063,6 +1085,15 @@ func (sh *slabShip) act(ctx context.Context, lane *laneShip, rs *remoteState, e 
 		sh.hold(lane, -1, rs.gate)
 
 	case sink.ActGate:
+		if rs.superseded(e) {
+			// The answer is to a credential the cache has since replaced
+			// (a 401 to the old password): it must not close the gate the
+			// new credential reopened. The lane retries with the new one.
+			if probe {
+				rs.gate.Released()
+			}
+			return
+		}
 		rs.gate.Failed(v, probe)
 		sh.cur.setLane(lane.idx, v.State)
 		sh.hold(lane, -1, rs.gate)

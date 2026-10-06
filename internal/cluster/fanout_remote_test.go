@@ -18,6 +18,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/remote"
+	"github.com/debanganthakuria/narad/internal/remote/sink"
 )
 
 // remoteRig is a source linked to a secure target through remote "b".
@@ -610,5 +611,31 @@ func TestRemoteChildSlabSeesAChangeAppliedAfterItsStubWasRead(t *testing.T) {
 	rg.target.awaitDispatched(t, 5*time.Second)
 	if got := rg.target.records(t, "orders"); len(got) != 0 {
 		t.Fatalf("the slab sent %d records on a paused link", len(got))
+	}
+}
+
+// A lane that looked its entry up before a password rotation reached
+// this node must not send with the superseded credential: its 401 would
+// close the remote's gate for every link although the cache already
+// holds the corrected password.
+func TestRemoteChildLaneNeverSendsWithASupersededCredential(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{})
+	s := rg.src.runner.sender()
+	stale := entryFor(t, rg.target, "b", "an-old-password", 1, domremote.Limits{}, nil)
+	rotated := entryFor(t, rg.target, "b", rigReplPass, 2, domremote.Limits{}, nil)
+	rg.src.lookup.Set(stale)
+	_, rs, _ := s.entry("b")
+	rg.src.lookup.Set(rotated)
+	if _, _, state := s.entry("b"); state != "" {
+		t.Fatalf("lookup state %q", state)
+	}
+	key := fanoutCursorKey{parent: "orders", partition: 0, child: "orders-to-b", epoch: rg.stub.AttachEpoch, remote: true}
+	cur := newRemoteCursor(key)
+	sh := &slabShip{s: s, cur: cur, key: key, cancel: func() {}, link: rg.stub}
+	recs := []topic.KeyedRecord{{Offset: 0, Payload: []byte(`{"seq":0}`), CommittedAtUnixMs: time.Now().UnixMilli()}}
+	lane := &laneShip{recs: recs, done: -1, cap: cur.chunkCap(0), backoff: sink.LaneBackoff(), b64: map[int64]bool{}}
+	sh.sendChunk(context.Background(), lane, stale, rs, rg.stub.Remote, false)
+	if rs.gate.Closed() {
+		t.Fatal("a send with the superseded credential closed the remote's gate")
 	}
 }
