@@ -10,6 +10,10 @@ summarized more briefly than the 1.x and later entries.
 
 ## [Unreleased]
 
+### Fixed
+- The delivery contract now lists a duplicate path it left out: a partition owner that crashes after storing a commit but before answering it gets the commit again, on the same partition once it is back or, after 3 s, on a live sibling, so those messages are stored twice. Each copy has its own lease, so two consumers can hold and ack the two copies at the same time. Nothing changes in the broker; see [Delivery contract](docs/understand/delivery-contract.md#at-least-once).
+- The cluster crash test no longer reports two consumers acking two stored copies of one message as a double lease. It now counts a double lease only for two acks of the same copy (same topic, partition and offset), and reports further copies separately as `copies=`. It failed once in 18 runs this way, on a duplicate the contract allows.
+
 ## [3.1.0] - 2026-10-06
 
 ### Added
