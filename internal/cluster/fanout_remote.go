@@ -875,7 +875,16 @@ func (s *remoteSender) remoteStateIfAny(name string) *remoteState {
 // waiting for, so a re-read does not spin against a remote that is down.
 func (sh *slabShip) waitBeforeReread(ctx context.Context) {
 	if gate := sh.rereadGate.Load(); gate != nil {
+		start := time.Now()
 		_ = gate.WaitDue(ctx)
+		// A probe given back without an answer leaves the gate due at
+		// once: wait at least its shortest backoff, so the re-read never
+		// spins against a closed gate.
+		if gate.Closed() {
+			if d := sink.GateMinBackoff - time.Since(start); d > 0 {
+				sleepCtx(ctx, d)
+			}
+		}
 		return
 	}
 	if d := time.Duration(sh.rereadWait.Load()); d > 0 {
@@ -923,11 +932,23 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 		rs := s.remoteState(link.Name)
 		// A lane about to wait on a closed gate keeps its records in the
 		// held budget first, so an outage never pins parent log frames
-		// outside max_held_bytes; a full budget asks for a re-read.
-		if rs.gate.WouldWait() && !sh.hold(lane, -1, rs.gate) {
-			return
+		// outside max_held_bytes; a full budget asks for a re-read. A
+		// lane whose sibling in this slab holds the probe waits for its
+		// answer with the records in hand instead (one request, as the
+		// prober's own records wait): a re-read would end the probe
+		// before the target answered it, and the gate would never open.
+		if wait, siblingProbe := rs.gate.WouldWaitFor(sh); wait {
+			if siblingProbe {
+				if rs.gate.AwaitProbe(ctx, sh) != nil {
+					return
+				}
+				continue
+			}
+			if !sh.hold(lane, -1, rs.gate) {
+				return
+			}
 		}
-		probe, err := rs.gate.Wait(ctx)
+		probe, err := rs.gate.WaitAs(ctx, sh)
 		if err != nil {
 			return
 		}
@@ -971,7 +992,10 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 			continue
 		}
 		lane.retryStall = false
-		if ok, _, _ := s.checkTarget(ctx, sh.cur, entry, rs, stub); !ok {
+		// The check is a request like a chunk: it runs under sendCtx, so
+		// a sibling's re-read never cuts it off before the target
+		// answers and its answer is always recorded.
+		if ok, _, _ := s.checkTarget(sh.sendCtx, sh.cur, entry, rs, stub); !ok {
 			release()
 			if ctx.Err() != nil {
 				return

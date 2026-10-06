@@ -122,3 +122,49 @@ func TestRemoteChildLaneParkedOnTheGateSendsNothingAfterAPause(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// manyKeyRecords are n records at offsets from base over 32 keys, so a
+// slab of them spreads over every lane.
+func manyKeyRecords(base, n int) []topic.KeyedRecord {
+	recs := make([]topic.KeyedRecord, n)
+	for i := range recs {
+		recs[i] = topic.KeyedRecord{Offset: int64(base + i), Key: fmt.Sprintf("key-%d", i%32), Payload: fmt.Appendf(nil, `{"seq":%d}`, base+i), CommittedAtUnixMs: time.Now().UnixMilli()}
+	}
+	return recs
+}
+
+// A closed gate reopens on a healthy remote even when the held budget
+// can take nothing: lanes waiting on the probe a sibling lane of their
+// own slab holds wait for its answer instead of ending it with a
+// re-read, so the probe's target check and chunk reach the target.
+func TestRemoteChildProbeReopensTheGateWhenNothingCanBeHeld(t *testing.T) {
+	rg, running := laneRig(t, remoteRigOpts{lanes: 4, rigSourceOpts: rigSourceOpts{heldBudget: -1}})
+	// The cursor's own loop would probe from its idle path; drive one
+	// registered cursor by hand instead.
+	rg.src.stop()
+	cur, forget := rg.src.runner.registerRemoteCursor(running.key)
+	defer forget()
+	rg.target.faults.slowDelay = 300 * time.Millisecond
+	rg.target.faults.set("slow")
+	rs := rg.src.runner.sender().remoteState("b")
+	unavailable := sink.Verdict{Action: sink.ActRetry, State: topic.RemoteStateUnavailable, Class: topic.RemoteStateUnavailable}
+	for range sink.GateTripAfter {
+		rs.gate.Failed(unavailable, false)
+	}
+	if !rs.gate.Closed() {
+		t.Fatal("the gate did not close")
+	}
+	rigWait(t, "the probe to fall due", 5*time.Second, func() bool { return !rs.gate.WouldWait() })
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res := <-rg.commitAsync(ctx, cur, manyKeyRecords(1000, 64))
+	if res.reread || len(res.remaining) != 0 {
+		t.Fatalf("commit = %d remaining, reread %v; want the probe to reopen the gate and the slab shipped", len(res.remaining), res.reread)
+	}
+	if rs.gate.Closed() {
+		t.Fatal("the gate is still closed after the probe reached a healthy target")
+	}
+	if v := counterValue(rg.src.metrics.RemoteLink.RereadsTotal.WithLabelValues("orders", "orders-to-b")); v != 0 {
+		t.Fatalf("%v re-reads while a sibling lane held the probe", v)
+	}
+}

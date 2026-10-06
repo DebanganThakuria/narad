@@ -339,3 +339,43 @@ func TestGateEscalatesOnFailedProbesNotOnAnswersInFlight(t *testing.T) {
 		t.Fatalf("after a failed probe: backoff=%s, want %s", g.Backoff(), 2*GateMinBackoff)
 	}
 }
+
+// A probe taken for an owner is known as that owner's until it is
+// answered, so a sibling of the prober waits for the answer instead of
+// giving up its records.
+func TestGateKnowsWhoseProbeIsOut(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_000, 0)}
+	g := NewGate()
+	g.now = clock.Now
+	g.Failed(Verdict{Action: ActGate, State: topic.RemoteStateAuthFailed}, false)
+	clock.Advance(GateMaxBackoff)
+	slab, other := new(int), new(int)
+	if probe, err := g.WaitAs(context.Background(), slab); err != nil || !probe {
+		t.Fatalf("WaitAs = (%v, %v), want the due probe", probe, err)
+	}
+	if wait, own := g.WouldWaitFor(slab); !wait || !own {
+		t.Fatalf("WouldWaitFor(owner) = (%v, %v), want (true, true)", wait, own)
+	}
+	if wait, own := g.WouldWaitFor(other); !wait || own {
+		t.Fatalf("WouldWaitFor(other) = (%v, %v), want (true, false)", wait, own)
+	}
+	done := make(chan error, 1)
+	go func() { done <- g.AwaitProbe(context.Background(), slab) }()
+	select {
+	case <-done:
+		t.Fatal("AwaitProbe returned while the owner's probe was out")
+	case <-time.After(50 * time.Millisecond):
+	}
+	g.Succeeded(true)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("AwaitProbe = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("AwaitProbe never woke on the probe's answer")
+	}
+	if wait, own := g.WouldWaitFor(slab); wait || own {
+		t.Fatalf("after the answer WouldWaitFor = (%v, %v), want (false, false)", wait, own)
+	}
+}

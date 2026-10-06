@@ -35,9 +35,12 @@ type Gate struct {
 	backoff  time.Duration
 	failures int
 	probing  bool
-	epoch    uint64
-	wake     chan struct{}
-	now      func() time.Time
+	// prober is who holds the probe, as its taker named it (nil: no
+	// one said).
+	prober any
+	epoch  uint64
+	wake   chan struct{}
+	now    func() time.Time
 	// observe, when set, is told the backoff each time the gate closes
 	// and 0 when it opens (narad_remote_gate_backoff_seconds).
 	observe func(time.Duration)
@@ -66,6 +69,12 @@ func NewGate() *Gate { return &Gate{wake: make(chan struct{}), now: time.Now} }
 // that the chunk is the gate's probe: the caller must then report its
 // outcome (Succeeded, Failed or Released) before any other chunk goes.
 func (g *Gate) Wait(ctx context.Context) (probe bool, err error) {
+	return g.WaitAs(ctx, nil)
+}
+
+// WaitAs is Wait for owner: a probe it hands out is recorded as owner's
+// (see WouldWaitFor and AwaitProbe).
+func (g *Gate) WaitAs(ctx context.Context, owner any) (probe bool, err error) {
 	for {
 		g.mu.Lock()
 		if !g.closed {
@@ -74,7 +83,7 @@ func (g *Gate) Wait(ctx context.Context) (probe bool, err error) {
 		}
 		now := g.now()
 		if !g.probing && !now.Before(g.until) {
-			g.probing = true
+			g.probing, g.prober = true, owner
 			g.mu.Unlock()
 			return true, nil
 		}
@@ -99,7 +108,7 @@ func (g *Gate) TryWait() (probe, ok bool) {
 		return false, true
 	}
 	if !g.probing && !g.now().Before(g.until) {
-		g.probing = true
+		g.probing, g.prober = true, nil
 		return true, true
 	}
 	return false, false
@@ -122,6 +131,25 @@ func (g *Gate) WaitDue(ctx context.Context) error {
 		}
 		g.mu.Unlock()
 		if err := sleepOrWake(ctx, wake, d); err != nil {
+			return err
+		}
+	}
+}
+
+// AwaitProbe blocks while the gate's probe is out and held by owner,
+// or until ctx ends. A lane whose sibling holds the probe waits here
+// for its answer instead of giving up its records: ending the slab
+// would end the probe before the target answered it.
+func (g *Gate) AwaitProbe(ctx context.Context, owner any) error {
+	for {
+		g.mu.Lock()
+		if !g.probing || owner == nil || g.prober != owner {
+			g.mu.Unlock()
+			return nil
+		}
+		wake := g.wake
+		g.mu.Unlock()
+		if err := sleepOrWake(ctx, wake, -1); err != nil {
 			return err
 		}
 	}
@@ -151,7 +179,7 @@ func (g *Gate) Succeeded(probe bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if probe {
-		g.probing = false
+		g.probing, g.prober = false, nil
 	}
 	g.failures = 0
 	if g.closed || g.backoff != 0 {
@@ -169,7 +197,7 @@ func (g *Gate) Released() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.probing {
-		g.probing = false
+		g.probing, g.prober = false, nil
 		g.signalLocked()
 	}
 }
@@ -181,7 +209,7 @@ func (g *Gate) Failed(v Verdict, probe bool) (laneBackoff bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if probe {
-		g.probing = false
+		g.probing, g.prober = false, nil
 	}
 	if g.closed && !probe {
 		// While the gate is closed only the probe is sent, so this
@@ -238,9 +266,17 @@ func (g *Gate) Backoff() time.Duration {
 // before such a wait; one that would take the due probe holds nothing,
 // so a lane that cannot hold still gets to probe.
 func (g *Gate) WouldWait() bool {
+	wait, _ := g.WouldWaitFor(nil)
+	return wait
+}
+
+// WouldWaitFor is WouldWait, and also reports whether the probe Wait
+// would block on is owner's (taken with WaitAs).
+func (g *Gate) WouldWaitFor(owner any) (wait, ownersProbe bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.closed && (g.probing || g.now().Before(g.until))
+	wait = g.closed && (g.probing || g.now().Before(g.until))
+	return wait, wait && g.probing && owner != nil && g.prober == owner
 }
 
 // Closed reports whether the gate is backing off.
