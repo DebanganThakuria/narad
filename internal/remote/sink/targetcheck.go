@@ -17,8 +17,9 @@ const UnverifiedAfter = 10 * time.Minute
 
 // TargetView is what a target's children listing says about the topic a
 // link sends to. A target older than this release omits parent_id and
-// the remote objects: ServesIDs is false, no loop is possible through
-// it, and recreate detection is off.
+// the remote objects: ServesIDs is false and no loop is possible through
+// it (it cannot hold a remote child). Recreate detection then reads the
+// topic's id from its describe answer, which v3.1.0 serves.
 type TargetView struct {
 	ParentID       string
 	ServesIDs      bool
@@ -112,13 +113,42 @@ func CheckTarget(ctx context.Context, e *remote.Entry, topicName, recordedTarget
 		return TargetResult{Class: topic.RemoteClassEdge}
 	}
 	res := TargetResult{Verified: true, View: view}
+	targetID, knowsID := view.ParentID, view.ServesIDs
+	if !knowsID && recordedTargetID != "" {
+		targetID, knowsID = describeID(ctx, e, topicName)
+	}
 	switch {
 	case view.RemoteChildren > 0 && !topic.RemoteChainsAllowed:
 		res.State = topic.RemoteStateTargetHasRemoteChildren
-	case view.ServesIDs && recordedTargetID != "" && view.ParentID != recordedTargetID:
+	case knowsID && recordedTargetID != "" && targetID != recordedTargetID:
 		res.State = topic.RemoteStateTargetReplaced
 	}
 	return res
+}
+
+// describeID reads the target topic's id from GET /v1/topics/{t}, for a
+// target whose children listing carries no parent_id (v3.1.0). ok is
+// false when the answer carries no id; the check then cannot compare.
+func describeID(ctx context.Context, e *remote.Entry, topicName string) (id string, ok bool) {
+	path, err := remote.TopicPath(topicName)
+	if err != nil {
+		return "", false
+	}
+	resp, err := e.Do(ctx, remote.Outbound{Method: http.MethodGet, Path: path})
+	if err != nil {
+		return "", false
+	}
+	body, err := remote.ReadBody(resp, remote.MaxReadAnswerBytes)
+	if err != nil || resp.StatusCode != http.StatusOK || !isJSON(resp) {
+		return "", false
+	}
+	var d struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(body, &d) != nil || d.ID == "" {
+		return "", false
+	}
+	return d.ID, true
 }
 
 // checkClass classifies a failed check's answer as the create-time

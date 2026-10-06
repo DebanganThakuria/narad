@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -80,7 +81,8 @@ func rigStore(tb testing.TB, id string) *metastore.Store {
 type rigFaults struct {
 	// mode: "" (pass), "down" (503 HTML), "edge403" (HTML 403),
 	// "reset" (hang up without answering), "slow" (sleep then pass),
-	// "nobatch" (the batch route answers Go's 404).
+	// "nobatch" (the batch route answers Go's 404), "v310" (the
+	// children listing as v3.1.0 answers it: no parent_id, no remote).
 	mode atomic.Value
 	// batches counts batch requests that reached the real router and
 	// were accepted.
@@ -130,6 +132,11 @@ func (f *rigFaults) wrap(next http.Handler) http.Handler {
 			}
 		case "slow":
 			time.Sleep(f.slowDelay)
+		case "v310":
+			if strings.HasSuffix(r.URL.Path, "/children") && r.Method == http.MethodGet {
+				serveAsV310Listing(w, r, next)
+				return
+			}
 		}
 		if !batch {
 			next.ServeHTTP(w, r)
@@ -148,6 +155,32 @@ func (f *rigFaults) wrap(next http.Handler) http.Handler {
 			}
 		}
 	})
+}
+
+// serveAsV310Listing answers a children listing without the fields
+// v3.1.0 does not serve: the top-level parent_id and each child's remote.
+func serveAsV310Listing(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	rec := httptest.NewRecorder()
+	next.ServeHTTP(rec, r)
+	body := rec.Body.Bytes()
+	var listing map[string]any
+	if rec.Code == http.StatusOK && json.Unmarshal(body, &listing) == nil {
+		delete(listing, "parent_id")
+		if children, ok := listing["children"].([]any); ok {
+			for _, c := range children {
+				if m, ok := c.(map[string]any); ok {
+					delete(m, "remote")
+				}
+			}
+		}
+		body, _ = json.Marshal(listing)
+	}
+	for k, v := range rec.Header() {
+		w.Header()[k] = v
+	}
+	w.Header().Del("Content-Length")
+	w.WriteHeader(rec.Code)
+	_, _ = w.Write(body)
 }
 
 type statusRecorder struct {

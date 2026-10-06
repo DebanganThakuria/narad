@@ -227,8 +227,9 @@ func TestChecksAgainstOlderAndEdgeTargets(t *testing.T) {
 }
 
 // A target whose children listing has no parent_id (a release before
-// remote children) passes with the no-IDs warning: loop, chain and
-// recreate detection are off for the link.
+// remote children) passes with a warning: it cannot hold a remote child,
+// so loop and chain detection start once it is upgraded; recreate
+// detection reads the id from the describe answer instead.
 func TestChecksWarnWhenTheTargetServesNoIDs(t *testing.T) {
 	srv := fakeNarad(t, true, `{"parent":"orders","children":[{"name":"c1"}]}`, false)
 	got := run(t, checker(t, srv.URL, caOf(srv), "repl", "pw-0123456789012345678901"), "orders", nil)

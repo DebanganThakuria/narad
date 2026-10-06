@@ -2763,7 +2763,7 @@ components:
           description: The topic on the remote.
         target_id:
           type: string
-          description: The target topic's ID as the attach, or the last resume with `accept_target`, saw it. Absent when the target serves no topic IDs (a release before remote children), which turns recreate and loop detection off for the link.
+          description: The target topic's ID as the attach, or the last resume with `accept_target`, saw it. A target on v3.1.0 serves it in its describe answer, so recreate detection works there too.
         from:
           type: string
           enum: [attach, unconsumed, earliest]
@@ -3341,7 +3341,7 @@ components:
                 description: The target topic's ID.
               target_serves_ids:
                 type: boolean
-                description: '`false` for a target that serves no topic IDs: recreate and loop detection are then off.'
+                description: '`false` for a target whose children listing serves no `parent_id` and no `remote` objects (v3.1.0): it cannot hold a remote child, so loop detection starts once it is upgraded; recreate detection reads the topic id from its describe answer.'
               rtt_ms:
                 type: integer
                 description: TCP connect time, with `remotes.allowed_hosts` set.

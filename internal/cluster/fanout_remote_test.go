@@ -639,3 +639,17 @@ func TestRemoteChildLaneNeverSendsWithASupersededCredential(t *testing.T) {
 		t.Fatal("a send with the superseded credential closed the remote's gate")
 	}
 }
+
+// A target on v3.1.0 serves no parent_id in its children listing but
+// does serve the topic's id: a recreated target still stops the link.
+func TestRemoteChildTargetReplacedOnAnOlderTarget(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{targetID: "an-id-from-before", rigSourceOpts: rigSourceOpts{stallRetry: 300 * time.Millisecond}})
+	rg.target.faults.set("v310")
+	rg.src.start()
+	defer rg.src.stop()
+	rg.src.produce(t, 0, 10, 2, 0)
+	rg.waitState(t, 0, topic.RemoteStateTargetReplaced, 15*time.Second)
+	if n := len(rg.target.records(t, "orders")); n != 0 {
+		t.Fatalf("%d records landed in a replaced target", n)
+	}
+}

@@ -369,8 +369,8 @@ type stubWithWarnings struct {
 }
 
 // attachWarnings are the attach's advisories: a parent retention below
-// what a regional outage needs (Q15), and a target that does not serve
-// IDs (recreate and loop detection off for the link).
+// what a regional outage needs (Q15), and a target too old to report
+// remote children (loop detection waits for its upgrade).
 func attachWarnings(parent topic.Topic, reports []remote.NodeReport) []string {
 	warnings := []string{}
 	if parent.RetentionMs > 0 && parent.RetentionMs < sink.RetentionWarnMs {
@@ -380,7 +380,7 @@ func attachWarnings(parent topic.Topic, reports []remote.NodeReport) []string {
 	}
 	for _, r := range reports {
 		if !r.TargetServesIDs {
-			warnings = append(warnings, "the target does not report topic IDs (an older release): loop and recreate detection are off for this link")
+			warnings = append(warnings, "the target does not report remote children (an older release, which cannot hold one): loop detection starts once it is upgraded")
 			break
 		}
 	}

@@ -186,7 +186,7 @@ func (c *Checker) Run(ctx context.Context, req CheckRequest) NodeReport {
 		}
 	}
 	if !rep.TargetServesIDs {
-		rep.Warnings = append(rep.Warnings, "the target does not serve remote and parent_id: loop, chain and recreate detection are off for this link")
+		rep.Warnings = append(rep.Warnings, "the target does not serve remote and parent_id (an older release, which cannot hold remote children): loop and chain detection start once it is upgraded; recreate detection reads the topic id")
 	}
 
 	// Check 6: an empty batch proves the credential, the produce grant

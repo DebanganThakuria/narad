@@ -835,7 +835,7 @@ target. The states are listed in
 | `children[].remote` (unreleased)<br>object | A [remote child](glossary.md#remote-child)'s link. Present only on a remote child's stub, which has `partitions` `0` and no owner. |
 | `children[].remote.name`<br>string | The remote the copies go to. |
 | `children[].remote.topic`<br>string | The topic on the remote. |
-| `children[].remote.target_id`<br>string | The target topic's ID as the attach, or the last resume with `accept_target`, saw it. Absent when the target serves no topic IDs (a release before remote children), which turns recreate and loop detection off for the link. |
+| `children[].remote.target_id`<br>string | The target topic's ID as the attach, or the last resume with `accept_target`, saw it. A target on v3.1.0 serves it in its describe answer, so recreate detection works there too. |
 | `children[].remote.from`<br>string: `attach`, `unconsumed`, `earliest` | Where the link started on each parent partition. |
 | `children[].remote.lanes`<br>integer | Ordered streams per parent partition, 1 to 8. |
 | `children[].remote.paused`<br>boolean | `true` while paused. Absent otherwise. |
@@ -3017,7 +3017,7 @@ The answer is `200` whether or not the checks pass: read `result`.
 | `checks[].class`<br>string | Why it failed. |
 | `checks[].credential_version`<br>integer | The credential version it checked with. |
 | `checks[].target_id`<br>string | The target topic's ID. |
-| `checks[].target_serves_ids`<br>boolean | `false` for a target that serves no topic IDs: recreate and loop detection are then off. |
+| `checks[].target_serves_ids`<br>boolean | `false` for a target whose children listing serves no `parent_id` and no `remote` objects (v3.1.0): it cannot hold a remote child, so loop detection starts once it is upgraded; recreate detection reads the topic id from its describe answer. |
 | `checks[].rtt_ms`<br>integer | TCP connect time, with `remotes.allowed_hosts` set. |
 | `checks[].lane_capacity_per_s`<br>integer | An estimate of one lane's records per second at that round trip, with `remotes.allowed_hosts` set. |
 | `checks[].server_cert_not_after`<br>string | When the target's certificate expires. |
@@ -3274,7 +3274,7 @@ Bodies that several endpoints share.
 | `remote` (unreleased)<br>object | A [remote child](glossary.md#remote-child)'s link. Present only on a remote child's stub, which has `partitions` `0` and no owner. |
 | `remote.name`<br>string | The remote the copies go to. |
 | `remote.topic`<br>string | The topic on the remote. |
-| `remote.target_id`<br>string | The target topic's ID as the attach, or the last resume with `accept_target`, saw it. Absent when the target serves no topic IDs (a release before remote children), which turns recreate and loop detection off for the link. |
+| `remote.target_id`<br>string | The target topic's ID as the attach, or the last resume with `accept_target`, saw it. A target on v3.1.0 serves it in its describe answer, so recreate detection works there too. |
 | `remote.from`<br>string: `attach`, `unconsumed`, `earliest` | Where the link started on each parent partition. |
 | `remote.lanes`<br>integer | Ordered streams per parent partition, 1 to 8. |
 | `remote.paused`<br>boolean | `true` while paused. Absent otherwise. |
