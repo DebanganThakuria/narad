@@ -847,7 +847,7 @@ target. The states are listed in
 | `children[].remote.pause_reason`<br>string | The reason given to pause. |
 | `children[].remote.paused_by`<br>string | The admin who paused it; shown to admins only. |
 | `children[].remote.paused_at_ms`<br>integer | When it was paused, Unix milliseconds. |
-| `children[].remote.skip`<br>object | Per parent partition, the offsets an admin accepted to lose, ascending, at most 16. A cursor drops a record only while it is stuck on exactly one of them. |
+| `children[].remote.skip`<br>object | Per parent partition, the offsets an admin accepted to lose, ascending, at most 4000. A cursor drops a record only while it is stuck on exactly one of them. |
 | `children[].remote.created_by`<br>string | The admin who attached it; shown to admins only. |
 | `children[].paused` (unreleased)<br>boolean | A remote child only. `true` while it is paused. |
 | `children[].state` (unreleased)<br>string | A remote child only. Its worst partition's [link state](remote-children.md#link-states), `running` or `paused` when healthy; `unknown` when a partition owner did not report. |
@@ -1200,8 +1200,8 @@ The record stays in the parent's log for its retention. Each
 dropped record counts on
 `narad_fanout_remote_skipped_records_total` and is logged by the
 node that drops it. The child's `remote.skip` keeps skipped
-offsets per partition, ascending, at most 16 of them, always
-including the one just skipped, so a slab read again (after a
+offsets per partition, ascending, at most 4000 of them (one
+full slab), always including the one just skipped, so a slab read again (after a
 restart or a partition move) drops each of them again.
 
 **Grant needed:** `admin`, with security on.
@@ -3291,7 +3291,7 @@ Bodies that several endpoints share.
 | `remote.pause_reason`<br>string | The reason given to pause. |
 | `remote.paused_by`<br>string | The admin who paused it; shown to admins only. |
 | `remote.paused_at_ms`<br>integer | When it was paused, Unix milliseconds. |
-| `remote.skip`<br>object | Per parent partition, the offsets an admin accepted to lose, ascending, at most 16. A cursor drops a record only while it is stuck on exactly one of them. |
+| `remote.skip`<br>object | Per parent partition, the offsets an admin accepted to lose, ascending, at most 4000. A cursor drops a record only while it is stuck on exactly one of them. |
 | `remote.created_by`<br>string | The admin who attached it; shown to admins only. |
 
 ### Partition statistics object {#partition-stats-object}

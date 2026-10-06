@@ -18,8 +18,8 @@ func TestWithSkipKeepsTheOffsetJustAdded(t *testing.T) {
 	if !link.Skipped(3, 500) {
 		t.Fatalf("skip of 500 trimmed at once: %v", got[3])
 	}
-	if len(got[3]) != MaxRemoteSkipsPerPartition || link.Skipped(3, 1000) || !link.Skipped(3, 1015) {
-		t.Fatalf("skips = %v, want 500 and the 15 highest others", got[3])
+	if len(got[3]) != MaxRemoteSkipsPerPartition || link.Skipped(3, 1000) || !link.Skipped(3, int64(1000+MaxRemoteSkipsPerPartition-1)) {
+		t.Fatalf("skips = %v, want 500 and the %d highest others", got[3], MaxRemoteSkipsPerPartition-1)
 	}
 	if !slices.IsSorted(got[3]) {
 		t.Fatalf("skips not ascending: %v", got[3])
@@ -29,7 +29,8 @@ func TestWithSkipKeepsTheOffsetJustAdded(t *testing.T) {
 		t.Fatalf("WithSkip changed its input: %v", skip[3])
 	}
 	// A newest offset trims the lowest, as before.
-	if got := WithSkip(skip, 3, 2000); got[3][0] != 1001 || got[3][len(got[3])-1] != 2000 {
+	higher := int64(1000 + 2*MaxRemoteSkipsPerPartition)
+	if got := WithSkip(skip, 3, higher); got[3][0] != 1001 || got[3][len(got[3])-1] != higher {
 		t.Fatalf("skips after a higher offset = %v", got[3])
 	}
 }

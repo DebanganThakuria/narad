@@ -46,10 +46,15 @@ type RemoteLink struct {
 }
 
 // MaxRemoteSkipsPerPartition bounds the skips a link keeps per parent
-// partition. A slab blocks at most one record per lane (8 at most) at a
-// time, so the newest 16 always cover the records a cursor can still
-// meet; older ones lie behind it and change nothing.
-const MaxRemoteSkipsPerPartition = 16
+// partition: the most records one remote slab holds (MaxRemoteLanes
+// lanes of 500 records, sink.SlabRecordsPerLane). An admin skips only a
+// record the cursor is stuck on, at or after its persisted offset, and
+// the cursor persists only past a whole slab, so every skip it can
+// still meet (a restart or a partition move reads the slab again) lies
+// in the one slab after that offset: at most this many, and the highest
+// offsets. The lower ones it trims lie behind the cursor and change
+// nothing.
+const MaxRemoteSkipsPerPartition = MaxRemoteLanes * 500
 
 // Skipped reports whether an admin skipped the record at offset of the
 // parent partition.

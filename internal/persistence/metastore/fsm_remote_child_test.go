@@ -637,7 +637,9 @@ func TestRemoteChildSkipsOnOnePartitionAccumulate(t *testing.T) {
 	if n := len(r.Skip[3]); n != 2 {
 		t.Fatalf("skip = %v, want each offset once", r.Skip)
 	}
-	for off := int64(100); off < 100+topic.MaxRemoteSkipsPerPartition+5; off++ {
+	// Many skips in one slab all hold: the cap (one full slab, trimmed
+	// lowest first by topic.WithSkip) is far above them.
+	for off := int64(100); off < 150; off++ {
 		op := base
 		op.Skip = &RemoteSkip{Partition: 3, Offset: off}
 		if err := fsmSetRemoteState(t, f, op); err != nil {
@@ -645,10 +647,7 @@ func TestRemoteChildSkipsOnOnePartitionAccumulate(t *testing.T) {
 		}
 	}
 	r = fsmGetTopic(t, f, "orders-to-b").Remote
-	if n := len(r.Skip[3]); n != topic.MaxRemoteSkipsPerPartition {
-		t.Fatalf("partition 3 keeps %d skips, want the cap %d", n, topic.MaxRemoteSkipsPerPartition)
-	}
-	if last := 100 + topic.MaxRemoteSkipsPerPartition + 4; !r.Skipped(3, int64(last)) || r.Skipped(3, 10) {
-		t.Fatalf("skip = %v, want the newest offsets kept and the oldest dropped", r.Skip)
+	if n := len(r.Skip[3]); n != 52 || !r.Skipped(3, 10) || !r.Skipped(3, 100) || !r.Skipped(3, 149) {
+		t.Fatalf("partition 3 keeps %d skips (%v), want all 52", n, r.Skip[3])
 	}
 }

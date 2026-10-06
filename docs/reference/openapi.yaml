@@ -1001,8 +1001,8 @@ paths:
         dropped record counts on
         `narad_fanout_remote_skipped_records_total` and is logged by the
         node that drops it. The child's `remote.skip` keeps skipped
-        offsets per partition, ascending, at most 16 of them, always
-        including the one just skipped, so a slab read again (after a
+        offsets per partition, ascending, at most 4000 of them (one
+        full slab), always including the one just skipped, so a slab read again (after a
         restart or a partition move) drops each of them again.
       x-narad-grant: |
         `admin`, with security on.
@@ -2799,7 +2799,7 @@ components:
             type: array
             items:
               type: integer
-          description: Per parent partition, the offsets an admin accepted to lose, ascending, at most 16. A cursor drops a record only while it is stuck on exactly one of them.
+          description: Per parent partition, the offsets an admin accepted to lose, ascending, at most 4000. A cursor drops a record only while it is stuck on exactly one of them.
         created_by:
           type: string
           description: The admin who attached it; shown to admins only.
