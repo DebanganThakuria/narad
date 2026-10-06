@@ -165,9 +165,9 @@ func (r *RemoteRegistry) update(ctx context.Context, req nodewire.RemoteWriteReq
 	return jsonResponse(http.StatusOK, remote.ViewOf(rec))
 }
 
-// delete proposes opDeleteRemote. It runs the release gate alone, which
-// reads member records, so an emergency revocation works while a member
-// is down.
+// delete proposes opDeleteRemote for a remote that exists. It runs the
+// release gate alone, which reads member records, so an emergency
+// revocation works while a member is down.
 func (r *RemoteRegistry) delete(ctx context.Context, req nodewire.RemoteWriteRequest) nodewire.Response {
 	var op metastore.DeleteRemoteOp
 	if err := decodeStrictJSON(req.Body, &op); err != nil || domremote.ValidateName(op.Name) != nil {
@@ -179,6 +179,15 @@ func (r *RemoteRegistry) delete(ctx context.Context, req nodewire.RemoteWriteReq
 	op.Actor, op.RequestID = req.Actor, req.RequestID
 	ev := remote.AuditEvent{Event: req.SubOp, Actor: req.Actor, RequestID: req.RequestID, Target: op.Name, Attrs: []slog.Attr{slog.Bool("forced", op.Force)}}
 	if err := r.RequireReleases(ctx); err != nil {
+		return r.refuse(ev, err)
+	}
+	// A remote that does not exist is refused here, on the replica the
+	// authorization's leader barrier brought up to date, not by a
+	// proposal: even a refused entry records its type, and a stray
+	// delete must not take away a rollback to a release that cannot
+	// read the remote entry types. The FSM still refuses one deleted
+	// since.
+	if _, err := r.d.Store.GetRemote(op.Name); err != nil {
 		return r.refuse(ev, err)
 	}
 	links, _ := r.d.Store.RemoteChildrenOf(op.Name)
