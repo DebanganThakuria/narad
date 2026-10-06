@@ -1110,7 +1110,7 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 		// The check is a request like a chunk: it runs under sendCtx, so
 		// a sibling's re-read never cuts it off before the target
 		// answers and its answer is always recorded.
-		if ok, _, _ := s.checkTarget(sh.sendCtx, sh.cur, entry, rs, stub); !ok {
+		if ok, _, _ := s.checkTarget(sh.sendCtx, ctx, sh.cur, entry, rs, stub); !ok {
 			release()
 			if ctx.Err() != nil {
 				return
@@ -1148,32 +1148,62 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 // reports whether sending may go on, the check's result and whether it
 // ran. A check that errors never stops sending; one that answers stops
 // it on a loop or a replaced target. The schedule and the verdict are
-// the link's, shared by its cursors on this node: lc.mu keeps one check
-// in flight per link, and a cursor that finds a check not due reads the
-// verdict another cursor's check published (under vmu, so the listing
-// never waits on the target).
-func (s *remoteSender) checkTarget(ctx context.Context, c *remoteCursor, e *remote.Entry, rs *remoteState, stub topic.Topic) (ok bool, res sink.TargetResult, ran bool) {
+// the link's, shared by its cursors on this node, and one check is in
+// flight per link. lc.mu is never held across the request: a cursor
+// that finds the check not due, or merely due on its interval while
+// another cursor's check is in flight, reads the published verdict at
+// once. One that needs a fresh verdict (a forced check, a new entry,
+// a reopened gate, a new recorded target) waits for the check in
+// flight, then runs its own if that one did not cover it; it waits no
+// longer than wait lives. The request itself runs under ctx.
+func (s *remoteSender) checkTarget(ctx, wait context.Context, c *remoteCursor, e *remote.Entry, rs *remoteState, stub topic.Topic) (ok bool, res sink.TargetResult, ran bool) {
 	lc := c.check
-	lc.mu.Lock()
-	defer lc.mu.Unlock()
-	now := time.Now()
-	epoch := rs.gate.Epoch()
-	due := lc.forceCheck.Load() || lc.checkedEntry != e || lc.checkedGateEpoch != epoch ||
-		lc.checkedTargetID != stub.Remote.TargetID || !now.Before(lc.nextCheck)
-	if !due {
-		return c.targetVerdict() == "", res, false
+	for {
+		lc.mu.Lock()
+		now := time.Now()
+		epoch := rs.gate.Epoch()
+		fresh := lc.forceCheck.Load() || lc.checkedEntry != e || lc.checkedGateEpoch != epoch ||
+			lc.checkedTargetID != stub.Remote.TargetID
+		if !fresh && now.Before(lc.nextCheck) {
+			lc.mu.Unlock()
+			return c.targetVerdict() == "", res, false
+		}
+		if done := lc.inflight; done != nil {
+			lc.mu.Unlock()
+			if !fresh {
+				return c.targetVerdict() == "", res, false
+			}
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+			case <-wait.Done():
+			}
+			return false, res, false
+		}
+		done := make(chan struct{})
+		lc.inflight = done
+		lc.forceCheck.Store(false)
+		lc.mu.Unlock()
+
+		cctx, cancel := context.WithTimeout(ctx, requestTimeout(e))
+		res = sink.CheckTarget(cctx, e, stub.Remote.Topic, stub.Remote.TargetID, s.classify)
+		cancel()
+
+		lc.mu.Lock()
+		lc.inflight = nil
+		close(done)
+		if ctx.Err() != nil {
+			lc.forceCheck.Store(true)
+			lc.mu.Unlock()
+			return false, res, false
+		}
+		lc.checkedEntry, lc.checkedGateEpoch, lc.checkedTargetID = e, epoch, stub.Remote.TargetID
+		lc.nextCheck = now.Add(sink.CheckInterval(e.Limits().CheckIntervalMs))
+		lc.record(res, now)
+		lc.mu.Unlock()
+		break
 	}
-	lc.forceCheck.Store(false)
-	cctx, cancel := context.WithTimeout(ctx, requestTimeout(e))
-	res = sink.CheckTarget(cctx, e, stub.Remote.Topic, stub.Remote.TargetID, s.classify)
-	cancel()
-	if ctx.Err() != nil {
-		lc.forceCheck.Store(true)
-		return false, res, false
-	}
-	lc.checkedEntry, lc.checkedGateEpoch, lc.checkedTargetID = e, epoch, stub.Remote.TargetID
-	lc.nextCheck = now.Add(sink.CheckInterval(e.Limits().CheckIntervalMs))
-	lc.record(res, now)
 	key := c.key
 	if res.Verified {
 		c.setIdleCheck("")
@@ -1217,7 +1247,7 @@ func (r *FanoutRunner) remoteIdle(ctx context.Context, key fanoutCursorKey, cur 
 		}
 		return
 	}
-	_, res, ran := s.checkTarget(ctx, cur, e, rs, stub)
+	_, res, ran := s.checkTarget(ctx, ctx, cur, e, rs, stub)
 	if !ran {
 		if probe {
 			rs.gate.Released()

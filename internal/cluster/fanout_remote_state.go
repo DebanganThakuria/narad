@@ -97,9 +97,10 @@ type linkCheckKey struct {
 // linkCheck is one link's runtime target check on this node, shared by
 // the link's cursors: every cursor lists the same target topic, so the
 // target sees one children listing per node per interval (and per gate
-// reopen), not one per partition. mu makes the check single-flight and
-// guards the schedule; vmu guards the verdict and is never held across
-// I/O, so the listing never waits on a check in flight.
+// reopen), not one per partition. mu guards the schedule and the
+// marker of the check in flight (single-flight); vmu guards the
+// verdict. Neither is held across I/O, so no lane and no listing waits
+// on the target behind a lock.
 type linkCheck struct {
 	// refs counts the registered cursors sharing it (remoteSender.mu).
 	refs int
@@ -117,6 +118,8 @@ type linkCheck struct {
 	checkedGateEpoch uint64
 	checkedTargetID  string
 	nextCheck        time.Time
+	// inflight, while a check runs, is closed when it ends.
+	inflight chan struct{}
 
 	vmu sync.Mutex
 	// targetState is what the last successful check found
