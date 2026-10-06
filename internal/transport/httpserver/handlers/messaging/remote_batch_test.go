@@ -339,3 +339,36 @@ func TestRemoteEncoderRoundTripsThroughTheBatchDecoder(t *testing.T) {
 		t.Fatalf("encoded chunk is not a batch: %v", err)
 	}
 }
+
+// A zstd body of several frames is charged for everything it decodes,
+// not for its first frame's declared size: a tiny first frame that
+// declares nothing cannot carry a 15 MiB second frame past the node's
+// budget.
+func TestRemoteBatchZstdFramesAfterTheFirstDrawFromTheBudget(t *testing.T) {
+	s := handlers.New(handlers.Deps{Broker: &recordingBatchProducer{fakeBroker: &fakeBroker{}}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), BatchBodyBudget: 4 << 20})
+	h := ProduceBatch(s, nil)
+	// Frame 1: an empty single-segment frame that declares a content
+	// size of 0 (FHD 0x20, FCS 0, then one empty last raw block).
+	body := []byte{0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x00, 0x01, 0x00, 0x00}
+	// Frame 2: a streamed frame with no declared size, decoding to
+	// about 15 MiB.
+	var second bytes.Buffer
+	zw, err := zstd.NewWriter(&second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = zw.Write([]byte(`{"messages":[{"payload":"`))
+	_, _ = zw.Write(bytes.Repeat([]byte("p"), 15<<20))
+	_, _ = zw.Write([]byte(`"}]}`))
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	body = append(body, second.Bytes()...)
+	if int64(len(body)) > batchBudgetFree {
+		t.Fatalf("test body is %d bytes; it must look small", len(body))
+	}
+	res := postBatchWith(t, h, body, "zstd", 0)
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("a multi-frame zstd body decoding to 15 MiB with a 4 MiB budget: status %d (%s), want 503", res.Code, res.Body)
+	}
+}

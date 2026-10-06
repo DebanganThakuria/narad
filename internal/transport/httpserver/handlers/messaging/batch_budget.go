@@ -220,33 +220,45 @@ func decompressBody(encoding string, body []byte, hold *budgetHold) ([]byte, err
 	return nil, errors.New("unsupported encoding")
 }
 
-// decompressZstd decodes a zstd body in one call. A frame that declares
-// its content size (the replicator's encoder always does) is refused
-// before anything is decoded when that size is past the cap, and takes
-// exactly its size from the budget; one that does not takes the cap.
-// The decoder's memory limit refuses output past the cap either way.
+// decompressZstd decodes a zstd body as a stream through readCapped, so
+// every decoded byte is charged to the budget as it arrives, however
+// many frames the body holds. A first frame that declares its content
+// size (the replicator's encoder always does, in one frame) is refused
+// before anything is decoded when that size is past the cap, and sizes
+// the output buffer and the first charge; frames after it, or a body
+// that decodes past the declared size, grow the charge as gzip does.
 func decompressZstd(body []byte, hold *budgetHold) ([]byte, error) {
-	size := MaxBatchBodyBytes
 	var h zstd.Header
 	if err := h.Decode(body); err != nil {
 		return nil, err
 	}
+	initial := int64(-1)
 	if h.HasFCS {
 		if h.FrameContentSize > uint64(MaxBatchBodyBytes) {
 			return nil, errBodyTooLarge
 		}
-		size = int64(h.FrameContentSize)
-	}
-	if !hold.grow(int64(len(body)) + size) {
-		return nil, errBudgetFull
+		// One byte past the declared size shows the end without a
+		// second buffer.
+		initial = int64(h.FrameContentSize) + 1
+		if !hold.grow(int64(len(body)) + initial) {
+			return nil, errBudgetFull
+		}
 	}
 	dec, _ := zstdDecoders.Get().(*zstd.Decoder)
 	if dec == nil {
 		return nil, errors.New("zstd decoder unavailable")
 	}
-	defer zstdDecoders.Put(dec)
-	out, err := dec.DecodeAll(body, make([]byte, 0, min(size, batchBudgetFree)))
-	if errors.Is(err, zstd.ErrDecoderSizeExceeded) || int64(len(out)) > MaxBatchBodyBytes {
+	defer func() {
+		_ = dec.Reset(nil)
+		zstdDecoders.Put(dec)
+	}()
+	// Only Read: a reader with Bytes and Len would make Reset decode
+	// the whole body at once, outside the budget.
+	if err := dec.Reset(struct{ io.Reader }{bytes.NewReader(body)}); err != nil {
+		return nil, err
+	}
+	out, err := readCappedFrom(dec, int64(len(body)), initial, hold)
+	if errors.Is(err, zstd.ErrDecoderSizeExceeded) {
 		return nil, errBodyTooLarge
 	}
 	return out, err
@@ -256,7 +268,17 @@ func decompressZstd(body []byte, hold *budgetHold) ([]byte, error) {
 // MaxBatchBodyBytes and growing hold as the output grows (compressed is
 // the size of the body it decodes, held alongside).
 func readCapped(src io.Reader, compressed int64, hold *budgetHold) ([]byte, error) {
-	out := make([]byte, 0, min(4*compressed+512, batchBudgetFree))
+	return readCappedFrom(src, compressed, -1, hold)
+}
+
+// readCappedFrom is readCapped with the output buffer's first size
+// (initial, which hold must already cover; -1 for the default guess).
+func readCappedFrom(src io.Reader, compressed, initial int64, hold *budgetHold) ([]byte, error) {
+	size := min(4*compressed+512, batchBudgetFree)
+	if initial >= 0 {
+		size = min(max(initial, 1), MaxBatchBodyBytes+1)
+	}
+	out := make([]byte, 0, size)
 	limited := io.LimitReader(src, MaxBatchBodyBytes+1)
 	for {
 		if len(out) == cap(out) {
