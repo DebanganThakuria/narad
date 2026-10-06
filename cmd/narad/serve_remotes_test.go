@@ -21,6 +21,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/platform/config"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/remote"
+	"github.com/debanganthakuria/narad/internal/security/remotecred"
 )
 
 // storeWithRemote is a single-node metastore whose registry holds one
@@ -50,13 +51,19 @@ func storeWithRemote(t *testing.T, holds bool) *metastore.Store {
 	return ms
 }
 
+// strongSecret is a cluster secret as `openssl rand -base64 32` prints
+// it, drawn again in the rare case the strength rule refuses it.
 func strongSecret(t *testing.T) string {
 	t.Helper()
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		t.Fatal(err)
+	for {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			t.Fatal(err)
+		}
+		if s := base64.StdEncoding.EncodeToString(b); remotecred.CheckSecretStrength(s) == nil {
+			return s
+		}
 	}
-	return base64.StdEncoding.EncodeToString(b)
 }
 
 func remotesConfig(secured bool, secret string) *config.Config {

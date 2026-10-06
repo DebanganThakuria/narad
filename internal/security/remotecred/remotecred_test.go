@@ -267,12 +267,22 @@ func TestCheckSecretStrength(t *testing.T) {
 		_, _ = rand.Read(b)
 		return b
 	}
+	// generated is a secret as `openssl rand -base64 n` prints it, drawn
+	// again in the rare case (about 1 in 10,000) where it has the shape
+	// of a passphrase, as the refusal tells an operator to do.
+	generated := func(n int) string {
+		for {
+			s := base64.StdEncoding.EncodeToString(random(n))
+			if strings.ContainsAny(s, "0123456789+/") && strings.ToLower(s) != s && strings.ToUpper(s) != s {
+				return s
+			}
+		}
+	}
 	pass := map[string]string{
-		"openssl rand -base64 32":   base64.StdEncoding.EncodeToString(random(32)),
+		"openssl rand -base64 32":   generated(32),
 		"openssl rand -hex 32":      hex.EncodeToString(random(32)),
-		"openssl rand -base64 48":   base64.StdEncoding.EncodeToString(random(48)),
-		"raw base64 of 32 bytes":    base64.RawStdEncoding.EncodeToString(random(32)),
-		"base64 with a newline":     base64.StdEncoding.EncodeToString(random(32)) + "\n",
+		"openssl rand -base64 48":   generated(48),
+		"base64 with a newline":     generated(32) + "\n",
 		"uppercase hex of 32 bytes": strings.ToUpper(hex.EncodeToString(random(32))),
 	}
 	for name, s := range pass {
@@ -289,6 +299,12 @@ func TestCheckSecretStrength(t *testing.T) {
 		"one repeated byte":         base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x5a}, 40)),
 		"the test harness secret":   "cluster-test-secret",
 		"url-safe base64 with dash": strings.Repeat("-_", 22),
+		// A memorable passphrase that happens to decode: as raw base64,
+		// and padded, both letters only.
+		"a 43-letter passphrase":       "ThisIsOurNaradClusterSecretForProductionUse",
+		"a padded letters-only phrase": "ThisIsOurNaradClusterSecretForProductionUsY=",
+		"raw base64 of 32 bytes":       base64.RawStdEncoding.EncodeToString(random(32)),
+		"64 decimal digits as hex":     strings.Repeat("31415926", 8),
 	}
 	for name, s := range fail {
 		err := CheckSecretStrength(s)

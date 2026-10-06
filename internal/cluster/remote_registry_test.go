@@ -28,6 +28,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 	"github.com/debanganthakuria/narad/internal/remote"
+	"github.com/debanganthakuria/narad/internal/security/remotecred"
 )
 
 // syncLog is a goroutine-safe log sink.
@@ -238,13 +239,19 @@ func leaderAndFollower(t *testing.T, nodes []*regNode) (leader, follower *regNod
 	return leader, follower
 }
 
+// clusterSecret is a cluster secret as `openssl rand -base64 32` prints
+// it, drawn again in the rare case the strength rule refuses it.
 func clusterSecret(t *testing.T) string {
 	t.Helper()
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		t.Fatal(err)
+	for {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			t.Fatal(err)
+		}
+		if s := base64.StdEncoding.EncodeToString(b); remotecred.CheckSecretStrength(s) == nil {
+			return s
+		}
 	}
-	return base64.StdEncoding.EncodeToString(b)
 }
 
 // createThrough runs a create the way the handler does: sealed on the

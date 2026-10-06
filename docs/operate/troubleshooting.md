@@ -189,7 +189,7 @@ A remotes request, or a remote child's attach, pause, resume or skip, answers `4
 - `not every cluster member runs a release that applies the remote Raft entry types; upgrade or remove the member named here: ...`: a member, possibly a dead one or a Raft server without a member record, still reports an older release.
 - `a cluster member's security posture forbids remotes (security off or legacy cluster auth on)`, or `every cluster member must answer the remotes posture check`: a member runs with security off or `security.allow_legacy_cluster_auth`, or did not answer.
 - `remote writes carry a password, so this node needs an encrypted API hop ...`: the node that took a create or a password change does not set `remotes.api_hop_encrypted`.
-- `the cluster secret (NARAD_CLUSTER_SECRET) must decode, as standard base64 or hex, to at least 32 random bytes ...`, or `no cluster secret`: nothing can be sealed under this secret.
+- `the cluster secret (NARAD_CLUSTER_SECRET) must be at least 32 random bytes as ...`, or `no cluster secret`: nothing can be sealed under this secret.
 - `remote check failed: stale`, `unreachable`, `old_release` or `target_disagreement`: a member had not applied the latest change to the remote yet, did not answer the checks, runs an older release, or saw a different target.
 - `the cluster leader runs an older release ...`: the leader has not been upgraded.
 
@@ -759,7 +759,7 @@ A warning at startup, with `narad_remotes_allowlist_configured` 0.
 
 An error at startup. The node runs, but every create, password change and re-encrypt answers `412` until the secret is replaced.
 
-**Cause.** The cluster secret does not decode, as standard base64 or hex, to at least 32 bytes that are not all the same.
+**Cause.** The cluster secret is not at least 32 random bytes as `openssl rand -base64 32` (padded standard base64) or `openssl rand -hex 32` prints them, or it looks like a passphrase: base64 with no digit, `+` or `/` or with letters of one case only, or hex with no digit or no letter. A random secret has that shape about once in ten thousand; generate another.
 
 **Fix.** Rotate to a secret made with `openssl rand -base64 32`, with the old one as `NARAD_CLUSTER_SECRET_PREVIOUS`, then `narad remote reencrypt` ([Rotate the cluster secret](remotes.md#rotate-cluster-secret)).
 

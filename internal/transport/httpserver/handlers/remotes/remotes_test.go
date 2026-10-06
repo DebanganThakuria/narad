@@ -27,6 +27,7 @@ import (
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 	"github.com/debanganthakuria/narad/internal/remote"
 	"github.com/debanganthakuria/narad/internal/security"
+	"github.com/debanganthakuria/narad/internal/security/remotecred"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 	httpremotes "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/remotes"
 )
@@ -162,13 +163,20 @@ type apiOpts struct {
 	metrics   *metrics.RemoteMetrics
 }
 
+// randomSecret is a cluster secret as `openssl rand -base64 32` prints
+// it, drawn again in the rare case the strength rule takes it for a
+// passphrase (as the refusal tells an operator to do).
 func randomSecret(t testing.TB) string {
 	t.Helper()
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		t.Fatal(err)
+	for {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			t.Fatal(err)
+		}
+		if s := base64.StdEncoding.EncodeToString(b); remotecred.CheckSecretStrength(s) == nil {
+			return s
+		}
 	}
-	return base64.StdEncoding.EncodeToString(b)
 }
 
 func newAPINode(t *testing.T, o apiOpts) *apiNode {
