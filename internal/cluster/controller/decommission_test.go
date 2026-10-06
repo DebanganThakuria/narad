@@ -541,6 +541,37 @@ func TestDecommissionWaitsWhenTheNodeStatusIsUnavailable(t *testing.T) {
 	}
 }
 
+// A draining node that led when the statuses were read was not asked for
+// its backlog. If leadership moves off it before the removal step, it
+// waits for a pass that reads its status, and is never removed unread.
+func TestDecommissionNeverRemovesANodeWhoseStatusWasNotRead(t *testing.T) {
+	store := newFakeControllerStore("a", "b", "c", "d", "e")
+	store.members[3].Draining = true
+	store.members[4].Draining = true
+	store.leaderID = "d"
+	store.topics = []topic.Topic{{Name: "orders", Partitions: 3}}
+	store.assignments["orders"] = map[int]string{0: "a", 1: "b", 2: "c"}
+	withAddrs(store)
+	status := func(_ context.Context, addr string) (NodeStatus, error) {
+		if addr != "e:7942" {
+			t.Errorf("asked %s for its status, want only e (d led when the statuses were read)", addr)
+		}
+		store.leaderID = "a" // leadership moves off d while e answers
+		return NodeStatus{Draining: true}, nil
+	}
+	reg := prometheus.NewRegistry()
+	c := &Controller{store: store, cfg: Config{NodeStatus: status}.withDefaults(), m: newMetrics(reg)}
+
+	c.reconcileDecommission(context.Background())
+
+	if !slices.Equal(store.removed, []string{"e"}) || !slices.Equal(store.forgotten, []string{"e"}) {
+		t.Fatalf("removed %v, forgotten %v; want only e, whose status was read", store.removed, store.forgotten)
+	}
+	if got := testutil.ToFloat64(c.m.decomBlocked.WithLabelValues("d", BlockedNodeStatusUnavailable)); got != 1 {
+		t.Fatalf("narad_decommission_blocked{d,node_status_unavailable} = %v, want 1", got)
+	}
+}
+
 // Every stalled decommission says why, once per change: an error line
 // for a stall that needs an operator, a warn line for a wait that clears
 // on its own, and a series per reason.
