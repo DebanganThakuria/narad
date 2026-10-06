@@ -784,9 +784,13 @@ func (s *remoteSender) commit(ctx context.Context, key fanoutCursorKey, child to
 		if rl := s.r.remoteMetrics(); rl != nil {
 			rl.RereadsTotal.WithLabelValues(key.parent, key.child).Inc()
 		}
-		s.r.logger.Error("remote child could not hold a waiting lane's records (remotes.max_held_bytes is full): it reads them again after the wait and sends only what the target does not have yet",
-			"parent", key.parent, "partition", key.partition, "child", key.child,
-			"remote", child.Remote.Name, "unsent_records", len(remaining))
+		// Logged once per remoteStallLogGap per cursor: a long outage
+		// re-reads after every gate backoff, and the counter has each.
+		if cur.rereadLogDue(time.Now(), remoteStallLogGap) {
+			s.r.logger.Error("remote child could not hold a waiting lane's records (remotes.max_held_bytes is full): it reads them again after the wait and sends only what the target does not have yet",
+				"parent", key.parent, "partition", key.partition, "child", key.child,
+				"remote", child.Remote.Name, "unsent_records", len(remaining))
+		}
 		sh.waitBeforeReread(ctx)
 		cur.clearLanes()
 		return nil, true
@@ -1558,9 +1562,13 @@ func (sh *slabShip) block(lane *laneShip, state string) {
 	lane.blocked = &topic.RemoteBlock{Partition: sh.key.partition, Offset: rec.Offset, State: state}
 	sh.cur.setBlocked(lane.idx, lane.blocked)
 	sh.cur.setLane(lane.idx, state)
-	sh.s.r.logger.Warn("remote child blocked on a record the target refuses",
-		"parent", sh.key.parent, "partition", sh.key.partition, "offset", rec.Offset,
-		"child", sh.key.child, "state", state)
+	// Logged when the lane first blocks on the record, not on each
+	// stall-interval retry that meets the same refusal.
+	if sh.cur.firstBlockOn(rec.Offset) {
+		sh.s.r.logger.Warn("remote child blocked on a record the target refuses",
+			"parent", sh.key.parent, "partition", sh.key.partition, "offset", rec.Offset,
+			"child", sh.key.child, "state", state)
+	}
 }
 
 // skip drops the lane's blocked front record, which an admin skipped.

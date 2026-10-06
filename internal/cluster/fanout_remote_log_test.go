@@ -6,6 +6,7 @@ package cluster
 // fix clears it, and not again on each retry.
 
 import (
+	"context"
 	"log/slog"
 	"testing"
 	"time"
@@ -91,4 +92,44 @@ func TestRemoteChildStallIsLoggedOncePerStateNotPerRetry(t *testing.T) {
 		lines := logs.stalledLines(topic.RemoteStateRemoteMissing)
 		return len(lines) == 1 && lines[0].Level == slog.LevelError
 	})
+}
+
+// A lane blocked on a record the target refuses retries it every stall
+// interval; the refusal is logged once, when the lane first blocks on
+// that record, not on every retry.
+func TestRemoteChildBlockedRecordIsLoggedOncePerRecord(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{stallRetry: 200 * time.Millisecond}})
+	schema := []byte(`{"type":"object","required":["seq"],"properties":{"seq":{"type":"integer"}}}`)
+	if _, err := rg.target.broker.UpdateTopicSchema(context.Background(), "orders", schema, 0); err != nil {
+		t.Fatal(err)
+	}
+	logs := &recordedLog{}
+	rg.src.runner.logger = slog.New(logs)
+	rg.src.start()
+	defer rg.src.stop()
+	rg.src.producePayload(t, 0, "bad", []byte(`{"not_seq":true}`))
+	rg.waitState(t, 0, topic.RemoteStateRejectedRecord, 20*time.Second)
+	time.Sleep(2 * time.Second) // about ten retries
+	if n := logs.count(slog.LevelWarn, "remote child blocked on a record the target refuses"); n != 1 {
+		t.Fatalf("%d blocked-record lines over about ten retries of one record, want one", n)
+	}
+}
+
+// A cursor that cannot hold its records re-reads its slab after every
+// wait; it says so once per remoteStallLogGap, not on every pass, while
+// the re-read counter keeps counting each one.
+func TestRemoteChildRereadIsLoggedOncePerGap(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{heldBudget: -1}})
+	rg.target.faults.set("down")
+	logs := &recordedLog{}
+	rg.src.runner.logger = slog.New(logs)
+	rg.src.start()
+	defer rg.src.stop()
+	rg.src.produce(t, 0, 10, 2, 0)
+	rereads := rg.src.metrics.RemoteLink.RereadsTotal.WithLabelValues("orders", "orders-to-b")
+	rigWait(t, "three re-reads", 20*time.Second, func() bool { return counterValue(rereads) >= 3 })
+	const msg = "remote child could not hold a waiting lane's records (remotes.max_held_bytes is full): it reads them again after the wait and sends only what the target does not have yet"
+	if n := logs.count(slog.LevelError, msg); n != 1 {
+		t.Fatalf("%d re-read lines over %v re-reads, want one", n, counterValue(rereads))
+	}
 }

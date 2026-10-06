@@ -75,6 +75,12 @@ type remoteCursor struct {
 	// check or a committed chunk clears them.
 	idleLookup string
 	idleCheck  string
+	// blockLogged holds the offsets the cursor logged a lane blocking
+	// on, so a retry that meets the same refusal logs nothing; cleared
+	// once the cursor advances. rereadLoggedAt is when the cursor last
+	// logged a re-read.
+	blockLogged    map[int64]bool
+	rereadLoggedAt time.Time
 
 	// check is the link's runtime target check on this node: its
 	// schedule and its verdict. A cursor the runner registers shares
@@ -442,5 +448,33 @@ func (c *remoteCursor) noteProgress(lanes int, marks map[int]int64) {
 func (c *remoteCursor) clearProgress() {
 	c.mu.Lock()
 	c.progress = slabProgress{}
+	c.blockLogged = nil
 	c.mu.Unlock()
+}
+
+// firstBlockOn reports whether a lane blocking on offset is the first
+// the cursor logs, and notes it.
+func (c *remoteCursor) firstBlockOn(offset int64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.blockLogged[offset] {
+		return false
+	}
+	if c.blockLogged == nil {
+		c.blockLogged = map[int64]bool{}
+	}
+	c.blockLogged[offset] = true
+	return true
+}
+
+// rereadLogDue reports whether the cursor may log a re-read now: at
+// most once per gap.
+func (c *remoteCursor) rereadLogDue(now time.Time, gap time.Duration) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.rereadLoggedAt.IsZero() && now.Sub(c.rereadLoggedAt) < gap {
+		return false
+	}
+	c.rereadLoggedAt = now
+	return true
 }
