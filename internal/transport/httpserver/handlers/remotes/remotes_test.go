@@ -701,3 +701,25 @@ func TestForwardedErrorBesideCommitted(t *testing.T) {
 		t.Fatalf("ingress %v, leader %v", ingress, leader)
 	}
 }
+
+// The ingress node's own release gate answers 412 the way the leader's
+// does: the body names the member that holds the remote entry types
+// back in `members`, so automation can find which pod to upgrade.
+func TestReleaseGateNamesTheMemberInMembers(t *testing.T) {
+	n := newAPINode(t, apiOpts{})
+	if err := n.ms.RegisterMember(context.Background(), metastore.Member{ID: "narad-1", Addr: "127.0.0.1:2", Status: metastore.MemberAlive, Build: "narad 3.1.0", EntryTypes: 22}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ method, path, body string }{
+		{http.MethodPost, "/v1/remotes", n.createBody("b", canary)},
+		{http.MethodPatch, "/v1/remotes/b", `{"limits":{"max_in_flight":2}}`},
+		{http.MethodDelete, "/v1/remotes/b", ""},
+		{http.MethodPost, "/v1/cluster/reencrypt-remotes", ""},
+	} {
+		res := n.do(t, admin, c.method, c.path, c.body)
+		members, _ := res.json(t)["members"].([]any)
+		if res.status != http.StatusPreconditionFailed || len(members) != 1 || members[0] != "narad-1" || !strings.Contains(res.errorText(t), "narad-1") {
+			t.Fatalf("%s %s with an older member: %d %s, want 412 with members [narad-1]", c.method, c.path, res.status, res.body)
+		}
+	}
+}

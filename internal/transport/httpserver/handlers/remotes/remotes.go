@@ -111,10 +111,19 @@ func (c *call) releaseGate() bool {
 		return true
 	}
 	reason := strings.TrimPrefix(err.Error(), metastore.ErrEntryTypeNotYetUsable.Error()+": ")
+	members := []string{}
 	if held, ok := errors.AsType[*metastore.RemotesHeldBackError](err); ok {
 		reason = held.Reason
+		if held.Member != "" {
+			members = append(members, held.Member)
+		}
 	}
-	c.fail(http.StatusPreconditionFailed, "not every cluster member runs a release that applies the remote Raft entry types; upgrade or remove the member named here: "+reason)
+	// The body has the leader gate's shape: the member in `members`.
+	c.s.WriteJSON(c.w, http.StatusPreconditionFailed, map[string]any{
+		"error":   "not every cluster member runs a release that applies the remote Raft entry types; upgrade or remove the member named here: " + reason,
+		"members": members,
+	})
+	c.audit(http.StatusPreconditionFailed)
 	return false
 }
 
