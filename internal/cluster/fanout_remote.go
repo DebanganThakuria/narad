@@ -1073,7 +1073,7 @@ func (sh *slabShip) sendChunk(ctx context.Context, lane *laneShip, e *remote.Ent
 		return
 	}
 	rctx, cancel := context.WithTimeout(sh.sendCtx, requestTimeout(e))
-	resp, err := e.Do(rctx, remote.Outbound{Method: "POST", Path: path, Body: wire, ContentType: "application/json", ContentEncoding: encoding})
+	resp, err := e.Do(rctx, remote.Outbound{Method: "POST", Path: path, Body: wire, ContentType: "application/json", ContentEncoding: encoding, Chunk: true})
 	var answer []byte
 	if err == nil {
 		answer, _ = remote.ReadBody(resp, remote.MaxProduceAnswerBytes)

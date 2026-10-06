@@ -191,7 +191,7 @@ narad --ctx a remote set b --max-in-flight 32 --compression zstd
 
 | Limit | Default | Range | Meaning |
 |---|---|---|---|
-| `max_in_flight` (`--max-in-flight`) | 16 | 1 to 256 | Requests to the remote in flight at once on each node, shared by every cursor that sends to it. |
+| `max_in_flight` (`--max-in-flight`) | 16 | 1 to 256 | Record requests to the remote in flight at once on each node, shared by every cursor that sends to it, each on its own connection. Target checks, listings and capability probes use 4 more connections of their own (unreleased), so they never wait behind record requests, nor these behind them. |
 | `request_timeout_ms` (`--request-timeout`) | 30 s | 5 s to 120 s | Timeout of one request. |
 | `idle_conn_timeout_ms` (`--idle-conn-timeout`) | 30 s | 1 s to 5 min | How long an idle connection is kept. |
 | `conn_max_age_ms` (`--conn-max-age`) | 5 min | 10 s to 1 h | How often idle connections are recycled, so a DNS change is picked up. |

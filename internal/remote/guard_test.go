@@ -314,7 +314,7 @@ func TestProxyVariablesAreIgnored(t *testing.T) {
 }
 
 func TestTransportSettings(t *testing.T) {
-	tr := newTransport(transportSpec{limits: domremote.Limits{MaxInFlight: 48}.WithDefaults(), serverName: "b.example"})
+	tr := newTransport(transportSpec{limits: domremote.Limits{MaxInFlight: 48}.WithDefaults(), serverName: "b.example", conns: 48})
 	if tr.Proxy != nil {
 		t.Fatal("transport has a proxy")
 	}
@@ -343,8 +343,8 @@ func TestTransportRefusesNISTCurves(t *testing.T) {
 	}
 }
 
-// 1,000 requests at 16 in flight open exactly 16 connections: HTTP/1.1,
-// one connection per in-flight request, all reused.
+// 1,000 chunks at 16 in flight open exactly 16 connections: HTTP/1.1,
+// one connection per in-flight chunk, all reused.
 func TestPoolOpensMaxInFlightConnections(t *testing.T) {
 	cert, ca := selfSignedTLS(t)
 	var conns atomic.Int64
@@ -368,7 +368,7 @@ func TestPoolOpensMaxInFlightConnections(t *testing.T) {
 		sem <- struct{}{}
 		wg.Go(func() {
 			defer func() { <-sem }()
-			resp, err := e.Do(context.Background(), Outbound{Method: http.MethodPost, Path: "/v1/topics/o/produce/batch", Body: []byte(`{}`), ContentType: "application/json"})
+			resp, err := e.Do(context.Background(), Outbound{Method: http.MethodPost, Path: "/v1/topics/o/produce/batch", Body: []byte(`{}`), ContentType: "application/json", Chunk: true})
 			if err != nil {
 				t.Error(err)
 				return

@@ -52,7 +52,13 @@ type transportSpec struct {
 	roots      *x509.CertPool   // nil: the system roots
 	serverName string           // the URL's host
 	dial       dialFunc         // nil: a plain dialer
+	conns      int              // the pool's connection cap
 }
+
+// SideRequestSlots is the connection cap of a remote's second pool, the
+// one for requests that are not data chunks (target checks, listings,
+// capability probes).
+const SideRequestSlots = 4
 
 // newTransport builds a remote's HTTP/1.1 connection pool. Each
 // in-flight chunk gets its own connection (one congestion window and
@@ -60,7 +66,9 @@ type transportSpec struct {
 // open between chunks; idle ones close after idle_conn_timeout_ms,
 // shorter than common load balancer idle timeouts. No Expect:
 // 100-continue (it costs a round trip per chunk) and no transparent
-// compression.
+// compression. An entry builds two: one of max_in_flight connections for
+// chunks, one of SideRequestSlots for everything else, so neither kind
+// waits on the other for a connection.
 func newTransport(spec transportSpec) *http.Transport {
 	dial := spec.dial
 	if dial == nil {
@@ -76,9 +84,9 @@ func newTransport(spec transportSpec) *http.Transport {
 		TLSHandshakeTimeout:    tlsHandshakeTimeout,
 		Protocols:              protocols,
 		ForceAttemptHTTP2:      false,
-		MaxIdleConns:           spec.limits.MaxInFlight,
-		MaxIdleConnsPerHost:    spec.limits.MaxInFlight,
-		MaxConnsPerHost:        spec.limits.MaxInFlight,
+		MaxIdleConns:           spec.conns,
+		MaxIdleConnsPerHost:    spec.conns,
+		MaxConnsPerHost:        spec.conns,
 		IdleConnTimeout:        time.Duration(spec.limits.IdleConnTimeoutMs) * time.Millisecond,
 		ExpectContinueTimeout:  0,
 		DisableCompression:     true,

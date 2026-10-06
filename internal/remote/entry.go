@@ -39,6 +39,12 @@ type Entry struct {
 	transport   *http.Transport
 	fingerprint string
 	metrics     *metrics.RemoteMetrics
+	// sideClient serves the requests that are not data chunks (target
+	// checks, listings, capability probes) from a pool of its own,
+	// SideRequestSlots connections: they never queue behind chunks for
+	// a connection, and chunks never queue behind them.
+	sideClient    *http.Client
+	sideTransport *http.Transport
 	// recycledAt is when the cache last closed this entry's idle
 	// connections for conn_max_age_ms (Unix nanoseconds).
 	recycledAt atomic.Int64
@@ -85,6 +91,10 @@ type Outbound struct {
 	Body            []byte // nil for GET
 	ContentType     string // "" for GET; "application/json" for POST
 	ContentEncoding string // "" or "zstd"
+	// Chunk marks a data chunk, sent on the max_in_flight pool the
+	// caller's in-flight semaphore bounds. Every other request goes on
+	// the entry's pool of SideRequestSlots connections.
+	Chunk bool
 }
 
 // errBadOutbound refuses a request the send path never builds.
@@ -146,8 +156,12 @@ func (e *Entry) do(ctx context.Context, out Outbound, withAuth bool) (*http.Resp
 	if out.ContentEncoding == headerZstd[0] {
 		h["Content-Encoding"] = headerZstd
 	}
+	client := e.client
+	if !out.Chunk && e.sideClient != nil {
+		client = e.sideClient
+	}
 	start := time.Now()
-	resp, err := e.client.Do(req)
+	resp, err := client.Do(req)
 	e.observe(resp, err, time.Since(start))
 	return resp, err
 }
@@ -200,6 +214,9 @@ func (e *Entry) CloseIdleConnections() {
 	if e != nil && e.transport != nil {
 		e.transport.CloseIdleConnections()
 	}
+	if e != nil && e.sideTransport != nil {
+		e.sideTransport.CloseIdleConnections()
+	}
 }
 
 // entrySpec is everything an entry is built from. The password is
@@ -249,18 +266,21 @@ func buildClient(spec entrySpec) (*Entry, error) {
 		return nil, err
 	}
 	limits := spec.limits.WithDefaults()
-	t := newTransport(transportSpec{limits: limits, roots: roots, serverName: serverName, dial: spec.dial})
+	t := newTransport(transportSpec{limits: limits, roots: roots, serverName: serverName, dial: spec.dial, conns: limits.MaxInFlight})
+	side := newTransport(transportSpec{limits: limits, roots: roots, serverName: serverName, dial: spec.dial, conns: SideRequestSlots})
 	e := &Entry{
-		name:        spec.name,
-		id:          spec.id,
-		cv:          spec.cv,
-		limits:      limits,
-		base:        base,
-		host:        host,
-		client:      newClient(t, limits),
-		transport:   t,
-		fingerprint: spec.fingerprint,
-		metrics:     spec.metrics,
+		name:          spec.name,
+		id:            spec.id,
+		cv:            spec.cv,
+		limits:        limits,
+		base:          base,
+		host:          host,
+		client:        newClient(t, limits),
+		transport:     t,
+		fingerprint:   spec.fingerprint,
+		metrics:       spec.metrics,
+		sideClient:    newClient(side, limits),
+		sideTransport: side,
 	}
 	e.recycledAt.Store(time.Now().UnixNano())
 	return e, nil
