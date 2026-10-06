@@ -119,6 +119,7 @@ func clusterMembersCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&detail, "detail", false, "also ask every member for its own status")
+	cmd.AddCommand(clusterMembersForgetCmd())
 	return cmd
 }
 
@@ -128,4 +129,19 @@ func withDetail(path string, detail bool) string {
 		return path + "?detail=true"
 	}
 	return path
+}
+
+func clusterMembersForgetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "forget <node-id>",
+		Short: "remove a Raft server that has no member record",
+		Long: "Removes a Raft voter or non-voter that has no member record, such as a\n" +
+			"joiner admitted by a 3.0.x leader that never registered. It moves and\n" +
+			"deletes no data: a server with a member record is refused (decommission\n" +
+			"it instead), and so is one a partition assignment names.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return cliClient().postAndPrint("/v1/cluster/members/"+url.PathEscape(args[0])+"/forget", nil)
+		},
+	}
 }

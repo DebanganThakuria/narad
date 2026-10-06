@@ -140,7 +140,9 @@ spec:
             - name: NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH
               value: "true"
             {{- end }}
-            {{- if and (not .Values.security.clusterTLS.enabled) .Values.security.allowPlaintextRaft }}
+            {{- /* The acknowledgement that the Raft port is fenced: only when it
+                   is, by the chart's NetworkPolicy or by the operator's word. */}}
+            {{- if and (not .Values.security.clusterTLS.enabled) (or .Values.security.allowPlaintextRaft (eq (include "narad.networkPolicyEnabled" .) "true")) }}
             - name: NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT
               value: "true"
             {{- end }}

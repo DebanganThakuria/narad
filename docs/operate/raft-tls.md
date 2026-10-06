@@ -68,9 +68,10 @@ helm install narad ./charts/narad -n narad \
   --set replicaCount=3 \
   --set persistence.size=50Gi \
   --set image.tag=v3.0.1 \
-  --set security.clusterTLS.enabled=true \
-  --set security.allowPlaintextRaft=false
+  --set security.clusterTLS.enabled=true
 ```
+
+With TLS on, the chart never tells the node that plaintext Raft is fenced, so `security.allowPlaintextRaft` does not matter. The chart's NetworkPolicy, on by default, still keeps the node RPC plane (7942/udp) and Raft to the Narad pods ([Fence the cluster ports](production-checklist.md#network-policy); unreleased, the v3.0.1 chart has no policy).
 
 Each node logs which transport it runs. Check one:
 
@@ -106,6 +107,8 @@ A node on TLS and a node on plaintext cannot talk Raft to each other, so the swi
       --set security.allowPlaintextRaft=false
     ```
 
+    `allowPlaintextRaft=false` clears a `true` that `--reuse-values` carries over from an older chart's default, so that a later change that turns TLS off is refused unless it names a fence.
+
     The StatefulSet restarts the highest-numbered pod first. That pod runs TLS, cannot reach its plaintext peers and stays not ready. The rolling update waits for it to become ready, so it stops here. The other pods keep their leader and keep serving.
 
 3. Restart the next pods down by hand until a majority runs TLS. A deleted pod comes back with the new settings. On three nodes, one deletion is enough:
@@ -121,6 +124,32 @@ A node on TLS and a node on plaintext cannot talk Raft to each other, so the swi
     ```bash
     kubectl rollout status statefulset/narad -n narad
     ```
+
+## Watch the expiry {#expiry}
+
+**Unreleased:** in master, not in v3.0.1.
+
+Each node exports when its certificate and the earliest-expiring CA in its bundle expire, as `narad_raft_tls_cert_not_after_seconds` with `kind="leaf"` and `kind="ca"` ([Metrics reference](../reference/metrics.md#metastore-raft)). Alert well ahead, for example on `narad_raft_tls_cert_not_after_seconds - time() < 7 * 86400` ([Monitor and alert](monitoring.md#node-health-alerts)). The node also checks the dates at startup and then every hour, and logs:
+
+| When | Level | Line starts with |
+|---|---|---|
+| At startup | info | `raft TLS certificate in use`, with `not_before`, `not_after` and `ca_not_after` |
+| At startup, before the certificate's `not_before` | error | `raft TLS certificate is not valid yet` |
+| 30 days, then 7 days, before it expires | warning | `raft TLS certificate expires in less than 30 days` (or `7 days`) |
+| 1 day before it expires | error | `raft TLS certificate expires in less than a day` |
+| Once it has expired, then every 24 hours | error | `raft TLS certificate has expired` |
+
+The CA's lines say `raft TLS CA certificate` instead. The expiry lines end with the same reminder: Narad reads the files only at startup, so a renewed certificate takes effect only after a [rolling restart](#renew).
+
+Once the certificate, or every CA in the bundle, has expired, peers refuse the new Raft connections the node opens or accepts, and connections opened before the expiry carry on until they break. While the node is otherwise ready, `/readyz` keeps answering `200` and lists the expiry under `degraded`:
+
+```text title="Output"
+{"status":"ready","degraded":["raft_tls_certificate_expired"]}
+```
+
+`raft_tls_ca_expired` means every CA in the bundle has expired. The expiry does not fail readiness: one certificate usually serves every node and expires on all of them at once, and failing readiness would take every pod out of its Services at the same moment.
+
+Renew before the expiry, as below. Once the certificate has expired on every node, a pod restarted with a new one and its peers on the old one refuse each other, and a rolling restart stops at its first pod; [Troubleshooting](troubleshooting.md#log-raft-tls-expired) says how to get past that.
 
 ## Renew node certificates {#renew}
 

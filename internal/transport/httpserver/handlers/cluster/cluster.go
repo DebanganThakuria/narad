@@ -44,6 +44,13 @@ func Decommission(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if !dryRun {
+			// A dry run writes nothing; a real decommission is audited
+			// on this node whatever the outcome, forwarded or refused.
+			aw := handlers.NewAuditWriter(w)
+			w = aw
+			defer aw.Audit(s, r, "cluster.decommission", id)
+		}
 		if !preflightDecommission(s, w, r, id, dryRun) {
 			return
 		}
@@ -69,12 +76,15 @@ func CancelDecommission(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, "dry_run applies to a decommission, not to its cancel")
 			return
 		}
+		aw := handlers.NewAuditWriter(w)
+		w = aw
+		defer aw.Audit(s, r, "cluster.decommission.cancel", id)
 		setDraining(s, w, r, id, true)
 	}
 }
 
 // setDraining writes the drain flag on the leader (forwarding from a
-// follower) and audits it.
+// follower). The caller's audit writer records the outcome.
 func setDraining(s *handlers.Set, w http.ResponseWriter, r *http.Request, id string, cancel bool) {
 	if s.Deps.Router != nil && s.Deps.Router.RouteDecommissionMember(r.Context(), w, r, id, cancel) {
 		return // forwarded to the leader; response already written
@@ -83,11 +93,6 @@ func setDraining(s *handlers.Set, w http.ResponseWriter, r *http.Request, id str
 		s.WriteBrokerError(w, "decommission", err)
 		return
 	}
-	event := "cluster.decommission"
-	if cancel {
-		event = "cluster.decommission.cancel"
-	}
-	s.Audit(r, event, id)
 	w.WriteHeader(http.StatusNoContent)
 }
 

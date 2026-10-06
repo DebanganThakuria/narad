@@ -221,7 +221,7 @@ func runServe(args []string) error {
 		runClusterJoinWhenLeaderless(ctx, ms, cs.peerRPC, cfg, nodeID, joinOnly, fresh, log)
 	})
 	wg.Go(func() { watchMetastoreHalt(ctx, ms, failServe) })
-	wg.Go(func() { runMemberHeartbeater(ctx, ms, member, 5*time.Second, cs.peerRPC, log) })
+	wg.Go(func() { runMemberHeartbeater(ctx, ms, member, 5*time.Second, cs.peerRPC, m, log) })
 	wg.Go(func() { cs.controller.Run(ctx) })
 	wg.Go(func() {
 		watchDraining(ctx, ms, nodeID, cs.drain, drainingCheckInterval, drainingRefreshInterval)
@@ -300,7 +300,7 @@ func runServe(args []string) error {
 	// Authentication: seed the root admin (background, leader-gated so
 	// exactly one node wins) and gate the API with Basic auth when
 	// security is enabled.
-	auth := buildAuthenticator(cfg, ms, log)
+	auth := buildAuthenticator(cfg, ms, reg, log)
 	seedRootAdmin(ctx, cfg, ms, log)
 
 	// Finally build the API server. It serves /healthz immediately;

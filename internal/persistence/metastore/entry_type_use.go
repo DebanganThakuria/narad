@@ -32,6 +32,7 @@ var entryTypeNames = map[opCode]string{
 	opAssignPartitionIfAbsent: "insert-only partition placement",
 	opPruneAssignment:         "orphan assignment prune",
 	opMarkMemberDeadIf:        "dead mark from an observed heartbeat",
+	opDeleteUserReleaseTopics: "user delete that releases its topics",
 }
 
 // heldBackLogInterval spaces the info lines that say why an entry type

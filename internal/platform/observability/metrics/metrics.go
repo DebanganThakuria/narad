@@ -115,6 +115,19 @@ type Metrics struct {
 	// Boot
 	BootDurationSeconds prometheus.Gauge
 
+	// PollerLastSuccess is the Unix time of each poller loop's last
+	// complete pass, or of the poller's start before the first (loop =
+	// vitals | inventory). time() minus it above 30 means the gauges
+	// that loop feeds are frozen.
+	PollerLastSuccess *prometheus.GaugeVec
+
+	// MemberHeartbeatFailures counts this node's consecutive failed
+	// member heartbeats (0 after a success); MemberHeartbeatLastSuccess
+	// is the Unix time of the last one that succeeded. See
+	// RecordMemberHeartbeat.
+	MemberHeartbeatFailures    prometheus.Gauge
+	MemberHeartbeatLastSuccess prometheus.Gauge
+
 	// httpSeries caches resolved HTTP children per {route, method,
 	// status} so the middleware does one map lookup per request. The
 	// HTTP collectors are never pruned, so entries stay live.
@@ -498,6 +511,27 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name:      "boot_duration_seconds",
 			Help:      "Wall time from process start to API listener up. Set once at startup.",
 		}),
+
+		PollerLastSuccess: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "poller",
+			Name:      "last_success_timestamp_seconds",
+			Help:      "Unix time of the metrics poller loop's last complete pass, or of the poller's start before the first: loop=vitals (ingress WAL health and backlog, open logs, reaper restarts, free space on the data volume) or loop=inventory (broker snapshot, per-partition gauges, data-dir walk). Both run every 5s; time() minus this above 30 means the gauges that loop feeds are frozen.",
+		}, []string{"loop"}),
+
+		MemberHeartbeatFailures: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "member",
+			Name:      "heartbeat_failures",
+			Help:      "Consecutive failed member heartbeats from this node to the metastore leader (0 after a success). The leader marks a member dead after 30s without one.",
+		}),
+
+		MemberHeartbeatLastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "member",
+			Name:      "heartbeat_last_success_timestamp_seconds",
+			Help:      "Unix time of this node's last successful member heartbeat; 0 until the first.",
+		}),
 	}
 
 	reg.MustRegister(
@@ -519,6 +553,8 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.MovesInFlight, m.MovesTotal, m.MoveDurationSeconds, m.MoveBytesTotal,
 		m.ErrorsTotal,
 		m.BootDurationSeconds,
+		m.PollerLastSuccess,
+		m.MemberHeartbeatFailures, m.MemberHeartbeatLastSuccess,
 	)
 
 	return m

@@ -2,9 +2,17 @@ package health
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -287,3 +295,109 @@ func (f *fakeBroker) RegisterRemoteDemand(context.Context, string, brokermsg.Rem
 func (f *fakeBroker) DropRemoteDemand(string, brokermsg.RemoteDemand) {}
 
 func (*fakeBroker) NoteRemoteClaim(string) {}
+
+// An expired Raft certificate is listed under "degraded" in a 200
+// answer, never turned into a 503: one certificate usually serves every
+// node, so it expires on all of them at once, and failing readiness
+// would take every pod out of its Services. A healthy node's answer has
+// no "degraded" field.
+func TestReadyzListsDegradedConditionsWithoutFailing(t *testing.T) {
+	readyBroker := &fakeBroker{readyFn: func(context.Context) error { return nil }}
+	probe := func(ms *metastore.Store) (int, map[string]any) {
+		t.Helper()
+		s := handlers.New(handlers.Deps{
+			Broker:         readyBroker,
+			Metastore:      ms,
+			Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+			MaxConsumeWait: time.Second,
+		})
+		res := httptest.NewRecorder()
+		Readyz(s).ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		var body map[string]any
+		if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+			t.Fatalf("readyz body %q: %v", res.Body.String(), err)
+		}
+		return res.Code, body
+	}
+	waitReady := func(ms *metastore.Store) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for ms.ClusterReady() != nil && time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
+	expired, err := metastore.New(metastore.Config{
+		NodeID: "expired", DataDir: t.TempDir(), BindAddr: "127.0.0.1:0", AdvertiseAddr: "127.0.0.1:0",
+		TLS: expiredRaftTLS(t),
+	})
+	if err != nil {
+		t.Fatalf("metastore.New: %v", err)
+	}
+	t.Cleanup(func() { _ = expired.Close() })
+	waitReady(expired)
+	code, body := probe(expired)
+	if code != http.StatusOK {
+		t.Fatalf("readyz with an expired raft certificate = %d %v, want 200", code, body)
+	}
+	if degraded, _ := body["degraded"].([]any); body["status"] != "ready" || len(degraded) != 1 || degraded[0] != "raft_tls_certificate_expired" {
+		t.Fatalf("readyz body with an expired raft certificate = %v, want status ready and degraded [raft_tls_certificate_expired]", body)
+	}
+
+	healthy, err := metastore.New(metastore.Config{
+		NodeID: "healthy", DataDir: t.TempDir(), BindAddr: "127.0.0.1:0", AdvertiseAddr: "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("metastore.New: %v", err)
+	}
+	t.Cleanup(func() { _ = healthy.Close() })
+	waitReady(healthy)
+	code, body = probe(healthy)
+	if _, has := body["degraded"]; code != http.StatusOK || has || body["status"] != "ready" {
+		t.Fatalf("readyz on a healthy node = %d %v, want 200 {\"status\":\"ready\"}", code, body)
+	}
+}
+
+// expiredRaftTLS returns a Raft TLS config whose node certificate
+// expired an hour ago, signed by a CA that is still valid.
+func expiredRaftTLS(t *testing.T) *metastore.TLSConfig {
+	t.Helper()
+	now := time.Now()
+	issue := func(tmpl, parent *x509.Certificate, pub *ecdsa.PublicKey, signer *ecdsa.PrivateKey) *x509.Certificate {
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, pub, signer)
+		if err != nil {
+			t.Fatalf("create certificate: %v", err)
+		}
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatalf("parse certificate: %v", err)
+		}
+		return cert
+	}
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test-cluster-ca"},
+		NotBefore: now.Add(-48 * time.Hour), NotAfter: now.Add(365 * 24 * time.Hour),
+		IsCA: true, KeyUsage: x509.KeyUsageCertSign, BasicConstraintsValid: true,
+	}
+	ca := issue(caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := issue(&x509.Certificate{
+		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "narad-node"},
+		DNSNames:  []string{metastore.ClusterCertDNSName},
+		NotBefore: now.Add(-48 * time.Hour), NotAfter: now.Add(-time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+	}, ca, &leafKey.PublicKey, caKey)
+	pool := x509.NewCertPool()
+	pool.AddCert(ca)
+	return &metastore.TLSConfig{
+		Certificate: tls.Certificate{Certificate: [][]byte{leaf.Raw}, PrivateKey: leafKey, Leaf: leaf},
+		CAs:         pool,
+	}
+}

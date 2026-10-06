@@ -56,6 +56,7 @@ func (rt *Router) settleForwardedWrite(ctx context.Context, memberAddr string, r
 // leader before this release never sends it; its 503s stay decided.
 func (rt *Router) writeForwardedWrite(ctx context.Context, w http.ResponseWriter, memberAddr string, res nodewire.Response, err error) bool {
 	if err != nil {
+		markForwardUndecided(w)
 		writeLeaderForwardError(w, err)
 		return true
 	}

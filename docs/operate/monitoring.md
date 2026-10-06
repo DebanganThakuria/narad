@@ -75,6 +75,16 @@ Releases after v3.0.1 export the [metastore and Raft series](../reference/metric
 
 What to do about a stopped metastore is on the Troubleshooting page under [metastore: stopped applying raft entries](troubleshooting.md#log-metastore-stopped).
 
+### Certificate, poller and heartbeat alerts (unreleased) {#node-health-alerts}
+
+Releases after v3.0.1 also export when the Raft TLS certificate expires, when the metrics poller last finished a pass, and whether this node's member heartbeats are failing. A node on v3.0.1 exports none of these series, so these alerts see nothing for it.
+
+| Alert | Expression | What it means |
+|---|---|---|
+| Raft certificate expiring | `narad_raft_tls_cert_not_after_seconds - time() < 7 * 86400` | The node's Raft TLS certificate (`kind="leaf"`) or the earliest-expiring CA in its bundle (`kind="ca"`) expires within 7 days. One certificate usually serves every node, so once it expires peers refuse every new Raft connection. Narad reads the files only at startup: renew them, then restart the pods one at a time ([Renew node certificates](raft-tls.md#renew)). |
+| Metrics poller frozen | `time() - narad_poller_last_success_timestamp_seconds > 30` | A poller loop has not finished a pass for 30 s, so the gauges it feeds show old values: with `loop="vitals"` the WAL health and backlog, open logs, reaper restarts and free space, with `loop="inventory"` the per-partition gauges and topic counts. The node's log and `narad_errors_total{component="metrics"}` say which source failed or hung. |
+| Member heartbeats failing | `narad_member_heartbeat_failures > 0`, held for 1 minute (`for: 1m`) | The node has not heartbeated its membership to the Raft leader for a minute, and the leader marks a member dead after 30 s without one. The node logs `member heartbeat failing` with the last error ([Troubleshooting](troubleshooting.md#log-member-heartbeat-failing)). |
+
 ### Decommission and move alerts (unreleased) {#move-alerts}
 
 The leader exports why a decommission or a move cannot progress ([Cluster controller metrics](../reference/metrics.md#cluster-controller)). Add these too:

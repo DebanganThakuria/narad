@@ -21,6 +21,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker/topics"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
@@ -308,6 +309,12 @@ func TestNewEntryTypesWaitForEveryMember(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := s.MarkMemberDead(ctx, "b"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CreateUser(ctx, user.User{Username: "bob" + suffix}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DeleteUser(ctx, "bob"+suffix); err != nil {
 			t.Fatal(err)
 		}
 	}

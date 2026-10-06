@@ -197,6 +197,7 @@ func FuzzRPCDispatch(f *testing.F) {
 		must(nodewire.EncodePrepareHandoffRequest(nodewire.PrepareHandoffRequest{Topic: "orders", Partition: 1, FreezeTTLNanos: 1e9})),
 		must(nodewire.EncodeDecommissionRequest(nodewire.DecommissionRequest{ID: "fuzz-1"})),
 		must(nodewire.EncodeDecommissionRequest(nodewire.DecommissionRequest{ID: "fuzz-1", Cancel: true})),
+		must(nodewire.EncodeForgetServerRequest(nodewire.ForgetServerRequest{ID: "fuzz-1"})),
 		must(nodewire.EncodeCompleteMoveRequest(nodewire.CompleteMoveRequest{Topic: "orders", Partition: 1, ExpectedOwner: "fuzz-0", TargetID: "fuzz-1"})),
 		must(nodewire.EncodeAbortMoveRequest(nodewire.AbortMoveRequest{Topic: "orders", Partition: 1, ExpectedTarget: "fuzz-1"})),
 		must(nodewire.EncodeGetAssignmentRequest(nodewire.GetAssignmentRequest{Topic: "orders", Partition: 1})),
@@ -288,6 +289,8 @@ func wireRejects(payload []byte) bool {
 		_, err = nodewire.DecodePrepareHandoffRequest(payload)
 	case nodewire.OpDecommissionMember:
 		_, err = nodewire.DecodeDecommissionRequest(payload)
+	case nodewire.OpForgetServer:
+		_, err = nodewire.DecodeForgetServerRequest(payload)
 	case nodewire.OpCompleteMove:
 		_, err = nodewire.DecodeCompleteMoveRequest(payload)
 	case nodewire.OpAbortMove:

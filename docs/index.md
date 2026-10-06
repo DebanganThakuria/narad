@@ -379,6 +379,8 @@ helm install narad ./charts/narad \
   --set image.tag=v3.0.1
 ```
 
+The chart's NetworkPolicy fences the Raft port to the Narad pods by default; [Raft TLS](operate/raft-tls.md) is the production choice.
+
 [Deployment, step by step](operate/deploy-kubernetes.md){ .nr-more }
 
 </div>

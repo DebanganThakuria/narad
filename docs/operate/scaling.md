@@ -148,13 +148,23 @@ This example takes a five-node cluster down to four.
 
 2. Wait until `narad cluster members` shows `owned_partitions: 0` for `narad-4`. The leader then removes it from Raft (as a voter, or as a non-voter if it was never promoted), and it drops out of the list. The pod keeps running, reports not ready, and its heartbeats are refused. Before the removal, the leader asks the node for its dispatch backlog and waits until its ingress WAL has handed every message it accepted to the partition's owner (unreleased); a node on v3.0.1 cannot answer and is removed without that check, as v3.0.1 did. If the node stays listed, its `decommission_blocked` says why ([Troubleshooting](troubleshooting.md#decommission-blocked)).
 
-3. Lower `replicaCount`. `allowScaleIn=true` tells the chart the pods it removes were decommissioned; without it, the chart refuses to lower the replica count of a running StatefulSet.
+3. Lower `replicaCount`. `allowScaleInTo=4` tells the chart the pods above size 4 were decommissioned; without it, the chart refuses to lower the replica count of a running StatefulSet. It approves that one size only, so keeping it with `--reuse-values` does not approve a later scale-in to another size.
 
     ```bash
     helm upgrade narad ./charts/narad -n narad --reuse-values \
       --set replicaCount=4 \
-      --set allowScaleIn=true
+      --set allowScaleInTo=4
     ```
+
+    `allowScaleInTo` is unreleased: the v3.0.1 chart takes `--set allowScaleIn=true` instead, and newer charts no longer read `allowScaleIn`.
+
+    Before the change, the chart's scale-in guard (unreleased) checks the cluster itself. This hook Job runs before every `helm upgrade` and `helm rollback`. If the change deletes a pod that `narad cluster members` still lists, it refuses, and the command fails with the reason in the Job's log:
+
+    ```bash
+    kubectl logs -n narad job/narad-scale-in-guard
+    ```
+
+    A change that deletes no pod passes without calling the API. The guard finds pods through cluster DNS, and a lookup that fails looks the same for a pod that is gone and for a DNS outage, so it trusts one only while cluster DNS answers for the API server's Service (`kubernetes.default.svc`) or a pod the change keeps; otherwise it refuses with `DNS lookups fail; cannot tell which pods exist`. A release with no pod yet (a first Argo CD sync, or every pod Pending without an address) therefore passes: the change deletes none. On a scale-in the guard signs in as `admin` with the `admin-password` key of the security secret, so that key must hold root's current password; without it, the guard refuses and says so. An answer that lists no members counts as unreadable too. To go ahead after checking `narad cluster members` by hand, add `--no-hooks` to that one command.
 
 To stop a decommission before it finishes, run `narad cluster decommission narad-4 --cancel`. The node starts receiving partitions again, and the next rebalance evens the load out.
 
@@ -162,7 +172,7 @@ Keep these rules while you scale in:
 
 - **Wait for zero partitions.** Lowering `replicaCount` before the node owns nothing deletes a pod whose data has not moved.
 - **Do not overlap a decommission with a rolling restart.** A `helm upgrade` that changes the pod template restarts the pods, and a draining node that restarts has no stable source to copy from until it settles. Changing only `replicaCount` does not restart the pods.
-- **A rollback of `replicaCount` is a scale-in.** `helm rollback` to a revision with fewer replicas deletes pods exactly like step 3, without steps 1 and 2. The chart refuses it unless `allowScaleIn` is set; decommission first rather than setting it to get past the refusal.
+- **A rollback of `replicaCount` is a scale-in.** `helm rollback` to a revision with fewer replicas deletes pods exactly like step 3, without steps 1 and 2. `helm rollback` renders no templates, so the `allowScaleInTo` check never runs; the scale-in guard, a pre-rollback hook, refuses it while a pod being deleted is still a member. A rollback to a revision rendered by an older chart runs no guard (the v3.0.1 chart refuses nothing on rollback). Decommission first.
 - **Keep a node that is not draining alive.** New partitions never go to a draining node. While every live node is draining, for example two draining nodes while the others restart, topic creates and partition increases answer `503` and the leader logs `every live member is being decommissioned` at error level; they succeed again once a node that is not draining is back.
 - **Three voters is the floor.** The leader never removes a voter from Raft if that would leave fewer than three voters, and on master also never if the voters left alive would not be a majority of the rest: with dead voters around, removing a live one could leave a configuration that can never elect a leader. On master such a decommission is refused up front; on v3.0.1 it moves the partitions away, but the node stays a member. If the leader itself is decommissioned, it hands leadership to another node first. A node that is still a non-voter has no vote, so the floor does not hold it back.
 - **Remove dead voters first, and bring them back to do it.** On master the leader removes a dead draining voter before a live one, but only once it has read the node's dispatch backlog, which a dead node cannot report: its decommission waits with `node_status_unavailable` until the node comes back and hands off its WAL. Bring it back, or cancel its decommission. A dead node that still owns partitions cannot be drained at all (`owner_dead`): its data is only on its disk.

@@ -29,3 +29,32 @@ LoadBalancer service:
 LoadBalancer is disabled. Enable it with:
   --set service.loadBalancer.enabled=true
 {{- end }}
+{{- $secretName := .Values.security.existingSecret | default (printf "%s-security" (include "narad.fullname" .)) }}
+{{- if .Values.security.enabled }}
+
+Raft fence ({{ .Values.service.ports.cluster }}/tcp):
+{{- if .Values.security.clusterTLS.enabled }}
+  Raft runs over mutual TLS, with the certificates in the Secret {{ .Values.security.clusterTLS.secretName }}.
+{{- else if eq (include "narad.networkPolicyEnabled" .) "true" }}
+  Raft is plaintext, fenced by this chart's NetworkPolicy {{ include "narad.fullname" . }} ({{ .Values.service.ports.cluster }}/tcp and {{ .Values.service.ports.api }}/udp from this release's pods only). It holds only on a CNI that enforces NetworkPolicy.
+{{- else }}
+  Raft is plaintext and this chart does not fence it: security.allowPlaintextRaft says you do. Keep {{ .Values.service.ports.cluster }}/tcp and {{ .Values.service.ports.api }}/udp fenced to the narad pods.
+{{- end }}
+
+Root admin password:
+  The root user is "admin", with the password in the "{{ .Values.security.adminPasswordKey }}" key of the Secret {{ $secretName }}.
+  Without that key, the node that created it generated one and wrote it to /var/lib/narad/admin-password
+  on its own volume; it is never logged. Find that node with:
+    kubectl logs -n {{ .Release.Namespace }} <pod> | grep 'seeded root admin with a generated password'
+  then read the file, change the password and delete the file (docs/operate/users.md).
+{{- else }}
+
+Security is off: the API, the node RPC plane and Raft accept anything that reaches the pods.
+{{- end }}
+{{- if .Values.allowScaleIn }}
+
+WARNING: allowScaleIn is no longer read. A scale-in is approved with
+--set allowScaleInTo=<new replicaCount>, which matches that one size only,
+and the scale-in guard hook checks that the pods being removed left the
+cluster. Remove allowScaleIn from your values.
+{{- end }}

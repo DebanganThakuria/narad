@@ -49,6 +49,9 @@ const (
 	OpTokenNotify
 	OpAckBatch
 	OpNodeStatus
+	// OpForgetServer asks the leader to remove a Raft server that has no
+	// member record (ForgetServerRequest).
+	OpForgetServer
 )
 
 // CompleteMoveRequest asks the leader to perform the guarded ownership flip
@@ -277,6 +280,13 @@ type PrepareHandoffRequest struct {
 type DecommissionRequest struct {
 	ID     string
 	Cancel bool
+}
+
+// ForgetServerRequest asks the metastore leader to remove the Raft
+// server ID, voter or non-voter, which has no member record. Forwarded
+// from the node an admin called.
+type ForgetServerRequest struct {
+	ID string
 }
 
 // GetAssignmentRequest asks a node (in practice the leader, for

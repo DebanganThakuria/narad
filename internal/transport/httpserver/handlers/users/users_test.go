@@ -519,3 +519,201 @@ func TestPasswordWorkGoesThroughDepsPasswords(t *testing.T) {
 		t.Fatalf("self-service change: compares = %d hashes = %d, want 1 and 2 (both under the bound)", hasher.compares, hasher.hashes)
 	}
 }
+
+// leaderAnswer stands in for the cluster router on a follower: every
+// user write is forwarded and answered with status. undecided makes it
+// answer the way the router does when the leader's reply never came
+// back (it marks the writer undecided before its 503).
+type leaderAnswer struct {
+	handlers.Router
+	status    int
+	undecided bool
+}
+
+func (f leaderAnswer) answer(w http.ResponseWriter) bool {
+	if f.undecided {
+		if m, ok := w.(interface{ MarkUndecided() }); ok {
+			m.MarkUndecided()
+		}
+	}
+	w.WriteHeader(f.status)
+	return true
+}
+
+func (f leaderAnswer) RouteCreateUser(_ context.Context, w http.ResponseWriter, _ *http.Request, _ []byte) bool {
+	return f.answer(w)
+}
+
+func (f leaderAnswer) RouteUpdateUser(_ context.Context, w http.ResponseWriter, _ *http.Request, _ string, _ []byte) bool {
+	return f.answer(w)
+}
+
+func (f leaderAnswer) RouteDeleteUser(_ context.Context, w http.ResponseWriter, _ *http.Request, _ string) bool {
+	return f.answer(w)
+}
+
+// auditLog is a JSON log the handlers write to.
+type auditLog struct{ buf bytes.Buffer }
+
+// lines returns the audit lines logged so far.
+func (l *auditLog) lines(t *testing.T) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, raw := range bytes.Split(l.buf.Bytes(), []byte("\n")) {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("log line %q: %v", raw, err)
+		}
+		if m["component"] == "audit" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// auditedSet is a handler set on s whose user writes go to router, with
+// its log captured.
+func auditedSet(t *testing.T, s *metastore.Store, router handlers.Router) (*handlers.Set, *auditLog) {
+	t.Helper()
+	log := &auditLog{}
+	return handlers.New(handlers.Deps{
+		Broker:    stubBroker{},
+		Metastore: s,
+		Logger:    slog.New(slog.NewJSONHandler(&log.buf, nil)),
+		Router:    router,
+		Passwords: &countingHasher{},
+	}), log
+}
+
+// userWrite is one user mutation, as an admin sends it.
+type userWrite struct {
+	event, target string
+	handler       func(*handlers.Set) http.HandlerFunc
+	method, path  string
+	body          string
+}
+
+var userWrites = []userWrite{
+	{"user.create", "alice", httpusers.Create, http.MethodPost, "/v1/users", `{"username":"alice","password":"pw"}`},
+	{"user.delete", "dave", httpusers.Delete, http.MethodDelete, "/v1/users/dave", ""},
+	{"user.grants", "dave", httpusers.UpdateGrants, http.MethodPut, "/v1/users/dave/grants", `{"grants":[{"action":"produce","patterns":["orders-*"]}]}`},
+	{"user.password", "dave", httpusers.UpdatePassword, http.MethodPut, "/v1/users/dave/password", `{"new_password":"pw2"}`},
+}
+
+// send runs w as root against set and returns the status.
+func (w userWrite) send(t *testing.T, set *handlers.Set) int {
+	t.Helper()
+	req := asUser(httptest.NewRequest(w.method, w.path, strings.NewReader(w.body)), user.User{Username: "root", Root: true})
+	req.SetPathValue("username", w.target)
+	res := httptest.NewRecorder()
+	w.handler(set).ServeHTTP(res, req)
+	return res.Code
+}
+
+// requireAudited checks that log holds exactly one audit line, for w,
+// with outcome and status, logged at level.
+func requireAudited(t *testing.T, log *auditLog, w userWrite, outcome string, status int, level string) {
+	t.Helper()
+	lines := log.lines(t)
+	if len(lines) != 1 {
+		t.Fatalf("%s: %d audit lines %v, want one", w.event, len(lines), lines)
+	}
+	got := lines[0]
+	if got["event"] != w.event || got["actor"] != "root" || got["target"] != w.target ||
+		got["outcome"] != outcome || got["status"] != float64(status) || got["level"] != level {
+		t.Fatalf("%s: audit line %v, want event %s, actor root, target %s, outcome %s, status %d, level %s",
+			w.event, got, w.event, w.target, outcome, status, level)
+	}
+	log.buf.Reset()
+}
+
+// A user write a follower forwards to the leader is audited on the node
+// the client called, judged by the leader's answer: the leader's RPC
+// handler does not know the caller, so nothing else would record it.
+func TestForwardedUserMutationsAreAudited(t *testing.T) {
+	s := newStore(t)
+	seedUser(t, s, user.User{Username: "dave"}, "pw")
+	for _, w := range userWrites {
+		status := map[string]int{"user.create": http.StatusCreated, "user.grants": http.StatusOK}[w.event]
+		if status == 0 {
+			status = http.StatusNoContent
+		}
+		set, log := auditedSet(t, s, leaderAnswer{status: status})
+		if got := w.send(t, set); got != status {
+			t.Fatalf("%s: status = %d, want the leader's %d", w.event, got, status)
+		}
+		requireAudited(t, log, w, handlers.AuditOK, status, "INFO")
+	}
+}
+
+// A refusal from the leader is audited as rejected: nothing changed.
+func TestRefusedForwardedUserCreateIsAuditedRejected(t *testing.T) {
+	s := newStore(t)
+	set, log := auditedSet(t, s, leaderAnswer{status: http.StatusConflict})
+	w := userWrites[0]
+	if got := w.send(t, set); got != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", got)
+	}
+	requireAudited(t, log, w, handlers.AuditRejected, http.StatusConflict, "INFO")
+}
+
+// A forward whose reply never came back may have been applied on the
+// leader, so it is audited as unknown, never as failed.
+func TestForwardWithoutTheLeadersAnswerIsAuditedUnknown(t *testing.T) {
+	s := newStore(t)
+	seedUser(t, s, user.User{Username: "dave"}, "pw")
+	for _, w := range userWrites {
+		set, log := auditedSet(t, s, leaderAnswer{status: http.StatusServiceUnavailable, undecided: true})
+		if got := w.send(t, set); got != http.StatusServiceUnavailable {
+			t.Fatalf("%s: status = %d, want 503", w.event, got)
+		}
+		requireAudited(t, log, w, handlers.AuditUnknown, http.StatusServiceUnavailable, "INFO")
+	}
+}
+
+// A client that went away mid-forward (499) may have had its change
+// applied, so it is audited as unknown, never as rejected.
+func TestClientGoneMidForwardIsAuditedUnknown(t *testing.T) {
+	s := newStore(t)
+	seedUser(t, s, user.User{Username: "dave"}, "pw")
+	for _, w := range userWrites {
+		set, log := auditedSet(t, s, leaderAnswer{status: handlers.StatusClientClosedRequest})
+		if got := w.send(t, set); got != handlers.StatusClientClosedRequest {
+			t.Fatalf("%s: status = %d, want 499", w.event, got)
+		}
+		requireAudited(t, log, w, handlers.AuditUnknown, handlers.StatusClientClosedRequest, "INFO")
+	}
+}
+
+// On the leader the line carries the outcome too, and a write refused
+// as an escalation is audited as denied, at warning level.
+func TestUserMutationsOnTheLeaderAreAuditedWithTheirOutcome(t *testing.T) {
+	s := newStore(t)
+	seedUser(t, s, user.User{Username: "dave"}, "pw")
+	set, log := auditedSet(t, s, nil)
+	// Delete dave last: the updates need him.
+	for _, w := range []userWrite{userWrites[2], userWrites[3], userWrites[0], userWrites[1]} {
+		status := w.send(t, set)
+		if status >= http.StatusMultipleChoices {
+			t.Fatalf("%s on the leader: status %d", w.event, status)
+		}
+		requireAudited(t, log, w, handlers.AuditOK, status, "INFO")
+	}
+
+	lead := user.User{Username: "team-lead", Grants: []user.Grant{{Action: user.ActionAdmin}}}
+	req := asUser(httptest.NewRequest(http.MethodPost, "/v1/users",
+		strings.NewReader(`{"username":"evil","password":"pw","grants":[{"action":"admin"}]}`)), lead)
+	res := httptest.NewRecorder()
+	httpusers.Create(set).ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("escalating create: status = %d, want 403", res.Code)
+	}
+	lines := log.lines(t)
+	if len(lines) != 1 || lines[0]["event"] != "user.create" || lines[0]["actor"] != "team-lead" ||
+		lines[0]["outcome"] != handlers.AuditDenied || lines[0]["level"] != "WARN" {
+		t.Fatalf("escalating create audit lines = %v, want one user.create by team-lead, outcome denied, at WARN", lines)
+	}
+}

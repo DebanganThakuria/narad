@@ -129,11 +129,18 @@ Peer RPCs are observable as `narad_cluster_rpc_requests_total{op,outcome}` and `
 
 Clients authenticate with HTTP Basic against bcrypt-hashed users stored in the Raft metastore. Credentials replicate with everything else, so any node can authenticate any request locally. TLS is expected to terminate at the ingress in front of Narad.
 
-Each node caches verified credentials, keyed by the users domain version. It rejects unknown usernames before running bcrypt (a deliberate timing leak that limits bcrypt cost to real users), and bounds bcrypt concurrency process-wide. Concurrent requests carrying the same credentials share one bcrypt run, and a requester that disconnects while it waits leaves on its own, without failing the others. Password hashing for user create and password change runs under the same bound.
+Each node caches verified credentials, keyed by the users domain version. It rejects unknown usernames before running bcrypt (a deliberate timing leak that limits bcrypt cost to real users), and bounds bcrypt concurrency process-wide. Concurrent requests carrying the same credentials share one bcrypt run, and a requester that disconnects while it waits leaves on its own, without failing the others. Password hashing for user create and password change has a bound of its own (2 at a time, unreleased; it used to share the verification bound), so a failed-login flood cannot delay it, and a loop of password changes cannot delay logins.
 
 ### Failed-login throttle {#auth-throttle}
 
 Failed attempts are throttled per username: a burst of 5, then one attempt earned back every 12 s. Beyond that, requests for the username are answered `429` (`too many failed authentication attempts`). The bucket is per node, so N nodes behind a load balancer allow 5N attempts in a burst.
+
+Two more rules keep a flood of wrong passwords from starving everyone else (unreleased):
+
+- **Clean attempts first.** A password check for a username with no recent failures (its bucket is full, as it is for every honest first login) runs ahead of a check for a username with some. A flood therefore delays an honest login by at most one attempt per username the flood has not tried yet, plus the checks already running.
+- **A node-wide failure budget.** A check for a username with recent failures also takes a token from a budget shared by the whole node: a burst of 32, refilled at 4 a second. A failed first attempt spends one when one is left, and a correct password gives back what it took. While the budget is empty, those checks are answered `429` at once, without running bcrypt, and the node logs `authentication failure budget exhausted` at most once every 10 s. A username with no recent failures is never refused by the budget.
+
+The cost: someone who mistyped their password recently counts as having failures until their bucket refills, about 12 s per failed attempt, and can be answered `429` while a flood keeps the node's budget empty. `narad_auth_verify_queued` shows the password checks admitted and not yet finished ([Metrics reference](../reference/metrics.md#authentication)).
 
 ### Authorization {#authorization}
 
@@ -141,7 +148,7 @@ Every request is checked against the caller's [grants](../reference/glossary.md#
 
 Enforcement lives in the HTTP handlers, ahead of any routing, so a forwarded request was authorized on the node the client actually reached. The full model is in [Access model and grants](../reference/access-model.md).
 
-The **root admin** is seeded once, by the leader, from the operator's secret at first startup.
+The **root admin** is seeded once, by the leader, from the operator's secret at first startup. Without one, the seeding node generates a password and writes it to a file in its data directory before it proposes the seed, never to the log ([Manage the root user](../operate/users.md#root-admin)).
 
 ## Trust model {#trust-model}
 

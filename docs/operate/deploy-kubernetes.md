@@ -84,7 +84,7 @@ The chart lives in the repository, so the install starts from a clone of the rel
       --from-literal=admin-password="$(openssl rand -base64 24)"
     ```
 
-    `cluster-secret` authenticates the nodes to each other and is required. `admin-password` becomes the password of the root user, `admin`. It is optional: without it, one node generates a password and logs it once (see [Manage users and grants](users.md#root-admin)). With Raft TLS on, also create the `narad-cluster-tls` secret now ([Create the certificates](raft-tls.md#create-certificates)).
+    `cluster-secret` authenticates the nodes to each other and is required. `admin-password` becomes the password of the root user, `admin`. It is optional: without it, one node generates a password and writes it to a file on its own volume (see [Manage users and grants](users.md#root-admin)). With Raft TLS on, also create the `narad-cluster-tls` secret now ([Create the certificates](raft-tls.md#create-certificates)).
 
 3. Install the chart with your values file:
 
@@ -92,7 +92,7 @@ The chart lives in the repository, so the install starts from a clone of the rel
     helm install narad ./charts/narad -n narad -f narad-values.yaml
     ```
 
-    For a trial, skip the file and set the few values that matter on the command line. This runs the Raft port without TLS, which the chart allows by default:
+    For a trial, skip the file and set the few values that matter on the command line. This runs the Raft port without TLS, fenced to the Narad pods by the chart's NetworkPolicy, which is on by default:
 
     ```bash
     helm install narad ./charts/narad -n narad \
@@ -100,6 +100,8 @@ The chart lives in the repository, so the install starts from a clone of the rel
       --set persistence.size=50Gi \
       --set image.tag=v3.0.1
     ```
+
+    The policy holds only on a CNI that enforces NetworkPolicy ([Fence the cluster ports](production-checklist.md#network-policy)). Turn it off (`networkPolicy.enabled=false`) without TLS or `security.allowPlaintextRaft`, and a chart after v3.0.1 refuses to install and names the alternatives (unreleased); the v3.0.1 chart has no policy, ignores `networkPolicy.enabled` and runs the Raft port unfenced.
 
     Pin `image.tag` to a release either way. The chart's default is `latest`, which follows `master`.
 

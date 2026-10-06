@@ -34,6 +34,8 @@ The chart lives in the repository at [`charts/narad`](https://github.com/Debanga
 | `servicemonitor.yaml`<br>ServiceMonitor | `serviceMonitor.enabled` | Scraping by the Prometheus Operator. |
 | `pdb.yaml`<br>PodDisruptionBudget | `podDisruptionBudget.enabled` | At most one pod down at a time during voluntary evictions, whatever the cluster size. |
 | `serviceaccount.yaml`<br>ServiceAccount | `serviceAccount.create` | A service account that mounts no API token. |
+| `networkpolicy.yaml`<br>NetworkPolicy | `networkPolicy.enabled`, on by default | Admits Raft and the node RPC plane from the release's own pods only (unreleased); see [Network policy](#network-policy). |
+| `scalein-guard-job.yaml`<br>Job `<name>-scale-in-guard`, a hook | `scaleInGuard.enabled` | Runs before every `helm upgrade` and `helm rollback`, and refuses one that would delete pods that are still cluster members (unreleased); see [Scale in](../operate/scaling.md#scale-in). |
 | `validate.yaml`<br>none | always | Stops a render that would break the cluster; see below. |
 
 `validate.yaml` fails the install or upgrade when:
@@ -41,7 +43,8 @@ The chart lives in the repository at [`charts/narad`](https://github.com/Debanga
 - `initialClusterSize` is less than 1 or even;
 - `replicaCount` is less than `initialClusterSize`;
 - `clusterPeerCount` (when set) is less than `initialClusterSize`;
-- `replicaCount` is lower than the running StatefulSet's replicas and `allowScaleIn` is not `true`. `helm template` cannot see the running StatefulSet, so this check runs only on a real install or upgrade.
+- `security.enabled` is on, `security.clusterTLS.enabled` is off, `networkPolicy.enabled` is turned off, and `security.allowPlaintextRaft` does not say the Raft port is fenced some other way (unreleased). The message names the three fixes; see [Production checklist](../operate/production-checklist.md#raft-tls).
+- `replicaCount` is lower than the running StatefulSet's replicas and `allowScaleInTo` is not that new `replicaCount` (unreleased; it used to be `allowScaleIn: true`, which is no longer read). `helm template` cannot see the running StatefulSet, so this check runs only on a real install or upgrade, and `helm rollback` never runs it: the scale-in guard Job covers rollbacks.
 
 For example, an even `initialClusterSize`:
 
@@ -63,10 +66,11 @@ Each table lists the value with its default in `values.yaml` under it, and what 
 
 | Value | What it does |
 |---|---|
-| `replicaCount`<br>default `3` | The number of nodes. The only number you change to scale. Raising it adds nodes that join the existing cluster. Lowering it is a scale-in, and so is a rollback to an older values file: decommission the highest-numbered pods first, then set `allowScaleIn`. See [Scale out and in](../operate/scaling.md). |
+| `replicaCount`<br>default `3` | The number of nodes. The only number you change to scale. Raising it adds nodes that join the existing cluster. Lowering it is a scale-in, and so is a rollback to a revision with fewer replicas: decommission the highest-numbered pods first, then set `allowScaleInTo`. See [Scale out and in](../operate/scaling.md). |
 | `initialClusterSize`<br>default `3` | The pods (`narad-0` up to `narad-N-1`) that may bootstrap a new Raft cluster; the rest join it. Odd, at least 1. Set it once at the first install and never change it. Sets [`cluster.initial_members`](configuration.md#cluster). |
 | `clusterPeerCount`<br>default `0` | The size of the peer list every pod gets. `0` means `initialClusterSize`. It is part of the pod template, so changing it rolls every pod; each pod also advertises its own address, so pods beyond the list work normally. Sets [`cluster.peers`](configuration.md#cluster). |
-| `allowScaleIn`<br>default `false` | Allows a `replicaCount` lower than the running StatefulSet's. Set it only after the pods being removed own no partitions. |
+| `allowScaleInTo`<br>default `0` | Allows lowering a running StatefulSet's replicas to this one `replicaCount` (unreleased). Set it to the new size once `narad cluster members` no longer lists the pods being removed. It approves that size only, so a value kept by `--reuse-values` does not approve a later scale-in to another size. It replaces `allowScaleIn`, which is no longer read. |
+| `scaleInGuard.enabled`<br>default `true` | Renders the scale-in guard, a hook Job that runs before every `helm upgrade` and `helm rollback` (unreleased). A change that deletes no pod passes without calling the API. On a scale-in the guard reads `narad cluster members` as `admin` with the security Secret's `admin-password` key, and refuses while a pod being deleted is still listed, when it cannot read the list (a list with no members counts as unreadable), or when DNS lookups fail so it cannot tell which pods exist (it checks DNS with the API server's Service, `kubernetes.default.svc`, so a release with no pod yet, as on a first Argo CD sync, deletes none and passes). It needs no Kubernetes API access and runs as the namespace's `default` ServiceAccount with no token mounted (the account `serviceAccount.name` names when `serviceAccount.create=false`), so a first Argo CD sync does not wait for the ServiceAccount this chart creates. `--no-hooks` skips it for one command. See [Scale in](../operate/scaling.md#scale-in). |
 | `clusterDomain`<br>default `cluster.local` | The Kubernetes cluster domain, used in the pods' DNS names. |
 | `nameOverride`, `fullnameOverride`<br>default `""` | Rename the chart's objects. |
 
@@ -122,11 +126,25 @@ narad:
 | `security.clusterTLS.secretName`<br>default `narad-cluster-tls` | The Secret holding the Raft CA and node certificate. |
 | `security.clusterTLS.mountPath`<br>default `/etc/narad/cluster-tls` | Where that Secret is mounted. |
 | `security.clusterTLS.certKey`, `.keyKey`, `.caKey`<br>default `tls.crt`, `tls.key`, `ca.crt` | The keys in that Secret. Set [the three `cluster_tls_*` files](configuration.md#logging-and-security). |
-| `security.allowPlaintextRaft`<br>default `true` | Sets [`security.allow_plaintext_raft`](configuration.md#logging-and-security) while `clusterTLS` is off. Keep it `true` only with a NetworkPolicy that limits 7943/tcp and 7942/udp to the Narad pods. |
+| `security.allowPlaintextRaft`<br>default `false` | Says that something outside the chart fences 7943/tcp and 7942/udp to the Narad pods: your own NetworkPolicy, a service mesh, a firewall. While `clusterTLS` is off, it or `networkPolicy.enabled` sets [`security.allow_plaintext_raft`](configuration.md#logging-and-security); with neither, a secured install fails. The default was `true` before (unreleased). |
 | `security.allowInsecureCluster`<br>default `false` | With `security.enabled: false`, sets [`security.allow_insecure_cluster`](configuration.md#logging-and-security), without which several nodes refuse to start with security off. |
 | `security.allowLegacyClusterAuth`<br>default `false` | Sets [`security.allow_legacy_cluster_auth`](configuration.md#logging-and-security), for one rolling upgrade across the change in node-to-node authentication. Not needed for a fresh install. |
 
 What to set before production traffic is in the [Production checklist](../operate/production-checklist.md).
+
+### Network policy {#network-policy}
+
+**Unreleased:** in master, not in v3.0.1.
+
+| Value | What it does |
+|---|---|
+| `networkPolicy.enabled`<br>default `true` | Creates a NetworkPolicy for the narad pods. It admits Raft (`service.ports.cluster`, TCP) and the node RPC plane (`service.ports.api`, UDP) from this release's pods only, and with `clusterTLS` off it is what lets the chart set [`security.allow_plaintext_raft`](configuration.md#logging-and-security); turning it off then needs `clusterTLS` or `security.allowPlaintextRaft`. It restricts ingress only. It needs a CNI that enforces NetworkPolicy; on one that does not, it is accepted and changes nothing. An upgrade with `--reuse-values` from v3.0.1, whose values have no `networkPolicy` key, renders without it, as before. |
+| `networkPolicy.apiFrom`<br>default `[]` | NetworkPolicyPeer entries allowed to reach the API (`service.ports.api`, TCP). Empty means anywhere. When set, the scale-in guard's pod is admitted too. |
+| `networkPolicy.metricsFrom`<br>default `[]` | Peers allowed to reach the metrics port, when `metrics.enabled`. Empty means anywhere. |
+| `networkPolicy.pprofFrom`<br>default `[]` | Peers allowed to reach pprof, when `narad.pprof.enabled`. Empty keeps it closed. |
+| `networkPolicy.extraIngress`<br>default `[]` | NetworkPolicyIngressRule entries appended as given. |
+
+Kubelet probes come from the pod's own node, which a NetworkPolicy does not block, so narrowing the API or the metrics port does not fail the probes.
 
 ### Services and ports {#services}
 
@@ -244,7 +262,7 @@ The chart reads credentials from a Secret named `<name>-security` (`narad-securi
 | Key | Required | Meaning |
 |---|---|---|
 | `cluster-secret` | yes, with `security.enabled` | The secret nodes prove to each other on the node-to-node port ([`NARAD_CLUSTER_SECRET`](configuration.md#logging-and-security)). A pod does not start without it. |
-| `admin-password` | no | The root admin's password ([`NARAD_ADMIN_PASSWORD`](configuration.md#logging-and-security)). Left out, the node that creates the root admin generates one and logs it once. |
+| `admin-password` | no | The root admin's password ([`NARAD_ADMIN_PASSWORD`](configuration.md#logging-and-security)). Left out, the node that creates the root admin generates one and writes it to `/var/lib/narad/admin-password` on its own volume (unreleased; it used to be logged once). See [Manage the root user](../operate/users.md#root-admin). |
 
 ```sh title="Command"
 kubectl create secret generic narad-security \
@@ -277,6 +295,6 @@ The chart passes these to every pod. Anything else goes through `extraEnv`.
 | `security.allowInsecureCluster` | `NARAD_SECURITY_ALLOW_INSECURE_CLUSTER`, only with security off |
 | the Secret's two keys | `NARAD_CLUSTER_SECRET`, `NARAD_ADMIN_PASSWORD`, only with security on |
 | `security.allowLegacyClusterAuth` | `NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH` |
-| `security.allowPlaintextRaft` | `NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT`, only while `clusterTLS` is off |
+| `security.allowPlaintextRaft`, `networkPolicy.enabled` | `NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT`, only while `clusterTLS` is off and either is set |
 | `security.clusterTLS.*` | the three `NARAD_CLUSTER_TLS_*_FILE` variables, when enabled |
 | `extraEnv` | one variable per entry |

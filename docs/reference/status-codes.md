@@ -50,6 +50,7 @@ The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for e
 | [`431`](#status-431) | Header block too large | No: fix the request first |
 | [`499`](#status-499) | The client went away | Not applicable |
 | [`500`](#status-500) | The node failed | Yes, with backoff |
+| [`501`](#status-501) | The leader's release cannot do this | No: upgrade the leader first |
 | [`502`](#status-502) | A forwarded request got no answer | Yes, with backoff |
 | [`503`](#status-503) | Temporarily unavailable | Yes, with backoff |
 
@@ -149,7 +150,7 @@ A topic change is checked twice: by the node that receives it, and again by the 
 
 ## 409 Conflict {#status-409}
 
-**Where:** create, change or delete a topic, attach or detach a child, create a user, produce to a delay child, and (unreleased) decommission a node or abort a partition move.
+**Where:** create, change or delete a topic, attach or detach a child, create a user, produce to a delay child, and (unreleased) decommission a node, abort a partition move or forget a Raft server.
 
 **Meaning:** the request conflicts with the current state:
 
@@ -163,6 +164,7 @@ A topic change is checked twice: by the node that receives it, and again by the 
 - A produce to a delay child, which only its parent can feed.
 - A decommission that could never complete safely (unreleased): the body's `reasons` lists each one with a `code` and a `message` ([Scale out and in](../operate/scaling.md#decommission)).
 - A move abort for a partition with no move in flight, or whose move now targets another node than `target`, or that the leader did not apply because the move finished first or is still in flight; the message names the owner and target (unreleased).
+- A forget (unreleased) that names a Raft server that has a member record (decommission it instead), one a partition assignment names as owner or move target, or a voter whose removal could leave the cluster without a quorum (the message names the voters the leader cannot reach).
 
 **What to do:** read the error message and the current state. For a schema conflict, read the current `schema_version` and retry with it as the base. For a create that must succeed once, treat "already exists" as success when the existing topic has the settings you wanted.
 
@@ -220,7 +222,7 @@ A handle carries no topic, so a handle from another topic, or one naming a parti
 |---|---|
 | Concurrent consumes per user, or per client IP with security off; a batch consume counts as its `max`, clamped to the cap | `http.max_consume_in_flight_per_identity`, 1024 by default |
 | Concurrent produces per user (unreleased); a batch produce counts as its message count, clamped to the cap | `http.max_produce_in_flight_per_identity`, off by default |
-| Wrong passwords for one existing user: 5, then one attempt every 12 seconds | none |
+| Wrong passwords for one existing user: 5, then one attempt every 12 seconds; and, for a user with recent failures, the node's failure budget of 32 checks, refilled at 4 a second (unreleased) | none |
 
 The error message says which limit was hit, in the same order:
 
@@ -261,6 +263,16 @@ The error message says which limit was hit, in the same order:
 - `internal server panic`, or another `<operation> failed`: a bug or an unexpected failure, logged on the node.
 
 **What to do:** retry with backoff, against another node if you can. A produce that got `500` may still be delivered, because records written before the failure survive the node's restart, so a retry can store it twice.
+
+**Go SDK:** `ErrServer`.
+
+## 501 Not Implemented {#status-501}
+
+**Where:** **Unreleased:** `POST /v1/cluster/members/{id}/forget`, on a node that forwarded it to a Raft leader running an older release.
+
+**Meaning:** the leader's release does not know the operation, so nothing changed: `the leader runs a release that cannot forget a Raft server; upgrade it first`.
+
+**What to do:** finish upgrading the cluster, the leader included, then send it again.
 
 **Go SDK:** `ErrServer`.
 

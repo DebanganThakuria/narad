@@ -626,6 +626,8 @@ func (s *RPCServer) controlHandler(op nodewire.Operation) (handle func([]byte) n
 		return s.handlePrepareHandoff, true
 	case nodewire.OpDecommissionMember:
 		return s.handleDecommissionMember, true
+	case nodewire.OpForgetServer:
+		return s.handleForgetServer, true
 	case nodewire.OpCompleteMove:
 		return s.handleCompleteMove, true
 	case nodewire.OpAbortMove:

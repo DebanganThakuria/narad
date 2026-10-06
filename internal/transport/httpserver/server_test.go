@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -313,3 +314,44 @@ func (f *fakeBroker) RegisterRemoteDemand(context.Context, string, brokermsg.Rem
 func (f *fakeBroker) DropRemoteDemand(string, brokermsg.RemoteDemand) {}
 
 func (*fakeBroker) NoteRemoteClaim(string) {}
+
+// The forget route is served by the API router: a POST reaches the
+// handler, which removes a Raft server with no member record.
+func TestForgetRouteIsServed(t *testing.T) {
+	store, err := metastore.New(metastore.Config{NodeID: "route-0", DataDir: t.TempDir(), BindAddr: "127.0.0.1:0"})
+	if err != nil {
+		t.Fatalf("metastore.New: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	deadline := time.Now().Add(10 * time.Second)
+	for !store.IsLeader() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for leadership")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	ghostAddr := func() string {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		return l.Addr().String()
+	}()
+	if adm, err := store.AdmitJoiner("ghost", ghostAddr); err != nil || adm.Status != metastore.JoinStaged {
+		t.Fatalf("AdmitJoiner = %+v, %v; want staged", adm, err)
+	}
+	set := handlers.New(handlers.Deps{Broker: &fakeBroker{}, Metastore: store, Logger: newTestLogger()})
+	router := NewRouter(set, newTestLogger(), nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/cluster/members/ghost/forget", nil)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"ghost"`) {
+		t.Fatalf("POST /v1/cluster/members/ghost/forget = %d %s, want 200 naming ghost", rec.Code, rec.Body)
+	}
+	if in, err := store.RaftServer("ghost"); err != nil || in {
+		t.Fatalf("ghost still in the raft configuration (%v, %v)", in, err)
+	}
+}

@@ -18,13 +18,49 @@ initialClusterSize: 3
 # decommissioning an initial member for good).
 clusterPeerCount: 0
 
-# Lowering replicaCount is a SCALE-IN, including a rollback to an older
-# values file: the pods the StatefulSet deletes must have been
-# decommissioned first (narad cluster decommission <pod>, wait for zero
-# owned partitions and Raft removal), or their partition data strands and
-# the remaining voters may lose quorum. The chart refuses to reduce a
-# running StatefulSet's replicas unless you acknowledge it here.
-allowScaleIn: false
+# Lowering replicaCount is a SCALE-IN, and so is a helm rollback to a
+# revision with fewer replicas: the pods the StatefulSet deletes must
+# have been decommissioned first (narad cluster decommission <pod>, then
+# wait until narad cluster members no longer lists it), or their
+# partition data strands and the remaining voters may lose quorum.
+#
+# Two checks hold you to it:
+#   - On helm upgrade, the chart refuses to lower a running StatefulSet's
+#     replicas unless allowScaleInTo equals the new replicaCount: "I
+#     decommissioned the pods above this size". It approves that one size
+#     only, so a value kept by --reuse-values cannot approve a later
+#     scale-in to another size. It replaces the allowScaleIn boolean,
+#     which is no longer read. This check needs a live cluster (Helm's
+#     lookup), so helm template and GitOps renderers skip it.
+#   - scaleInGuard (below) checks the cluster itself, on helm rollback
+#     too.
+# 0 approves no scale-in.
+allowScaleInTo: 0
+
+# The scale-in guard: a pre-upgrade and pre-rollback hook Job on the
+# narad image. Hooks run on helm rollback, which renders no templates and
+# so never reaches the allowScaleInTo check; Argo CD runs it as a PreSync
+# hook. It finds the pods at or above the new replicaCount through the
+# headless Service's DNS names, and trusts a failed lookup only while
+# cluster DNS answers for the API server's Service
+# (kubernetes.default.svc) or a pod that stays; otherwise DNS is failing
+# and it refuses. If none exists (a first Argo CD sync, every pod
+# Pending), the change deletes no pod and is allowed without calling the
+# API. Otherwise it reads
+# narad cluster members, signed in as admin with the admin-password key
+# of the security Secret, and refuses while any pod being deleted is
+# still a member, or when no member list can be read. It needs no
+# Kubernetes API access, so it runs as the namespace's default
+# ServiceAccount with no token mounted, not as the account this chart
+# creates (which a first Argo CD sync creates only after PreSync).
+#
+# On a scale-in it needs that key to hold the root admin's current
+# password; without it the guard refuses and says so. To go ahead after
+# checking by hand, pass --no-hooks to that one helm command. A rollback
+# to a revision rendered by an older chart runs that revision's hooks,
+# which have no guard.
+scaleInGuard:
+  enabled: true
 
 image:
   repository: ghcr.io/debanganthakuria/narad
@@ -144,7 +180,8 @@ security:
   #     --from-literal=cluster-secret="$(openssl rand -base64 32)" \
   #     --from-literal=admin-password="$(openssl rand -base64 24)"
   # admin-password is optional: if the key is absent, the seeding node
-  # generates a random password and logs it once at first boot.
+  # generates a random password and writes it to /var/lib/narad/admin-password
+  # on its own volume (never logged); see docs/operate/users.md.
   existingSecret: ""
   adminPasswordKey: admin-password
   clusterSecretKey: cluster-secret
@@ -172,16 +209,54 @@ security:
     keyKey: tls.key
     caKey: ca.crt
 
-  # Raft has no authentication of its own and the cluster secret does
-  # not cover it: with clusterTLS off, anything that can reach the
-  # cluster port (7943/tcp) can force elections or rewrite the metadata.
-  # The broker refuses to start a secured multi-node cluster without
-  # Raft TLS unless told the port is fenced some other way. The chart's
-  # default is that acknowledgement, because clusterTLS is off by
-  # default; enable clusterTLS for production, or keep this true only
-  # with a NetworkPolicy that restricts 7943/tcp (and 7942/udp, the
-  # QUIC node RPC plane) to the narad pods.
-  allowPlaintextRaft: true
+  # Raft is plaintext and unauthenticated without clusterTLS, and the
+  # cluster secret does not cover it: anything that can reach the
+  # cluster port (7943/tcp) can force elections or rewrite the metadata,
+  # password hashes and grants included. The broker refuses to start a
+  # secured cluster on plaintext Raft unless told the port is fenced.
+  #
+  # The chart tells it so (NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true) only
+  # when clusterTLS is off and either networkPolicy.enabled is true (the
+  # default: this chart then fences 7943/tcp and 7942/udp itself) or this
+  # value is true. Set it only if you turn the chart's policy off and
+  # something else already fences 7943/tcp and 7942/udp (the QUIC node
+  # RPC plane) to the narad pods: your own NetworkPolicy, a service mesh,
+  # a firewall. With security on, clusterTLS off, networkPolicy off and
+  # this false, the install fails and names the three ways out.
+  allowPlaintextRaft: false
+
+# NetworkPolicy for the narad pods, on by default. It needs a CNI that
+# enforces NetworkPolicy (Calico, Cilium and most managed offerings do);
+# on one that does not, the policy is accepted and ignored, and the
+# ports stay as open as without it. Ingress only; egress is left alone.
+#
+# When enabled, ingress to the narad pods is denied except:
+#   - Raft (service.ports.cluster, TCP) and the node RPC plane
+#     (service.ports.api, UDP), from this release's pods only;
+#   - the API (service.ports.api, TCP), from apiFrom, or from anywhere
+#     when apiFrom is empty;
+#   - the metrics port, when metrics.enabled, from metricsFrom, or from
+#     anywhere when it is empty;
+#   - pprof, when narad.pprof.enabled, from pprofFrom only (empty keeps
+#     it closed; kubectl port-forward still reaches it);
+#   - the rules in extraIngress, appended as given.
+# Kubelet probes come from the pod's own node, which a NetworkPolicy does
+# not block. With clusterTLS off, this policy is also what lets the chart
+# acknowledge plaintext Raft (see security.allowPlaintextRaft): turning
+# it off then needs clusterTLS or allowPlaintextRaft. An upgrade with
+# --reuse-values from a release older than this key keeps rendering
+# without a policy, as it did before.
+networkPolicy:
+  enabled: true
+  # NetworkPolicyPeer entries, for example:
+  #   - namespaceSelector:
+  #       matchLabels:
+  #         kubernetes.io/metadata.name: my-app
+  apiFrom: []
+  metricsFrom: []
+  pprofFrom: []
+  # Extra NetworkPolicyIngressRule entries.
+  extraIngress: []
 
 metrics:
   # Serve /metrics on the dedicated metrics port (service.ports.metrics)

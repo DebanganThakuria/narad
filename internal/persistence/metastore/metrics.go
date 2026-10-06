@@ -188,7 +188,11 @@ func (s *Store) registerMetrics(reg prometheus.Registerer) {
 	if reg == nil {
 		return
 	}
-	for _, c := range []prometheus.Collector{&metastoreCollector{s: s}, &raftCollector{s: s}} {
+	collectors := []prometheus.Collector{&metastoreCollector{s: s}, &raftCollector{s: s}}
+	if s.tls != nil {
+		collectors = append(collectors, &tlsExpiryCollector{cfg: s.tls})
+	}
+	for _, c := range collectors {
 		if err := reg.Register(c); err != nil {
 			s.log.Error("metastore: could not register the metastore and raft metrics; they are missing from /metrics, and alerts on them cannot fire", "error", err)
 			continue

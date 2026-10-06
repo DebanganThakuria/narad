@@ -3,6 +3,8 @@ package user
 import (
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestMatchPattern(t *testing.T) {
@@ -216,5 +218,50 @@ func TestValidatePassword(t *testing.T) {
 	}
 	if err := ValidatePassword(strings.Repeat("€", 25)); err == nil {
 		t.Fatal("75-byte multibyte password accepted")
+	}
+}
+
+func TestValidatePasswordHashAcceptsOnlyBcrypt(t *testing.T) {
+	good, err := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePasswordHash(good); err != nil {
+		t.Fatalf("a real bcrypt hash was refused: %v", err)
+	}
+	for _, bad := range [][]byte{
+		nil,
+		{},
+		[]byte("eA=="),
+		[]byte("hunter2"),
+		[]byte("$2a$99$" + strings.Repeat("a", 53)), // cost out of range
+	} {
+		if err := ValidatePasswordHash(bad); err == nil {
+			t.Errorf("ValidatePasswordHash(%q) accepted a value that is not a bcrypt hash", bad)
+		}
+	}
+}
+
+func TestValidateNewUserRefusesBadNamesGrantsAndHashes(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok := User{Username: "svc", PasswordHash: hash, Grants: []Grant{{Action: ActionProduce, Patterns: []string{"a*"}}}}
+	if err := ValidateNewUser(ok); err != nil {
+		t.Fatalf("a valid user was refused: %v", err)
+	}
+	for name, u := range map[string]User{
+		"path the mux cleans": {Username: "svc/../ghost", PasswordHash: hash},
+		"dot-dot":             {Username: "..", PasswordHash: hash},
+		"space":               {Username: "a b", PasswordHash: hash},
+		"empty name":          {Username: "", PasswordHash: hash},
+		"unknown action":      {Username: "svc", PasswordHash: hash, Grants: []Grant{{Action: "nope"}}},
+		"no hash":             {Username: "svc"},
+		"not bcrypt":          {Username: "svc", PasswordHash: []byte("hunter2")},
+	} {
+		if err := ValidateNewUser(u); err == nil {
+			t.Errorf("%s: ValidateNewUser accepted %+v", name, u)
+		}
 	}
 }

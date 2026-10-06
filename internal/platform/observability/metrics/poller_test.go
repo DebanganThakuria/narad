@@ -3,9 +3,12 @@ package metrics
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -157,5 +160,213 @@ func TestPollerSetsReaperRestartsEveryTick(t *testing.T) {
 	p.tick(context.Background())
 	if got := readGauge(t, reg, "narad_reaper_restarts", nil); got != 2 {
 		t.Fatalf("reaper_restarts after a restart = %v, want 2", got)
+	}
+}
+
+// The vital signs (WAL health and backlog, open logs, reaper restarts,
+// free space) must keep following their sources while the broker
+// Snapshot is blocked: that is when a stuck disk or a wedged partition
+// is happening, and when an operator reads them. The inventory loop
+// stays at its start stamp, so its frozen-poller alert can fire.
+func TestPollerVitalsRefreshWhileSnapshotBlocks(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	release := make(chan struct{})
+	p := NewPoller(m, blockingSnapshotProvider{release: release}, discardLogger(), t.TempDir())
+	p.interval = 10 * time.Millisecond
+	var healthy atomic.Bool
+	healthy.Store(true)
+	var open, free atomic.Int64
+	open.Store(2)
+	free.Store(4096)
+	p.SetIngressWALHealth(healthy.Load)
+	p.SetOpenLogCounter(func() int { return int(open.Load()) })
+	p.statfs = func(string) (uint64, error) { return uint64(free.Load()), nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { p.Run(ctx); close(done) }()
+	t.Cleanup(func() {
+		cancel()
+		close(release)
+		<-done
+	})
+
+	inventory := map[string]string{"loop": "inventory"}
+	vitals := map[string]string{"loop": "vitals"}
+	inventoryStart := waitGauge(t, reg, "narad_poller_last_success_timestamp_seconds", inventory, func(v float64) bool { return v > 0 })
+	vitalsStart := waitGauge(t, reg, "narad_poller_last_success_timestamp_seconds", vitals, func(v float64) bool { return v > 0 })
+
+	healthy.Store(false)
+	open.Store(9)
+	free.Store(8192)
+	waitGauge(t, reg, "narad_ingress_wal_failed", nil, func(v float64) bool { return v == 1 })
+	waitGauge(t, reg, "narad_open_partition_logs", nil, func(v float64) bool { return v == 9 })
+	waitGauge(t, reg, "narad_data_dir_available_bytes", nil, func(v float64) bool { return v == 8192 })
+	waitGauge(t, reg, "narad_poller_last_success_timestamp_seconds", vitals, func(v float64) bool { return v > vitalsStart })
+	if got := readGauge(t, reg, "narad_poller_last_success_timestamp_seconds", inventory); got != inventoryStart {
+		t.Fatalf("inventory last success moved from %v to %v while its Snapshot is blocked", inventoryStart, got)
+	}
+}
+
+// A failing Snapshot used to return before the open-log count, the
+// reaper restarts and the free space were read, so they froze exactly
+// while the node was in trouble.
+func TestPollerVitalsRefreshWhenSnapshotFails(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	p := NewPoller(m, failingSnapshotProvider{}, discardLogger(), t.TempDir())
+	open, restarts := 3, int64(1)
+	p.SetOpenLogCounter(func() int { return open })
+	p.SetReaperRestartCounter(func() int64 { return restarts })
+
+	p.tick(context.Background())
+	open, restarts = 7, 4
+	p.tick(context.Background())
+
+	if got := readGauge(t, reg, "narad_open_partition_logs", nil); got != 7 {
+		t.Errorf("narad_open_partition_logs with Snapshot failing = %v, want 7", got)
+	}
+	if got := readGauge(t, reg, "narad_reaper_restarts", nil); got != 4 {
+		t.Errorf("narad_reaper_restarts with Snapshot failing = %v, want 4", got)
+	}
+	if got := readGauge(t, reg, "narad_data_dir_available_bytes", nil); got <= 0 {
+		t.Errorf("narad_data_dir_available_bytes with Snapshot failing = %v, want the volume's free space", got)
+	}
+}
+
+// A statfs that never returns (a dead network mount, a wedged volume)
+// must not hold up the other vital signs, must not start a second read
+// while the first is stuck, and must keep the vitals loop's success
+// stamp from moving so the frozen-poller alert tells the truth.
+func TestPollerHungStatfsDoesNotFreezeOtherVitals(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	p := NewPoller(m, fakeSnapshotProvider{}, discardLogger(), t.TempDir())
+	p.vitalsDeadline = 50 * time.Millisecond
+	unblock := make(chan struct{})
+	var calls atomic.Int32
+	p.statfs = func(string) (uint64, error) {
+		calls.Add(1)
+		<-unblock
+		return 4096, nil
+	}
+	backlog := uint64(7)
+	p.SetIngressDispatchBacklog(func() uint64 { return backlog })
+	vitals := map[string]string{"loop": "vitals"}
+
+	start := time.Now()
+	p.vitalsTick(context.Background())
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("a vitals pass took %v behind a hung statfs, want about the %v read deadline", took, p.vitalsDeadline)
+	}
+	if got := readGauge(t, reg, "narad_ingress_dispatch_backlog_records", nil); got != 7 {
+		t.Fatalf("backlog behind a hung statfs = %v, want 7", got)
+	}
+	if hasGauge(t, reg, "narad_poller_last_success_timestamp_seconds", vitals) {
+		t.Fatal("the vitals pass was stamped a success while statfs had not answered")
+	}
+	if got, _ := readCounter(t, reg, "narad_errors_total", map[string]string{"component": "metrics", "kind": "data_dir_available_timeout"}); got != 1 {
+		t.Fatalf("statfs timeouts counted = %v, want 1", got)
+	}
+
+	backlog = 8
+	p.vitalsTick(context.Background())
+	if got := readGauge(t, reg, "narad_ingress_dispatch_backlog_records", nil); got != 8 {
+		t.Fatalf("backlog on the second pass = %v, want 8", got)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("statfs started %d times while the first call hung, want 1", n)
+	}
+
+	close(unblock)
+	deadline := time.Now().Add(5 * time.Second)
+	for !hasGauge(t, reg, "narad_poller_last_success_timestamp_seconds", vitals) {
+		if time.Now().After(deadline) {
+			t.Fatal("the vitals loop never recorded a complete pass after statfs answered")
+		}
+		p.vitalsTick(context.Background())
+	}
+	if got := readGauge(t, reg, "narad_data_dir_available_bytes", nil); got != 4096 {
+		t.Fatalf("available bytes after statfs answered = %v, want 4096", got)
+	}
+}
+
+// A vital-sign source that panics is contained to its own read: the
+// other gauges are still set, the panic is counted, and the pass is not
+// a success.
+func TestPollerRecoversAPanickingVitalSource(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	p := NewPoller(m, fakeSnapshotProvider{}, discardLogger())
+	p.SetOpenLogCounter(func() int { panic("open log table torn") })
+	p.SetIngressDispatchBacklog(func() uint64 { return 3 })
+
+	p.tick(context.Background())
+
+	if got := readGauge(t, reg, "narad_ingress_dispatch_backlog_records", nil); got != 3 {
+		t.Fatalf("backlog next to a panicking source = %v, want 3", got)
+	}
+	if got, _ := readCounter(t, reg, "narad_errors_total", map[string]string{"component": "metrics", "kind": "open_logs_panic"}); got != 1 {
+		t.Fatalf("panics counted = %v, want 1", got)
+	}
+	if hasGauge(t, reg, "narad_poller_last_success_timestamp_seconds", map[string]string{"loop": "vitals"}) {
+		t.Fatal("the vitals pass was stamped a success although a source panicked")
+	}
+	if !hasGauge(t, reg, "narad_poller_last_success_timestamp_seconds", map[string]string{"loop": "inventory"}) {
+		t.Fatal("the inventory pass was not stamped although its Snapshot answered")
+	}
+}
+
+type blockingSnapshotProvider struct{ release chan struct{} }
+
+func (b blockingSnapshotProvider) Snapshot(ctx context.Context) ([]TopicSnapshot, error) {
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+	}
+	return nil, ctx.Err()
+}
+
+type failingSnapshotProvider struct{}
+
+func (failingSnapshotProvider) Snapshot(context.Context) ([]TopicSnapshot, error) {
+	return nil, errors.New("list topics: metastore read failed")
+}
+
+// hasGauge reports whether a gauge series with these labels exists.
+func hasGauge(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) bool {
+	t.Helper()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, met := range mf.GetMetric() {
+			if labelsMatch(met.GetLabel(), labels) && met.GetGauge() != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// waitGauge waits up to 5 s for the gauge to satisfy ok and returns it.
+func waitGauge(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string, ok func(float64) bool) float64 {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if hasGauge(t, reg, name, labels) {
+			if v := readGauge(t, reg, name, labels); ok(v) {
+				return v
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s%v never reached the wanted value within 5s", name, labels)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

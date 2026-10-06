@@ -3,9 +3,10 @@ package metastore
 // The leader's view of its Raft peers' health: which peers are failing
 // the heartbeats it sends, and how long this node has led. Join
 // admission (join_admission.go) reads it before it promotes a staged
-// non-voter. It is built from one Raft observer and read through
-// Raft's non-blocking accessors (State, CurrentTerm), so a stalled Raft
-// main loop cannot block the join handler that consults it.
+// non-voter, and forget (forget.go) before it removes a voter. It is
+// built from one Raft observer and read through Raft's non-blocking
+// accessors (State, CurrentTerm), so a stalled Raft main loop cannot
+// block the join handler that consults it.
 
 import (
 	"sync"

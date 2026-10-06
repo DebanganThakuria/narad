@@ -16,9 +16,10 @@ type SecurityConfig struct {
 	Enabled bool `json:"enabled"`
 
 	// AdminPassword seeds the root "admin" user the first time a
-	// cluster boots with no users. If empty, a random password is
-	// generated and logged exactly once by the seeding node.
-	// Env: NARAD_ADMIN_PASSWORD.
+	// cluster boots with no users. If empty, the seeding node generates
+	// a random password and writes it to admin-password in its data
+	// directory (mode 0600); it is never logged. Env:
+	// NARAD_ADMIN_PASSWORD.
 	AdminPassword string `json:"-"`
 
 	// ClusterSecret authenticates node-to-node cluster RPC. Required

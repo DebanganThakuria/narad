@@ -215,6 +215,7 @@ Inspect partition placement and drain nodes. Every command needs the `admin` gra
 | `narad cluster decommission <node-id>` | Mark a node for decommission: its partitions move to the other nodes, then it leaves the Raft voters. Unreleased: refused, with every reason, when the node could never be removed safely. |
 | `narad cluster decommission <node-id> --dry-run` (unreleased) | Report whether the node could be decommissioned, and why not, without changing anything. |
 | `narad cluster decommission <node-id> --cancel` | Stop a decommission. The node keeps the partitions it still has and takes new ones again. |
+| `narad cluster members forget <node-id>` | **Unreleased.** Remove a Raft voter or non-voter that has no member record, such as a joiner that never registered. Refused for a server with a member record (decommission it instead), one a partition assignment names, or a voter whose removal could leave the cluster without a quorum. Prints `{"id":...,"voter":...}`. See [Troubleshooting](../operate/troubleshooting.md#raft-server-no-member-record). |
 
 ```sh title="Command"
 narad cluster members

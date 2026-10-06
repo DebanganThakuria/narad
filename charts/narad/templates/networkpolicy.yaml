@@ -1,0 +1,75 @@
+{{- if eq (include "narad.networkPolicyEnabled" .) "true" -}}
+{{- $np := .Values.networkPolicy | default dict -}}
+{{- $guard := eq (include "narad.scaleInGuardEnabled" .) "true" -}}
+{{- /*
+Fences the narad pods' ingress. Raft (the cluster port, TCP) has no
+authentication of its own, and the node RPC plane (QUIC on the API port
+over UDP) trusts whoever holds the cluster secret, so both admit this
+release's pods only. The API and the metrics port stay reachable by
+clients unless apiFrom or metricsFrom narrow them; pprof is closed unless
+pprofFrom names who may reach it. Ingress only: egress is left alone.
+With this policy on and clusterTLS off, the chart sets
+NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT, which is then a true statement as
+long as the cluster's CNI enforces NetworkPolicy.
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "narad.fullname" . }}
+  labels:
+    {{- include "narad.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "narad.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Raft and the node RPC plane: this release's pods only.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "narad.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: {{ .Values.service.ports.cluster }}
+          protocol: TCP
+        - port: {{ .Values.service.ports.api }}
+          protocol: UDP
+    # The client API (and the readiness probe). A narrowed API still
+    # admits the scale-in guard's hook pod, which reads the member list.
+    - ports:
+        - port: {{ .Values.service.ports.api }}
+          protocol: TCP
+      {{- with dig "apiFrom" list $np }}
+      from:
+        {{- toYaml . | nindent 8 }}
+        {{- if $guard }}
+        - podSelector:
+            matchLabels:
+              {{- include "narad.scaleInGuardSelectorLabels" $ | nindent 14 }}
+        {{- end }}
+      {{- end }}
+    {{- if .Values.metrics.enabled }}
+    # Prometheus exposition, and the startup and liveness probes.
+    - ports:
+        - port: {{ .Values.service.ports.metrics }}
+          protocol: TCP
+      {{- with dig "metricsFrom" list $np }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+    {{- if .Values.narad.pprof.enabled }}
+    {{- with dig "pprofFrom" list $np }}
+    # pprof, unauthenticated: only the sources pprofFrom names.
+    - ports:
+        - port: {{ $.Values.service.ports.pprof }}
+          protocol: TCP
+      from:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- end }}
+    {{- with dig "extraIngress" list $np }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

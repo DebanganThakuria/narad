@@ -12,6 +12,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/cluster"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/netaddr"
+	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
@@ -46,7 +47,10 @@ func localMember(id, addr, clusterAddr string) metastore.Member {
 
 // runMemberHeartbeater re-registers this node's membership every interval
 // (and once immediately) so the controller keeps seeing it alive. It runs
-// until ctx is cancelled; failures are logged at debug and retried.
+// until ctx is cancelled; failures are retried, logged at debug level,
+// and warned about once a streak is long enough to matter (see
+// heartbeatHealth), and the streak is exported through m (nil exports
+// nothing). An attempt cut short by shutdown is not counted.
 //
 // Until the first registration succeeds it retries every
 // memberRegisterRetryInterval instead of every interval. On a fresh or
@@ -57,14 +61,15 @@ func localMember(id, addr, clusterAddr string) metastore.Member {
 // controller's next reconcile tick. A follower also needs the leader's
 // own member record before it can forward, so a slow cadence cost it
 // one more interval on top.
-func runMemberHeartbeater(ctx context.Context, store *metastore.Store, member metastore.Member, interval time.Duration, registrar memberRegistrar, log *slog.Logger) {
+func runMemberHeartbeater(ctx context.Context, store *metastore.Store, member metastore.Member, interval time.Duration, registrar memberRegistrar, m *metrics.Metrics, log *slog.Logger) {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
+	health := newHeartbeatHealth(log, m, member.ID, interval, time.Now)
 	heartbeatLoop(ctx, interval, min(memberRegisterRetryInterval, interval), func() error {
 		err := registerMember(ctx, store, member, registrar)
-		if err != nil {
-			log.Debug("member heartbeat failed", "member", member.ID, "err", err)
+		if ctx.Err() == nil {
+			health.observe(err)
 		}
 		return err
 	})

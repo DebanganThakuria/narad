@@ -11,6 +11,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/domain/user"
 )
 
@@ -173,22 +174,96 @@ func (f *fsmState) applyDeleteUser(data []byte) error {
 		return err
 	}
 	err := f.update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bucketUsers)
-		raw := b.Get([]byte(username))
-		if raw == nil {
-			return ErrNotFound
-		}
-		var current user.User
-		if err := json.Unmarshal(raw, &current); err != nil {
-			return err
-		}
-		if current.Root {
-			return ErrRootProtected
-		}
-		return b.Delete([]byte(username))
+		return deleteUserRecord(tx, username)
 	})
 	if err == nil {
 		f.versions.bumpUsers()
 	}
 	return err
+}
+
+// applyDeleteUserReleaseTopics deletes a user, with applyDeleteUser's
+// guards, and clears the Owner of every topic the user owned in the same
+// transaction. Topic ownership is a bare username: applyDeleteUser left
+// it on the topics, so whoever was created under the name next (a
+// rotated service account, another team) owned them with no grant at
+// all. A cleared Owner matches no identity (usernames are never empty),
+// so the topics fall to admins. A refused delete changes nothing.
+func (f *fsmState) applyDeleteUserReleaseTopics(data []byte) error {
+	var p userDeletePayload
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	var released []string
+	err := f.update(func(tx *bolt.Tx) error {
+		if err := deleteUserRecord(tx, p.Username); err != nil {
+			return err
+		}
+		var err error
+		released, err = releaseOwnedTopics(tx, p.Username)
+		return err
+	})
+	if err == nil {
+		f.versions.bumpUsers()
+		for _, name := range released {
+			f.versions.bumpTopic(name)
+		}
+	}
+	return err
+}
+
+// deleteUserRecord removes username from the users bucket: ErrNotFound
+// when it does not exist, ErrRootProtected for the root admin.
+func deleteUserRecord(tx *bolt.Tx, username string) error {
+	b := tx.Bucket(bucketUsers)
+	raw := b.Get([]byte(username))
+	if raw == nil {
+		return ErrNotFound
+	}
+	var current user.User
+	if err := json.Unmarshal(raw, &current); err != nil {
+		return err
+	}
+	if current.Root {
+		return ErrRootProtected
+	}
+	return b.Delete([]byte(username))
+}
+
+// releaseOwnedTopics clears the Owner of every topic owned by username
+// and returns their names in key order. The scan reads the whole topics
+// bucket, which is fine for an operation as rare as deleting a user; the
+// writes come after it (bbolt forbids modifying a bucket inside its
+// ForEach).
+func releaseOwnedTopics(tx *bolt.Tx, username string) ([]string, error) {
+	owned, err := topicsOwnedBy(tx, username)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(owned))
+	for _, t := range owned {
+		t.Owner = ""
+		if err := putTopicRecord(tx, t); err != nil {
+			return nil, err
+		}
+		names = append(names, t.Name)
+	}
+	return names, nil
+}
+
+// topicsOwnedBy returns every topic whose Owner is username, in key
+// order.
+func topicsOwnedBy(tx *bolt.Tx, username string) ([]topic.Topic, error) {
+	var owned []topic.Topic
+	err := tx.Bucket(bucketTopics).ForEach(func(_, raw []byte) error {
+		var t topic.Topic
+		if err := json.Unmarshal(raw, &t); err != nil {
+			return err
+		}
+		if t.Owner == username {
+			owned = append(owned, t)
+		}
+		return nil
+	})
+	return owned, err
 }

@@ -14,16 +14,35 @@
 {{- fail (printf "clusterPeerCount (%d) must be >= initialClusterSize (%d): the bootstrap set must be in the peer list." $peers $initial) -}}
 {{- end -}}
 {{- /*
-Scale-in guard. Lowering replicaCount (including a rollback to an older
-values file) deletes the highest-ordinal pods; unless they were
-decommissioned first their partition data strands and the surviving
-voters can lose quorum. Compare against the RUNNING StatefulSet (lookup
-is empty under `helm template`, so this only bites on a real upgrade).
+Plaintext Raft. With security on, Raft replicates the users (password
+hashes and grants) and has no authentication of its own, so the broker
+refuses to start on plaintext Raft unless told the port is fenced. The
+chart says so only when it is: by its own NetworkPolicy (on by
+default), or by the operator's word (security.allowPlaintextRaft). With
+the policy turned off, neither of the others and no Raft TLS, refuse
+here with the three ways out instead of letting every pod crash-loop.
+*/ -}}
+{{- $sec := .Values.security -}}
+{{- if and $sec.enabled (not $sec.clusterTLS.enabled) (not $sec.allowPlaintextRaft) (ne (include "narad.networkPolicyEnabled" .) "true") -}}
+{{- fail (printf "security is enabled and networkPolicy.enabled is false, so Raft (the cluster port, %v/tcp) would run in plaintext with nothing fencing it. Raft has no authentication of its own, and anything that reaches the port can rewrite the cluster metadata, password hashes and grants included; the broker refuses to start this way. Choose one: --set security.clusterTLS.enabled=true with the %s Secret (Raft mutual TLS, see docs/operate/raft-tls.md); --set networkPolicy.enabled=true, the default (this chart's NetworkPolicy admits %v/tcp and %v/udp from the release's own pods only; it needs a CNI that enforces NetworkPolicy); or --set security.allowPlaintextRaft=true if those two ports are already fenced to the narad pods some other way." .Values.service.ports.cluster $sec.clusterTLS.secretName .Values.service.ports.cluster .Values.service.ports.api) -}}
+{{- end -}}
+{{- /*
+Scale-in acknowledgement. Lowering replicaCount deletes the
+highest-ordinal pods; unless they were decommissioned first their
+partition data strands and the surviving voters can lose quorum. Compare
+against the RUNNING StatefulSet (lookup is empty under `helm template`,
+so this only bites on a real upgrade). The acknowledgement names the one
+target size it approves, so a value kept by --reuse-values cannot wave
+through a later scale-in to another size; the old allowScaleIn boolean is
+not read. helm rollback does not render templates and never reaches this
+check: the scale-in guard hook Job (scalein-guard-job.yaml) covers it,
+and checks the cluster itself on upgrades too.
 */ -}}
 {{- $sts := lookup "apps/v1" "StatefulSet" .Release.Namespace (include "narad.fullname" .) -}}
 {{- if and $sts $sts.spec -}}
 {{- $running := int (default 0 $sts.spec.replicas) -}}
-{{- if and (gt $running $replicas) (not .Values.allowScaleIn) -}}
-{{- fail (printf "replicaCount (%d) is below the running StatefulSet's replicas (%d): this is a scale-in. Decommission the pods being removed first (narad cluster decommission <pod>, wait for zero owned partitions), then re-run with --set allowScaleIn=true." $replicas $running) -}}
+{{- $ackTo := int (default 0 .Values.allowScaleInTo) -}}
+{{- if and (gt $running $replicas) (ne $ackTo $replicas) -}}
+{{- fail (printf "replicaCount (%d) is below the running StatefulSet's replicas (%d): this is a scale-in. Decommission the pods being removed first (narad cluster decommission <pod>, then wait until narad cluster members no longer lists it), then re-run with --set allowScaleInTo=%d. allowScaleInTo approves that one target size only (allowScaleIn is no longer read)." $replicas $running $replicas) -}}
 {{- end -}}
 {{- end -}}

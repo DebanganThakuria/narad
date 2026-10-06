@@ -24,6 +24,12 @@ func (s *RPCServer) handleCreateUser(payload []byte) nodewire.Response {
 	if err := decodeStrictJSON(req.Body, &u); err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid json: "+err.Error())
 	}
+	// The HTTP handler validates before it forwards, but this RPC is a
+	// writer of its own (an older ingress node, or anything holding the
+	// cluster secret), so it checks what it proposes too.
+	if err := user.ValidateNewUser(u); err != nil {
+		return errorResponse(http.StatusBadRequest, "invalid user: "+err.Error())
+	}
 	if err := s.store.CreateUser(rpcRequestContext(), u); err != nil {
 		return userError(err)
 	}
@@ -47,6 +53,9 @@ func (s *RPCServer) handleUpdateUser(payload []byte) nodewire.Response {
 	if upd.Username == "" {
 		upd.Username = req.Username
 	}
+	if err := validateUserUpdate(upd); err != nil {
+		return errorResponse(http.StatusBadRequest, "invalid user update: "+err.Error())
+	}
 	ctx := rpcRequestContext()
 	if err := s.store.ApplyUserUpdate(ctx, upd); err != nil {
 		return userError(err)
@@ -67,6 +76,29 @@ func (s *RPCServer) handleDeleteUser(payload []byte) nodewire.Response {
 		return userError(err)
 	}
 	return nodewire.Response{Status: http.StatusNoContent}
+}
+
+// validateUserUpdate checks the field a forwarded update replaces, as
+// the HTTP handler would (on the hash, since the plaintext never crosses
+// the cluster port). The username is not re-checked: the record must
+// already exist, and a name an older build let in must stay changeable
+// and deletable. An unknown field is left to ApplyUserUpdate, which
+// refuses it.
+func validateUserUpdate(upd metastore.UserUpdate) error {
+	switch upd.Field {
+	case metastore.UserUpdatePassword:
+		return user.ValidatePasswordHash(upd.PasswordHash)
+	case metastore.UserUpdateGrants:
+		return user.ValidateGrants(upd.Grants)
+	case "":
+		// Legacy whole-record replace from an older ingress node.
+		if err := user.ValidateGrants(upd.Grants); err != nil {
+			return err
+		}
+		return user.ValidatePasswordHash(upd.PasswordHash)
+	default:
+		return nil
+	}
 }
 
 // userError maps a metastore user write failure onto an HTTP status.
