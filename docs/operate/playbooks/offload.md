@@ -78,7 +78,7 @@ Duplicates: messages the source's consumers had processed but not acked when the
 
 1. Move the producers back to the source. The target's consumers keep running, and the link keeps feeding them.
 2. Once the target takes no produces of its own and its consumer lag is 0, stop the target's consumers and start the source's. The source's frontier has not moved since step 4, so they process again what the target already processed: duplicates, no loss.
-3. Detach the link.
+3. **Detach the link with `--force`:** `narad --ctx a topic detach orders orders-to-b --force`. With the producers writing to the source again, the link always has records in flight, so the plain detach answers `409` (and `429` to a retry within 10 seconds). The forced detach abandons only the copies still on their way to the target, which nothing consumes any more; the source keeps every record, and its consumers process them. To detach without `--force`, stop the producers briefly and detach once the lag is 0, as in step 9 of [the steps](#steps).
 
 ## Without stopping the consumers {#no-pause}
 
