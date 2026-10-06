@@ -1,18 +1,24 @@
 package handlers
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/security"
 )
 
-// Authorization happens at the HTTP ingress node, before any routing:
-// forwarded cluster RPCs carry no user identity because the ingress
-// already decided the request is allowed. When security is disabled
-// there is no identity on the context and every check passes.
+// Authorization happens at the HTTP ingress node, before any routing,
+// against this node's replica. A topic write forwarded to the leader
+// also carries the caller, and the leader re-checks ownership under the
+// topic's lock against its own records; the ingress check answers early
+// and keeps a request naming a topic this node has never seen from
+// reaching the leader at all. When security is disabled there is no
+// identity on the context and every check passes.
 
 // Authorize reports whether the request may perform action on the named
 // topic, writing a 403 when it may not.
@@ -41,19 +47,34 @@ func (s *Set) RequireAdmin(w http.ResponseWriter, r *http.Request) (user.User, b
 	return user.User{}, false
 }
 
-// canManageTopic reports whether the caller may alter, delete, or attach
-// the named topic: security disabled, admin, or topic owner. A missing
-// topic counts as manageable so the handler's own lookup produces the
-// canonical 404 instead of a misleading 403. Any other lookup failure is
-// returned for the caller to map.
+// LeaderSyncer is the Router capability behind the missing-topic check:
+// SyncWithLeader returns once this node's replica has applied everything
+// the leader had applied when asked (nil at once on the leader, after
+// its once-per-term barrier), or fails wrapping errs.ErrUnavailable when
+// the leader is unknown or unreachable.
+type LeaderSyncer interface {
+	SyncWithLeader(ctx context.Context) error
+}
+
+// canManageTopic reports whether the caller may alter, delete, or
+// attach the named topic: security disabled, admin, or topic owner. A
+// topic this node's replica does not have is looked for again once the
+// node has caught up with the leader (the topic may have just been
+// created elsewhere); still missing, it is an errs.ErrTopicNotFound
+// error (404), never a pass, so a request racing a create, or read from
+// a lagging replica, is not forwarded as allowed. A failed catch-up is
+// an errs.ErrUnavailable error (503). Admins are not looked up.
 func (s *Set) canManageTopic(r *http.Request, topicName string) (bool, error) {
 	id, ok := security.IdentityFrom(r.Context())
 	if !ok || id.IsAdmin() {
 		return true, nil
 	}
 	t, err := s.Deps.Broker.GetTopic(r.Context(), topicName)
-	if errors.Is(err, errs.ErrTopicNotFound) || errors.Is(err, errs.ErrNotFound) {
-		return true, nil
+	if isTopicMissing(err) {
+		t, err = s.getTopicAfterLeaderSync(r.Context(), topicName)
+	}
+	if isTopicMissing(err) {
+		return false, fmt.Errorf("%w: %q", errs.ErrTopicNotFound, topicName)
 	}
 	if err != nil {
 		return false, err
@@ -61,9 +82,28 @@ func (s *Set) canManageTopic(r *http.Request, topicName string) (bool, error) {
 	return t.Owner == id.Username, nil
 }
 
+// getTopicAfterLeaderSync re-reads a topic once this node has caught up
+// with the leader. Without a router (single node) the local replica is
+// the only one, so the first read stands.
+func (s *Set) getTopicAfterLeaderSync(ctx context.Context, topicName string) (topic.Topic, error) {
+	syncer, ok := s.Deps.Router.(LeaderSyncer)
+	if !ok {
+		return topic.Topic{}, errs.ErrTopicNotFound
+	}
+	if err := syncer.SyncWithLeader(ctx); err != nil {
+		return topic.Topic{}, err
+	}
+	return s.Deps.Broker.GetTopic(ctx, topicName)
+}
+
+func isTopicMissing(err error) bool {
+	return errors.Is(err, errs.ErrTopicNotFound) || errors.Is(err, errs.ErrNotFound)
+}
+
 // AuthorizeTopicManage enforces the owner-or-admin rule for altering or
-// deleting a topic, writing a 403 when the caller is neither. A missing
-// topic passes; the handler's own lookup produces the canonical 404.
+// deleting a topic, writing a 403 when the caller is neither, a 404 when
+// the topic does not exist once this node has caught up with the
+// leader, and a 503 when it could not catch up.
 func (s *Set) AuthorizeTopicManage(w http.ResponseWriter, r *http.Request, topicName string) bool {
 	ok, err := s.canManageTopic(r, topicName)
 	if err != nil {
@@ -80,10 +120,18 @@ func (s *Set) AuthorizeTopicManage(w http.ResponseWriter, r *http.Request, topic
 // AuthorizeTopicManageAny enforces the owner-or-admin rule on at least
 // one of the named topics: detaching a child is something either side of
 // the link may do, so the parent's owner and the child's owner both
-// qualify. Writes a 403 when the caller manages neither.
+// qualify. Writes a 403 when the caller manages neither, and a 404 only
+// when none of the topics exists (see canManageTopic).
 func (s *Set) AuthorizeTopicManageAny(w http.ResponseWriter, r *http.Request, topicNames ...string) bool {
+	missing := 0
+	var missingErr error
 	for _, name := range topicNames {
 		ok, err := s.canManageTopic(r, name)
+		if isTopicMissing(err) {
+			missing++
+			missingErr = err
+			continue
+		}
 		if err != nil {
 			s.WriteBrokerError(w, "authorize topic", err)
 			return false
@@ -91,6 +139,10 @@ func (s *Set) AuthorizeTopicManageAny(w http.ResponseWriter, r *http.Request, to
 		if ok {
 			return true
 		}
+	}
+	if missing == len(topicNames) && missingErr != nil {
+		s.WriteBrokerError(w, "authorize topic", missingErr)
+		return false
 	}
 	s.WriteError(w, http.StatusForbidden, "only a topic owner or an admin may modify this link")
 	return false

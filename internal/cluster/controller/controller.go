@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -18,14 +19,24 @@ type controllerStore interface {
 	IsLeader() bool
 	LeaderCh() <-chan bool
 	Barrier() error
+	// LeaderBarrier barriers once per leadership term (see
+	// metastore.Store.LeaderBarrier); nil on a follower.
+	LeaderBarrier(ctx context.Context) error
 	ListMembers() ([]metastore.Member, error)
 	RoutingMembersVersion() uint64
 	ListTopics(ctx context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error)
+	GetTopic(ctx context.Context, name string) (topic.Topic, error)
 	ListAssignments(topicName string) ([]metastore.Assignment, error)
 	LockAssignments() (unlock func())
 	AssignPartition(ctx context.Context, topicName string, partition int, ownerID string) error
+	// AssignPartitionIfAbsent is the insert-only placement; it returns
+	// metastore.ErrEntryTypeNotYetUsable while some member does not
+	// apply it, and the controller uses AssignPartition then.
+	AssignPartitionIfAbsent(ctx context.Context, topicName string, partition int, ownerID, expectID string) error
+	OrphanAssignments() ([]metastore.Assignment, error)
+	PruneAssignment(ctx context.Context, topicName string, partition int) error
 	SetAssignmentTarget(ctx context.Context, topicName string, partition int, targetID string) error
-	MarkMemberDead(ctx context.Context, podID string) error
+	MarkMemberDeadObserved(ctx context.Context, podID string, observed int64) error
 	Voters() ([]string, error)
 	Nonvoters() ([]string, error)
 	RemoveServer(id string) error
@@ -67,6 +78,8 @@ type Config struct {
 	// stop every later rebalance and decommission. Generous, so a pod that
 	// restarts finishes its copy instead of being re-planned. Default: 2m.
 	DeadTargetAbortAfter time.Duration
+	// Logger receives the controller's log lines. Default: slog.Default().
+	Logger *slog.Logger
 }
 
 func (c Config) withDefaults() Config {
@@ -88,6 +101,9 @@ func (c Config) withDefaults() Config {
 	if c.DeadTargetAbortAfter == 0 {
 		c.DeadTargetAbortAfter = 2 * time.Minute
 	}
+	if c.Logger == nil {
+		c.Logger = slog.Default()
+	}
 	return c
 }
 
@@ -103,6 +119,20 @@ type Controller struct {
 	// the next tick — but the mutex keeps any two planning passes from
 	// interleaving their reads and target writes.
 	planMu sync.Mutex
+
+	// orphansLogged holds the orphan assignment rows already logged as
+	// waiting for the prune entry type (orphans.go), so each is logged
+	// once.
+	orphanMu      sync.Mutex
+	orphansLogged map[string]bool
+}
+
+// log returns the controller's logger.
+func (c *Controller) log() *slog.Logger {
+	if c.cfg.Logger != nil {
+		return c.cfg.Logger
+	}
+	return slog.Default()
 }
 
 // New creates a Controller. Call Run to start it.

@@ -92,16 +92,16 @@ func (s *Store) ApplyUserUpdate(ctx context.Context, upd UserUpdate) error {
 // ErrRootProtected for the root admin.
 //
 // Releasing the topics needs opDeleteUserReleaseTopics, which a 3.0.x
-// member would skip. Until every member applies it (EveryMemberKnows)
+// member would skip. Until every member applies it (Store.usable)
 // the delete uses the old entry, which removes only the user: revoking
 // access never waits on an upgrade. The topics it leaves owned by the
 // name are logged, since recreating the user would hand them back.
 func (s *Store) DeleteUser(ctx context.Context, username string) error {
-	if ok, reason := s.EveryMemberKnows(uint32(opDeleteUserReleaseTopics)); !ok {
+	if held := s.usable(opDeleteUserReleaseTopics); held != nil {
 		if err := s.apply(ctx, opDeleteUser, username); err != nil {
 			return err
 		}
-		s.warnTopicsStillOwned(username, reason)
+		s.warnTopicsStillOwned(username, held.Error())
 		return nil
 	}
 	return s.apply(ctx, opDeleteUserReleaseTopics, userDeletePayload{Username: username})

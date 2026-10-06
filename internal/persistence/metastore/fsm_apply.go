@@ -103,45 +103,66 @@ func (f *fsmState) applyDeleteTopic(data []byte) error {
 	}
 	var linkedTopics []string
 	err := f.update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bucketTopics)
-		if b.Get([]byte(name)) == nil {
-			return ErrNotFound
-		}
 		var err error
-		linkedTopics, err = dissolveFanoutLinks(tx, name)
-		if err != nil {
-			return err
-		}
-		if err := b.Delete([]byte(name)); err != nil {
-			return err
-		}
-		prefix := []byte(name + ":")
-		sc := tx.Bucket(bucketSchemas).Cursor()
-		for k, _ := sc.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = sc.Next() {
-			if err := sc.Delete(); err != nil {
-				return err
-			}
-		}
-		ac := tx.Bucket(bucketAssignments).Cursor()
-		for k, _ := ac.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = ac.Next() {
-			if err := ac.Delete(); err != nil {
-				return err
-			}
-		}
-		return nil
+		linkedTopics, err = deleteTopicTx(tx, name)
+		return err
 	})
 	if err == nil {
-		// Retire rather than bump the deleted name's three versions: they
-		// advance exactly as the bumps would, and its cells become
-		// tombstones that are pruned in batches, so a churn of uniquely
-		// named topics does not leave a cell per name ever deleted. The
-		// fan-out partners stay live and are bumped.
-		f.versions.retireTopic(name)
-		for _, linked := range linkedTopics {
-			f.versions.bumpTopic(linked)
-		}
+		f.retireDeletedTopic(name, linkedTopics)
 	}
 	return err
+}
+
+// retireDeletedTopic advances the versions a topic delete changed.
+// It retires rather than bumps the deleted name's three versions: they
+// advance exactly as the bumps would, and its cells become tombstones
+// that are pruned in batches, so a churn of uniquely named topics does
+// not leave a cell per name ever deleted. The fan-out partners stay live
+// and are bumped.
+func (f *fsmState) retireDeletedTopic(name string, linkedTopics []string) {
+	f.versions.retireTopic(name)
+	for _, linked := range linkedTopics {
+		f.versions.bumpTopic(linked)
+	}
+}
+
+// deleteTopicTx removes the topic record, its schemas and its
+// assignment rows, and dissolves its fan-out links. It returns the
+// other ends of those links.
+func deleteTopicTx(tx *bolt.Tx, name string) ([]string, error) {
+	b := tx.Bucket(bucketTopics)
+	if b.Get([]byte(name)) == nil {
+		return nil, ErrNotFound
+	}
+	linkedTopics, err := dissolveFanoutLinks(tx, name)
+	if err != nil {
+		return nil, err
+	}
+	if err := b.Delete([]byte(name)); err != nil {
+		return nil, err
+	}
+	if _, err := deletePrefix(tx.Bucket(bucketSchemas), name+":"); err != nil {
+		return nil, err
+	}
+	if _, err := deletePrefix(tx.Bucket(bucketAssignments), name+":"); err != nil {
+		return nil, err
+	}
+	return linkedTopics, nil
+}
+
+// deletePrefix deletes every key of b that starts with prefix and
+// returns how many it deleted.
+func deletePrefix(b *bolt.Bucket, prefix string) (int, error) {
+	p := []byte(prefix)
+	n := 0
+	c := b.Cursor()
+	for k, _ := c.Seek(p); k != nil && bytes.HasPrefix(k, p); k, _ = c.Next() {
+		if err := c.Delete(); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
 }
 
 // dissolveFanoutLinks detaches every fan-out link involving the topic

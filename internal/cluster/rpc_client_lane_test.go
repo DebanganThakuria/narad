@@ -98,15 +98,15 @@ func TestPeerClientOperationLanes(t *testing.T) {
 			want: clusterrpc.LaneControl,
 		},
 		"create_topic": {
-			call: func(c *PeerClient) error { _, err := c.CreateTopic(ctx, "peer", []byte("{}")); return err },
+			call: func(c *PeerClient) error { _, err := c.CreateTopic(ctx, "peer", []byte("{}"), ""); return err },
 			want: clusterrpc.LaneControl,
 		},
 		"alter_topic": {
-			call: func(c *PeerClient) error { _, err := c.AlterTopic(ctx, "peer", "orders", []byte("{}")); return err },
+			call: func(c *PeerClient) error { _, err := c.AlterTopic(ctx, "peer", "orders", []byte("{}"), ""); return err },
 			want: clusterrpc.LaneControl,
 		},
 		"delete_topic": {
-			call: func(c *PeerClient) error { _, err := c.DeleteTopic(ctx, "peer", "orders"); return err },
+			call: func(c *PeerClient) error { _, err := c.DeleteTopic(ctx, "peer", "orders", ""); return err },
 			want: clusterrpc.LaneControl,
 		},
 		"get_topic": {
@@ -118,11 +118,11 @@ func TestPeerClientOperationLanes(t *testing.T) {
 			want: clusterrpc.LaneControl,
 		},
 		"attach_child": {
-			call: func(c *PeerClient) error { _, err := c.AttachChild(ctx, "peer", "p", "c", 0); return err },
+			call: func(c *PeerClient) error { _, err := c.AttachChild(ctx, "peer", "p", "c", 0, ""); return err },
 			want: clusterrpc.LaneControl,
 		},
 		"detach_child": {
-			call: func(c *PeerClient) error { _, err := c.DetachChild(ctx, "peer", "p", "c"); return err },
+			call: func(c *PeerClient) error { _, err := c.DetachChild(ctx, "peer", "p", "c", ""); return err },
 			want: clusterrpc.LaneControl,
 		},
 		"topic_partition_stats": {

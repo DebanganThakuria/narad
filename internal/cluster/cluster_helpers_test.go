@@ -51,14 +51,14 @@ func (f fakePeerClient) JoinCluster(context.Context, string, nodewire.JoinCluste
 	return nodewire.Response{}, context.DeadlineExceeded
 }
 
-func (f fakePeerClient) AttachChild(ctx context.Context, addr, parent, child string, delayMs int64) (nodewire.Response, error) {
+func (f fakePeerClient) AttachChild(ctx context.Context, addr, parent, child string, delayMs int64, _ string) (nodewire.Response, error) {
 	if f.attachChildFn != nil {
 		return f.attachChildFn(ctx, addr, parent, child, delayMs)
 	}
 	return nodewire.Response{}, context.DeadlineExceeded
 }
 
-func (f fakePeerClient) DetachChild(ctx context.Context, addr, parent, child string) (nodewire.Response, error) {
+func (f fakePeerClient) DetachChild(ctx context.Context, addr, parent, child, _ string) (nodewire.Response, error) {
 	if f.detachChildFn != nil {
 		return f.detachChildFn(ctx, addr, parent, child)
 	}
@@ -146,21 +146,21 @@ func (f fakePeerClient) Ack(ctx context.Context, addr string, req nodewire.AckRe
 	return nodewire.Response{}, context.DeadlineExceeded
 }
 
-func (f fakePeerClient) CreateTopic(ctx context.Context, addr string, body []byte) (nodewire.Response, error) {
+func (f fakePeerClient) CreateTopic(ctx context.Context, addr string, body []byte, _ string) (nodewire.Response, error) {
 	if f.createTopicFn != nil {
 		return f.createTopicFn(ctx, addr, body)
 	}
 	return nodewire.Response{}, context.DeadlineExceeded
 }
 
-func (f fakePeerClient) AlterTopic(ctx context.Context, addr, topicName string, body []byte) (nodewire.Response, error) {
+func (f fakePeerClient) AlterTopic(ctx context.Context, addr, topicName string, body []byte, _ string) (nodewire.Response, error) {
 	if f.alterTopicFn != nil {
 		return f.alterTopicFn(ctx, addr, topicName, body)
 	}
 	return nodewire.Response{}, context.DeadlineExceeded
 }
 
-func (f fakePeerClient) DeleteTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error) {
+func (f fakePeerClient) DeleteTopic(ctx context.Context, addr, topicName, _ string) (nodewire.Response, error) {
 	if f.deleteTopicFn != nil {
 		return f.deleteTopicFn(ctx, addr, topicName)
 	}

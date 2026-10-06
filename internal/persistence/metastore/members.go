@@ -3,6 +3,7 @@ package metastore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -19,10 +20,37 @@ func (s *Store) Heartbeat(ctx context.Context, podID string, at int64) error {
 	return s.apply(ctx, opMemberHeartbeat, heartbeatPayload{ID: podID, At: at})
 }
 
-// MarkMemberDead sets the member's status to MemberDead through Raft.
-// It returns ErrNotFound if the member is not registered.
+// MarkMemberDead sets the member's status to MemberDead through Raft,
+// deciding from the heartbeat the local replica holds for it (see
+// MarkMemberDeadObserved). It returns ErrNotFound if the member is not
+// registered.
 func (s *Store) MarkMemberDead(ctx context.Context, podID string) error {
-	return s.apply(ctx, opMemberDead, podID)
+	m, err := s.GetMember(podID)
+	if err != nil {
+		return err
+	}
+	return s.MarkMemberDeadObserved(ctx, podID, m.LastHeartbeat)
+}
+
+// MarkMemberDeadObserved marks the member dead through Raft, carrying
+// observed, the LastHeartbeat (Unix seconds) the decision was made from.
+// Once every member applies MarkMemberDeadIf the mark is refused with
+// ErrMemberHeartbeatNewer when a newer heartbeat committed ahead of it:
+// the member is alive. Until then it is the unconditional mark.
+func (s *Store) MarkMemberDeadObserved(ctx context.Context, podID string, observed int64) error {
+	err := s.MarkMemberDeadIf(ctx, podID, observed)
+	if errors.Is(err, ErrEntryTypeNotYetUsable) {
+		return s.apply(ctx, opMemberDead, podID)
+	}
+	return err
+}
+
+// MarkMemberDeadIf marks the member dead through Raft unless its
+// heartbeat on record is newer than observed (ErrMemberHeartbeatNewer).
+// While some member does not apply it, it proposes nothing and returns
+// ErrEntryTypeNotYetUsable.
+func (s *Store) MarkMemberDeadIf(ctx context.Context, podID string, observed int64) error {
+	return s.applyIfUsable(ctx, opMarkMemberDeadIf, markMemberDeadIfPayload{ID: podID, Observed: observed})
 }
 
 // SetMemberDraining marks (or unmarks) a member as draining through Raft.

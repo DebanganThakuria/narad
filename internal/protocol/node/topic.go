@@ -1,14 +1,24 @@
 package node
 
 // EncodeTopicBodyRequest encodes a topic+body payload under the given
-// operation (create or alter topic).
+// operation (create or alter topic). Actor is an optional trailing
+// field, written only when set.
 func EncodeTopicBodyRequest(op Operation, req TopicBodyRequest) ([]byte, error) {
-	w := opWriter(op, fieldLen(req.Topic)+fieldLenBytes(req.Body))
+	size := fieldLen(req.Topic) + fieldLenBytes(req.Body)
+	if req.Actor != "" {
+		size += fieldLen(req.Actor)
+	}
+	w := opWriter(op, size)
 	if err := w.string(req.Topic); err != nil {
 		return nil, err
 	}
 	if err := w.bytes(req.Body); err != nil {
 		return nil, err
+	}
+	if req.Actor != "" {
+		if err := w.string(req.Actor); err != nil {
+			return nil, err
+		}
 	}
 	return w.finish(), nil
 }
@@ -28,29 +38,45 @@ func DecodeTopicBodyRequest(payload []byte, op Operation) (TopicBodyRequest, err
 	if err != nil {
 		return TopicBodyRequest{}, err
 	}
+	var actor string
+	if r.remaining() > 0 {
+		if actor, err = r.string(); err != nil {
+			return TopicBodyRequest{}, err
+		}
+	}
 	if err := r.done(); err != nil {
 		return TopicBodyRequest{}, err
 	}
-	return TopicBodyRequest{Topic: topic, Body: body}, nil
+	return TopicBodyRequest{Topic: topic, Body: body, Actor: actor}, nil
 }
 
 // EncodeTopicNameRequest encodes a topic-name-only payload under the
 // given operation (delete or purge topic).
 func EncodeTopicNameRequest(op Operation, req TopicNameRequest) ([]byte, error) {
 	size := fieldLen(req.Topic)
-	if req.ID != "" {
+	if req.ID != "" || req.Actor != "" {
 		size += fieldLen(req.ID)
+	}
+	if req.Actor != "" {
+		size += fieldLen(req.Actor)
 	}
 	w := opWriter(op, size)
 	if err := w.string(req.Topic); err != nil {
 		return nil, err
 	}
-	// Optional trailing field: absent means "by name", which is what
+	// Optional trailing fields: absent means "by name", which is what
 	// a sender without incarnation IDs produces. A receiver without
 	// them rejects the trailing bytes; the sender falls back to the
-	// name-only payload (see PeerClient.PurgeTopic).
-	if req.ID != "" {
+	// name-only payload (see PeerClient.PurgeTopic). The actor follows
+	// the ID, so the ID is written (possibly empty) whenever the actor
+	// is.
+	if req.ID != "" || req.Actor != "" {
 		if err := w.string(req.ID); err != nil {
+			return nil, err
+		}
+	}
+	if req.Actor != "" {
+		if err := w.string(req.Actor); err != nil {
 			return nil, err
 		}
 	}
@@ -68,9 +94,15 @@ func DecodeTopicNameRequest(payload []byte, op Operation) (TopicNameRequest, err
 	if err != nil {
 		return TopicNameRequest{}, err
 	}
-	var id string
+	var id, actor string
 	if r.remaining() > 0 {
 		id, err = r.string()
+		if err != nil {
+			return TopicNameRequest{}, err
+		}
+	}
+	if r.remaining() > 0 {
+		actor, err = r.string()
 		if err != nil {
 			return TopicNameRequest{}, err
 		}
@@ -78,7 +110,7 @@ func DecodeTopicNameRequest(payload []byte, op Operation) (TopicNameRequest, err
 	if err := r.done(); err != nil {
 		return TopicNameRequest{}, err
 	}
-	return TopicNameRequest{Topic: topic, ID: id}, nil
+	return TopicNameRequest{Topic: topic, ID: id, Actor: actor}, nil
 }
 
 // EncodeTopicPartitionStatsRequest encodes an OpTopicPartitionStats

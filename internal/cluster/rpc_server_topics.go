@@ -2,8 +2,10 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -12,11 +14,16 @@ import (
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
+	"github.com/debanganthakuria/narad/internal/security"
 )
 
 type rpcCreateTopicBody struct {
-	Name                      string          `json:"name"`
-	Partitions                int             `json:"partitions"`
+	Name       string `json:"name"`
+	Partitions int    `json:"partitions"`
+	// RetentionMs is passed to the broker as sent: 0 (absent, or any
+	// value from a 3.0.x forwarder) is the operator default and
+	// topic.RetentionKeepForever (-1, a 3.1.0 forwarder's explicit 0) is
+	// keep forever.
 	RetentionMs               int64           `json:"retention_ms"`
 	VisibilityTimeoutMs       int64           `json:"visibility_timeout_ms"`
 	MaxInFlightPerPartition   int64           `json:"max_in_flight_per_partition"`
@@ -53,8 +60,11 @@ func (b rpcAlterTopicBody) validate() error {
 	if !hasPartitions && !hasRetention && !hasCaps && !hasSchema {
 		return errors.New("at least one of partitions, retention_ms, max_*_per_partition, or schema is required")
 	}
-	if hasRetention && *b.RetentionMs < 0 {
-		return errors.New("retention_ms must be >= 0 (0 = use default)")
+	// The ingress refuses negative values and turns a client's explicit
+	// 0 (keep forever) into topic.RetentionKeepForever; a 0 here comes
+	// from a 3.0.x forwarder, where it meant the default, and still does.
+	if hasRetention && *b.RetentionMs < 0 && *b.RetentionMs != topic.RetentionKeepForever {
+		return fmt.Errorf("retention_ms must be >= 0 (0 = the default), or %d (keep forever)", topic.RetentionKeepForever)
 	}
 	if b.MaxInFlightPerPartition != nil && *b.MaxInFlightPerPartition < 0 {
 		return errors.New("max_in_flight_per_partition must be >= 0 (0 = use default)")
@@ -88,7 +98,11 @@ func (s *RPCServer) handleCreateTopic(payload []byte) nodewire.Response {
 	if err := decodeStrictJSON(req.Body, &body); err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid json: "+err.Error())
 	}
-	t, err := s.broker.CreateTopic(rpcRequestContext(), brokertopics.CreateOpts{
+	ctx, refusal := s.actorContext(req.Actor)
+	if refusal != nil {
+		return *refusal
+	}
+	t, err := s.broker.CreateTopic(ctx, brokertopics.CreateOpts{
 		Name:                      body.Name,
 		Partitions:                body.Partitions,
 		RetentionMs:               body.RetentionMs,
@@ -133,7 +147,11 @@ func (s *RPCServer) handleAlterTopic(payload []byte) nodewire.Response {
 	if err := body.validate(); err != nil {
 		return errorResponse(http.StatusBadRequest, err.Error())
 	}
-	t, err := s.applyTopicAlterations(req.Topic, body)
+	ctx, refusal := s.actorContext(req.Actor)
+	if refusal != nil {
+		return *refusal
+	}
+	t, err := s.applyTopicAlterations(ctx, req.Topic, body)
 	if err != nil {
 		return s.brokerError("alter topic", err)
 	}
@@ -145,43 +163,31 @@ func (s *RPCServer) handleAlterTopic(payload []byte) nodewire.Response {
 // as of the last successful update. An error aborts the sequence, so a
 // multi-field alter can be partially applied: each group is an independent
 // broker update with no cross-group transaction. This matches the HTTP
-// handler and the documented contract in docs/build/topics.md.
-func (s *RPCServer) applyTopicAlterations(topicName string, body rpcAlterTopicBody) (topic.Topic, error) {
+// handler and the documented contract in docs/build/topics.md. ctx
+// carries the forwarded caller (see actorContext), so the Manager's
+// owner-or-admin re-check applies to every group.
+func (s *RPCServer) applyTopicAlterations(ctx context.Context, topicName string, body rpcAlterTopicBody) (topic.Topic, error) {
 	var t topic.Topic
 	var err error
 	if body.RetentionMs != nil {
-		if t, err = s.broker.UpdateTopicRetention(rpcRequestContext(), topicName, *body.RetentionMs); err != nil {
+		if t, err = s.broker.UpdateTopicRetention(ctx, topicName, *body.RetentionMs); err != nil {
 			return topic.Topic{}, err
 		}
 	}
 	if body.MaxInFlightPerPartition != nil || body.MaxAckedAheadPerPartition != nil {
-		// UpdateTopicCaps replaces both caps, so an alter that sets only one
-		// must carry the other's current value forward.
-		current := t
-		if current.Name == "" {
-			if current, err = s.broker.GetTopic(rpcRequestContext(), topicName); err != nil {
-				return topic.Topic{}, err
-			}
-		}
-		inFlight := current.MaxInFlightPerPartition
-		if body.MaxInFlightPerPartition != nil {
-			inFlight = *body.MaxInFlightPerPartition
-		}
-		ackedAhead := current.MaxAckedAheadPerPartition
-		if body.MaxAckedAheadPerPartition != nil {
-			ackedAhead = *body.MaxAckedAheadPerPartition
-		}
-		if t, err = s.broker.UpdateTopicCaps(rpcRequestContext(), topicName, inFlight, ackedAhead); err != nil {
+		// A cap the body leaves unset is nil: the Manager keeps its stored
+		// value, read under the topic lock after the leader barrier.
+		if t, err = s.broker.UpdateTopicCaps(ctx, topicName, body.MaxInFlightPerPartition, body.MaxAckedAheadPerPartition); err != nil {
 			return topic.Topic{}, err
 		}
 	}
 	if body.Partitions > 0 {
-		if t, err = s.broker.IncreaseTopicPartitions(rpcRequestContext(), topicName, body.Partitions); err != nil {
+		if t, err = s.broker.IncreaseTopicPartitions(ctx, topicName, body.Partitions); err != nil {
 			return topic.Topic{}, err
 		}
 	}
 	if len(body.Schema) > 0 {
-		if t, err = s.broker.UpdateTopicSchema(rpcRequestContext(), topicName, body.Schema, body.SchemaBaseVersion); err != nil {
+		if t, err = s.broker.UpdateTopicSchema(ctx, topicName, body.Schema, body.SchemaBaseVersion); err != nil {
 			return topic.Topic{}, err
 		}
 	}
@@ -193,12 +199,16 @@ func (s *RPCServer) handleDeleteTopic(payload []byte) nodewire.Response {
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid delete topic request: "+err.Error())
 	}
-	// The purge fan-out below names the incarnation being deleted, so a
-	// member that has already applied a recreate of the same name purges
-	// the old directory and not the new one. Read it before the delete
-	// removes the record; a lookup failure falls back to a purge by name.
-	id := deletedIncarnation(s.broker, req.Topic)
-	if err := s.broker.DeleteTopic(rpcRequestContext(), req.Topic); err != nil {
+	// The purge fan-out below names the incarnation the delete removed,
+	// so a member that has already applied a recreate of the same name
+	// purges the old directory and not the new one (see
+	// deleteTopicReportingID).
+	ctx, refusal := s.actorContext(req.Actor)
+	if refusal != nil {
+		return *refusal
+	}
+	id, err := deleteTopicReportingID(ctx, s.broker, req.Topic)
+	if err != nil {
 		purgeErr, ok := errors.AsType[brokertopics.PurgeError](err)
 		if !ok {
 			return s.brokerError("delete topic", err)
@@ -218,24 +228,66 @@ func (s *RPCServer) handleDeleteTopic(payload []byte) nodewire.Response {
 	// leader here over RPC. Best-effort: the metastore delete already
 	// succeeded, and the startup sweep reclaims any member we miss (e.g.
 	// one that is briefly unreachable), so a fan-out failure must not fail
-	// the delete.
+	// the delete. The broadcaster logs the members that still owe the
+	// purge.
 	if s.broadcaster != nil {
-		if err := s.broadcaster.BroadcastDeleteTopic(rpcRequestContext(), req.Topic, id); err != nil {
-			s.logger.Warn("broadcast topic purge after forwarded delete failed; orphans will be reclaimed by startup sweep", "topic", req.Topic, "err", err)
-		}
+		_ = s.broadcaster.BroadcastDeleteTopic(rpcRequestContext(), req.Topic, id)
 	}
 	return nodewire.Response{Status: http.StatusNoContent}
 }
 
-// deletedIncarnation returns the ID of the topic incarnation a delete
-// is about to remove, or "" when it cannot be read (the purge then runs
-// by name, as before incarnation IDs).
-func deletedIncarnation(b broker.Broker, topicName string) string {
-	t, err := b.GetTopic(rpcRequestContext(), topicName)
-	if err != nil {
-		return ""
+// actorContext returns the context a forwarded topic write runs under.
+// With an actor (the user the forwarding node authenticated), it is
+// that user as THIS node, the leader, knows it: looked up in the
+// leader's own replica after the once-per-term leader barrier, so the
+// Manager's owner-or-admin and create-grant re-checks judge the caller
+// by the leader's records. A user the leader does not know is refused
+// with 403 before anything runs. The actor is trusted because node RPC
+// is authenticated with the cluster secret. Without an actor (security
+// off on the forwarder, or a 3.0.x forwarder) the write runs with no
+// identity, as before: its owner check happened at the ingress.
+func (s *RPCServer) actorContext(actor string) (context.Context, *nodewire.Response) {
+	ctx := rpcRequestContext()
+	if actor == "" {
+		return ctx, nil
 	}
-	return t.ID
+	if s.store == nil {
+		res := errorResponse(http.StatusServiceUnavailable, "metastore unavailable; cannot look up the caller")
+		return nil, &res
+	}
+	if err := s.store.LeaderBarrier(ctx); err != nil {
+		res := s.brokerError("look up caller", err)
+		return nil, &res
+	}
+	u, err := s.store.GetUser(ctx, actor)
+	if errors.Is(err, errs.ErrNotFound) {
+		res := errorResponse(http.StatusForbidden, "caller unknown to the leader")
+		return nil, &res
+	}
+	if err != nil {
+		res := s.brokerError("look up caller", err)
+		return nil, &res
+	}
+	return security.WithIdentity(ctx, u), nil
+}
+
+// deleteTopicReportingID deletes the topic and returns the incarnation
+// ID the purge fan-out should name. A broker that reports the
+// incarnation it deleted from under its name lock is asked for it, so
+// an interleaved delete and recreate cannot make the fan-out name the
+// wrong one; otherwise the ID is read before the delete, as before, and
+// a failed read purges by name. The ID accompanies a PurgeError too:
+// the metadata delete committed and the other members still have to
+// purge.
+func deleteTopicReportingID(ctx context.Context, b broker.Broker, topicName string) (string, error) {
+	if deleter, ok := b.(broker.TopicIDDeleter); ok {
+		return deleter.DeleteTopicID(ctx, topicName)
+	}
+	var id string
+	if t, err := b.GetTopic(ctx, topicName); err == nil {
+		id = t.ID
+	}
+	return id, b.DeleteTopic(ctx, topicName)
 }
 
 // purgeApplyWaitTimeout bounds how long a purge waits for the local Raft
@@ -257,13 +309,16 @@ func (s *RPCServer) handlePurgeTopic(payload []byte) nodewire.Response {
 	}
 	// Wait until this node's local metastore replica reflects the
 	// deletion before removing files. The leader broadcasts this purge
-	// after the delete is quorum-committed, but a follower applies it to
-	// its local replica asynchronously. Purging before the local replica
-	// catches up would let a concurrent produce-dispatch/consume re-open
-	// (and thus resurrect) the partition logs via Logs.Get, which keys
-	// off the local replica. If the replica never reflects the deletion
-	// (timeout), we skip the purge rather than risk deleting live data;
-	// the startup orphan sweep is the backstop.
+	// after the delete is quorum-committed, but a follower applies it
+	// to its local replica asynchronously. Purging before the local
+	// replica catches up would let a concurrent
+	// produce-dispatch/consume re-open (and thus resurrect) the
+	// partition logs via Logs.Get, which keys off the local replica. If
+	// the replica never reflects the deletion (timeout), we skip the
+	// purge rather than risk deleting live data and answer a retriable
+	// 503 with code purge_deferred, not the 204 of a purge that ran:
+	// the leader then knows this member still holds the files and asks
+	// again; the startup orphan sweep is the backstop.
 	//
 	// "Reflects the deletion" is judged per INCARNATION when the purge
 	// names one: the record is gone, or the name now belongs to a
@@ -272,15 +327,37 @@ func (s *RPCServer) handlePurgeTopic(payload []byte) nodewire.Response {
 	// incarnation's directory. Judging by name alone skipped the purge
 	// whenever the name had been recreated, which left the old data in
 	// place for the new topic to reopen.
-	if s.store != nil && !s.waitIncarnationGoneLocally(req.Topic, req.ID, purgeApplyWaitTimeout) {
-		s.logger.Warn("skipping purge: local metastore still shows the topic incarnation; deferring to orphan sweep",
+	if s.store != nil && !s.waitIncarnationGoneLocally(req.Topic, req.ID, s.purgeApplyWaitTimeout()) {
+		s.logger.Warn("purge deferred: the local metastore still shows the topic incarnation; the leader may ask again, and the startup orphan sweep is the backstop",
 			"topic", req.Topic, "incarnation", req.ID)
-		return nodewire.Response{Status: http.StatusNoContent}
+		return purgeDeferredResponse()
 	}
 	if err := s.broker.PurgeTopic(rpcRequestContext(), req.Topic, req.ID); err != nil {
 		return s.brokerError("purge topic", err)
 	}
 	return nodewire.Response{Status: http.StatusNoContent}
+}
+
+// purgeApplyWaitTimeout is how long this server's purges wait for the
+// local replica to reflect a deletion: purgeApplyWait when a test set
+// it, else the package default.
+func (s *RPCServer) purgeApplyWaitTimeout() time.Duration {
+	if s.purgeApplyWait > 0 {
+		return s.purgeApplyWait
+	}
+	return purgeApplyWaitTimeout
+}
+
+// purgeDeferredResponse is the 503 of a purge skipped because the local
+// replica still shows the incarnation. The code lets the leader tell it
+// from any other 503 and ask again.
+func purgeDeferredResponse() nodewire.Response {
+	body, _ := json.Marshal(map[string]string{
+		"error": "this node's metadata replica has not applied the topic delete yet; purge deferred",
+		"code":  purgeDeferredCode,
+	})
+	body = append(body, '\n')
+	return nodewire.Response{Status: http.StatusServiceUnavailable, ContentType: nodewire.ContentTypeJSON, Body: body}
 }
 
 // waitTopicDeletedLocally returns true once the local metastore no longer
@@ -317,6 +394,16 @@ func (s *RPCServer) handleTopicPartitionStats(payload []byte) nodewire.Response 
 	req, err := nodewire.DecodeTopicPartitionStatsRequest(payload)
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid topic stats request: "+err.Error())
+	}
+	// One partition is asked for, so one is described: a broker that
+	// can describe a single partition does so without reading the
+	// topic's schema or stat'ing its other partitions.
+	if reader, ok := s.broker.(broker.PartitionStatsReader); ok {
+		stats, err := reader.LocalPartitionStats(rpcRequestContext(), req.Topic, req.Partition)
+		if err != nil {
+			return s.brokerError("get topic", err)
+		}
+		return jsonResponse(http.StatusOK, stats)
 	}
 	details, err := s.broker.GetTopicDetails(rpcRequestContext(), req.Topic)
 	if err != nil {

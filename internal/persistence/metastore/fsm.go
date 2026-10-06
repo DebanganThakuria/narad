@@ -85,6 +85,10 @@ type fsmState struct {
 	build string
 	halt  haltState
 
+	// schemaBudget is what the entry types that store schemas and are
+	// newer than 3.0.x enforce (fsm_schema_budget.go).
+	schemaBudget schemaBudgets
+
 	// For the metastore metrics: apply errors by kind, whether a
 	// storage failure is being retried right now, and the last snapshot
 	// this node persisted (its size and how long it took) and how many
@@ -130,7 +134,7 @@ func newFSMWith(path string, opts fsmOptions) (*fsmState, error) {
 		return nil, err
 	}
 	removeLeftovers(log, path)
-	f := &fsmState{db: db, dbPath: path, versions: newMetadataDomainVersions(), meta: meta, log: log, build: opts.build}
+	f := &fsmState{db: db, dbPath: path, versions: newMetadataDomainVersions(), meta: meta, log: log, build: opts.build, schemaBudget: defaultSchemaBudgets()}
 	f.applied.Store(meta.trustedApplied())
 	return f, nil
 }
@@ -253,6 +257,24 @@ func (f *fsmState) dispatch(op opCode, data []byte) error {
 		return f.applySetUserPassword(data)
 	case opSetUserGrants:
 		return f.applySetUserGrants(data)
+	case opCreateTopicWith:
+		return f.applyCreateTopicWith(data)
+	case opUpdateTopicIf:
+		return f.applyUpdateTopicIf(data)
+	case opDeleteTopicIf:
+		return f.applyDeleteTopicIf(data)
+	case opPutSchemaIf:
+		return f.applyPutSchemaIf(data)
+	case opAttachChildIf:
+		return f.applyAttachChildIf(data)
+	case opDetachChildIf:
+		return f.applyDetachChildIf(data)
+	case opAssignPartitionIfAbsent:
+		return f.applyAssignPartitionIfAbsent(data)
+	case opPruneAssignment:
+		return f.applyPruneAssignment(data)
+	case opMarkMemberDeadIf:
+		return f.applyMarkMemberDeadIf(data)
 	case opDeleteUserReleaseTopics:
 		return f.applyDeleteUserReleaseTopics(data)
 	default:

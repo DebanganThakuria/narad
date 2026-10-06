@@ -55,6 +55,18 @@ Gauges that describe partitions (lag, sizes, segments) are refreshed by a poller
 
 The HTTP series count requests, not messages. A batch produce (**Unreleased**) has its own route, `POST /v1/topics/{topic}/produce/batch`. A batch consume and a batch ack use the single-message routes, and a batch ack answers `200` where a single ack answers `204`. One batch carries up to 100 messages, so take message rates from `narad_messages_produced_total` and `narad_messages_consumed_total`. A panel that selects `route=~".*/produce"` misses batch produces, and one that counts acks as `status="204"` misses batch acks.
 
+## Schema validation {#schema-validation}
+
+**Unreleased.** These series are process-wide on each node, with no `topic` label.
+
+| Series | Meaning |
+|---|---|
+| `narad_schema_validation_seconds`<br>histogram; no labels | Time of each schema validation that ran under the node's [validation capacity](schema-rules.md#validation-capacity) bound (payloads above 16 KiB, and payloads on schemas flagged as costly), decode included, waiting for a slot excluded. Small payloads on ordinary schemas are not timed. |
+| `narad_schema_validations_in_flight`<br>gauge; no labels | Validations running under that bound now. It sits at the node's CPU count while the bound is full; produces that then wait 5 seconds get `503`. |
+| `narad_schema_rejections_total`<br>counter; labels `reason` | Payloads and schema documents refused by schema checks, by `reason`: `depth` (a payload nested deeper than 256 levels), `malformed` (not valid UTF-8, or not one JSON text), `invalid` (the schema refused the payload), `busy` (no validation slot within 5 seconds), `canceled` (the request ended while it waited for a slot), `definition_paths` (a schema refused at registration for reaching a subschema through more than 64 paths) and `definition_pattern` (a schema refused for a costly pattern). |
+
+`narad_produce_rejections_total{reason="schema"}` counts every produce refused by schema validation, `busy` and `canceled` ones included, per topic; these series say why.
+
 ## Queue health {#queue-health}
 
 <figure class="nr-dia nr-dia--doc" id="fig-metrics-queue-gauges">

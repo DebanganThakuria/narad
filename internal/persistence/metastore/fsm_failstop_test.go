@@ -176,6 +176,20 @@ func TestEveryKnownEntryTypeReachesItsHandler(t *testing.T) {
 	if MaxEntryType < legacyMaxEntryType {
 		t.Fatalf("MaxEntryType %d is below the legacy set %d", MaxEntryType, legacyMaxEntryType)
 	}
+	// The entry types newer than 3.0.x keep the numbers they shipped
+	// with: a log written by one release replays on the next.
+	for op, want := range map[opCode]uint32{
+		opCreateTopicWith: 23, opUpdateTopicIf: 24, opDeleteTopicIf: 25, opPutSchemaIf: 26, opAttachChildIf: 27,
+		opDetachChildIf: 28, opAssignPartitionIfAbsent: 29, opPruneAssignment: 30, opMarkMemberDeadIf: 31,
+		opDeleteUserReleaseTopics: 32,
+	} {
+		if uint32(op) != want || entryTypeNames[op] == "" {
+			t.Fatalf("entry type %q is %d, want %d with a name for its log lines", entryTypeNames[op], op, want)
+		}
+	}
+	if MaxEntryType != 32 {
+		t.Fatalf("MaxEntryType = %d, want 32", MaxEntryType)
+	}
 	f := newTestFSM(t)
 	for et := uint32(1); et <= MaxEntryType; et++ {
 		// An empty payload: every handler refuses it while decoding.

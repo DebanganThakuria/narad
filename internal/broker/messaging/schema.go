@@ -36,6 +36,13 @@ func (e *Engine) validateProducePayload(ctx context.Context, topicName string, p
 	if err == nil || errors.Is(err, errs.ErrSchemaNotFound) {
 		return nil
 	}
+	if schema.IsCapacityError(err) {
+		// The node had no validation slot for the payload (or the
+		// request ended while it waited): nothing is known about the
+		// payload, so it must not be reported as invalid. The error maps
+		// to 503 (or 499 for a cancelled request) and says to retry.
+		return err
+	}
 	return schemaValidationError(err)
 }
 

@@ -67,6 +67,8 @@ payments                          3            0         0B       1  -
 total                                       2004   540.7KiB
 ```
 
+**Unreleased:** in master, not in v3.0.1. When some of a topic's partitions have an owner that is down, the server answers with the rest ([partial topic details](http-api.md#get-topic)). The report leaves those partitions out of `MESSAGES`, `SIZE` and `OWNERS`, marks the topic `[k of n partitions unavailable]` after its role, and ends with a line counting the partial topics. Against v3.0.1 such a topic shows `(stats unavailable: ...)` instead.
+
 ## narad serve {#serve}
 
 The production entry point; the container image runs it. Its flags, and how they combine with the config file and the environment, are in the [Configuration reference](configuration.md#precedence): `--config`, `--addr`, `--port`, `--cluster-port`, `--node-id`, `--data-dir`, `--log-level`, `--log-format` and `--pprof-addr`.
@@ -141,6 +143,8 @@ It prints `accepted (<n> bytes)` on standard error, or for several messages the 
 | `--no-ack` | Queue mode without acks. |
 | `--raw` | Print payloads only, for pipes. |
 
+**Unreleased:** in master, not in v3.0.1. `--peek` refuses to start while a partition it would read has an owner that is down, naming the partition, its owner and why, instead of starting that partition at offset 0. Peek a live partition with `--partition`; with `--partition` and `--from` the start is given and the peek runs.
+
 Each message prints as `[p<partition> @<offset>] key=<key> <time> <payload>`. JSON prints as it is, text as text, and binary as hex with its byte count; a key that is not valid UTF-8 prints in hex, marked `(binary)`. On exit it prints the number of messages on standard error.
 
 ## narad replay {#replay}
@@ -155,6 +159,8 @@ Each message prints as `[p<partition> @<offset>] key=<key> <time> <payload>`. JS
 | `--raw` | off | Print payloads only. |
 
 It ends with a line such as `2 message(s) replayed from p1 [0, 2)` on standard error. Replay over HTTP is in [Replay messages](../build/replay.md).
+
+**Unreleased:** in master, not in v3.0.1. While the partition's owner is down, replay fails with an error naming the partition, its owner and why, instead of printing an empty range.
 
 ## narad bench {#bench}
 

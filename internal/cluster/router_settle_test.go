@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
@@ -135,5 +136,66 @@ func TestSettleForwardedWriteSkipsNonSuccessAndUnsupportedLeaders(t *testing.T) 
 	}
 	if elapsed := time.Since(start); elapsed < 80*time.Millisecond || elapsed > 2*time.Second {
 		t.Fatalf("settle took %s, want about the context deadline", elapsed)
+	}
+}
+
+// The ingress's catch-up before a 404 (SyncWithLeader) fails as
+// retryable when it cannot confirm with the leader, and succeeds once
+// the replica has reached the leader's applied index; the leader itself
+// only barriers.
+func TestSyncWithLeaderFailsAsUnavailableWithoutTheLeader(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// This node leads: a barrier, nothing to ask.
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
+	if err := router.SyncWithLeader(ctx); err != nil {
+		t.Fatalf("SyncWithLeader on the leader: %v", err)
+	}
+
+	stores := newTestStoreCluster(t, "n1", "n2", "n3")
+	leaderID, leader := waitForClusterLeader(t, stores)
+	var follower *metastore.Store
+	var followerID string
+	for id, s := range stores {
+		if id != leaderID {
+			follower, followerID = s, id
+			break
+		}
+	}
+	router = NewRouter(follower, followerID, partition.NewHashRoundRobin(), "")
+	router.peer = fakePeerClient{}
+	if err := router.SyncWithLeader(ctx); !errors.Is(err, errs.ErrUnavailable) {
+		t.Fatalf("SyncWithLeader with no leader member on record = %v, want ErrUnavailable", err)
+	}
+
+	if err := leader.RegisterMember(ctx, metastore.Member{ID: leaderID, Addr: "leader:1", ClusterAddr: leader.LeaderAddr(), Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for router.leaderMemberAddr() == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("follower never learned the leader's member address")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	router.peer = fakePeerClient{appliedIndexFn: func(context.Context, string) (uint64, error) {
+		return 0, errors.New("connection refused")
+	}}
+	if err := router.SyncWithLeader(ctx); !errors.Is(err, errs.ErrUnavailable) {
+		t.Fatalf("SyncWithLeader with the leader unreachable = %v, want ErrUnavailable", err)
+	}
+
+	if err := leader.CreateTopic(ctx, topic.Topic{Name: "fresh", Partitions: 1}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	router.peer = fakePeerClient{appliedIndexFn: func(context.Context, string) (uint64, error) {
+		return leader.AppliedIndex(), nil
+	}}
+	if err := router.SyncWithLeader(ctx); err != nil {
+		t.Fatalf("SyncWithLeader: %v", err)
+	}
+	if _, err := follower.GetTopic(ctx, "fresh"); err != nil {
+		t.Fatalf("the topic the leader created is not on the synced replica: %v", err)
 	}
 }

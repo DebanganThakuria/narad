@@ -28,7 +28,9 @@ func (c *Controller) checkHeartbeats(ctx context.Context) {
 			continue
 		}
 		if m.LastHeartbeat < threshold {
-			c.store.MarkMemberDead(ctx, m.ID) //nolint:errcheck
+			// The mark carries the heartbeat it was decided from: one
+			// that committed after this read wins.
+			c.store.MarkMemberDeadObserved(ctx, m.ID, m.LastHeartbeat) //nolint:errcheck
 		}
 	}
 }

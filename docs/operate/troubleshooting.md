@@ -81,11 +81,11 @@ narad cluster members
 
 A produce answers `503`, often from every node at once.
 
-**Cause.** Narad itself never answers a produce with `503`. The `503` comes from the proxy in front of it, the load balancer or ingress, when no pod is ready.
+**Cause.** Narad itself answers a produce with `503` in one case only (**Unreleased**): a topic with a schema, and every schema validation slot on the node stayed busy for 5 seconds; the body then reads `schema: validation capacity busy, retry` ([Validation capacity](../reference/schema-rules.md#validation-capacity)). Any other `503` comes from the proxy in front of it, the load balancer or ingress, when no pod is ready.
 
-**Check.** `kubectl get pods -n narad`, then `/readyz` on each pod ([Start with readiness](#check-readiness)).
+**Check.** For the validation case, `narad_schema_validations_in_flight` on the node sits at its CPU count and `narad_schema_rejections_total{reason="busy"}` rises; look for producers sending large payloads, or a schema that `narad_schema_validation_seconds` shows to be slow. Otherwise, `kubectl get pods -n narad`, then `/readyz` on each pod ([Start with readiness](#check-readiness)).
 
-**Fix.** When every pod answers `no raft leader known`, follow [Not ready on every pod](#not-ready-all-pods). When pods are down, see [A node is down](#node-down).
+**Fix.** For the validation case, retry with backoff, through another node if you can, and spread large payloads out or simplify the slow schema. When every pod answers `no raft leader known`, follow [Not ready on every pod](#not-ready-all-pods). When pods are down, see [A node is down](#node-down).
 
 ### `500` on every produce {#produce-500}
 
@@ -156,15 +156,17 @@ Or the node's failure budget is empty (unreleased): repeated wrong passwords acr
 
 **Fix.** Correct the client's password. The node accepts the correct one again after at most 12 seconds without failures. How the throttle works: [Networking and security](../understand/networking-and-security.md#auth-throttle).
 
-### `421` or `500` on topic details {#status-421}
+### `421`, `500` or `partial` on topic details {#status-421}
 
-`GET /v1/topics/{topic}` answers `421` with `this node does not own the requested partition`, from every node, or `500` with `get topic failed`.
+`GET /v1/topics/{topic}` answers `200` with `"partial": true`, and some entries of `partition_stats` have `"status": "owner_unavailable"`, zero statistics and an `owner_liveness`. `narad server report` marks the topic `[k of n partitions unavailable]`. A v3.0.1 node answers `421` with `this node does not own the requested partition` instead, from every node, or `500` with `get topic failed`.
 
-**Cause.** Topic details gather partition statistics from every partition owner. While one owner is unreachable, the call answers `500`; once that owner has been marked dead, after about 30 seconds without a heartbeat, it answers `421`. A node whose Raft certificate its peers do not trust also causes the `500` ([below](#raft-cert-untrusted)).
+**Unreleased:** the partial answer is in master, not in v3.0.1.
 
-**Check.** `narad cluster members` shows the owner as `dead`, or `/readyz` on it is not ready.
+**Cause.** Topic details gather partition statistics from every partition owner, and one owner could not report. `owner_liveness` says why: `dead` (marked dead, after about 30 seconds without a heartbeat), `unreachable` (alive, but its statistics did not come back within 2 seconds, which a node whose Raft certificate its peers do not trust also causes, [below](#raft-cert-untrusted)), `unknown` (no member record with an address) or `unassigned` (no owner yet, for example right after a partition increase). On v3.0.1 the same causes fail the whole call: `500` while the owner is unreachable, `421` once it has been marked dead.
 
-**Fix.** Bring the owner back. The topic list, produce, and consume of the other partitions keep working meanwhile.
+**Check.** `narad cluster members` shows the owner named in `owner_node` as `dead`, or `/readyz` on it is not ready.
+
+**Fix.** Bring the owner back. The topic list, produce, and consume of the other partitions keep working meanwhile. Until then, leave the unavailable partitions out of any total: their zeros are placeholders, not an empty partition. `narad replay` and `narad sub --peek` refuse such a partition rather than start it at offset 0.
 
 ### `204` gaps after a node returns {#quiet-after-outage}
 
@@ -398,6 +400,42 @@ Logged at warning level, at most once a minute, with `partitions`, `flush_took` 
 **Cause.** Writing acked consumer positions to disk takes longer than its schedule allows. The first line means a crash of the process would deliver again about one write's duration of acks; the second means a power loss would deliver again more acks than `storage.consumer_offset_commit_interval_ms` promises.
 
 **Fix.** Fewer partitions per node, or a faster disk. Both lines are about duplicates after a crash, never loss. The setting: [Configuration reference](../reference/configuration.md#storage).
+
+### `purge deferred: the local metastore still shows the topic incarnation` {#log-purge-deferred}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `purge deferred: the local metastore still shows the topic incarnation; the leader may ask again, and the startup orphan sweep is the backstop`, at warning level, with `topic` and `incarnation`.
+
+**Cause.** A topic was deleted, and the leader asked this node to remove its files for the deleted [incarnation](../reference/glossary.md#incarnation), but after 5 seconds this node's metadata replica still showed it. Removing the files first could let a request that still sees the topic reopen them, so the node kept them and answered the leader that the purge was deferred. The leader asks again, up to three times in all.
+
+**Check.** Whether this node's replica is behind: `narad cluster members` and the node's Raft metrics.
+
+**Fix.** None, if the error line [below](#log-purge-unfinished) does not follow. If it does, see there.
+
+### `topic purge unfinished on some members` {#log-purge-unfinished}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `topic purge unfinished on some members; their copies stay until their startup orphan sweep reclaims them`, at error level on the node that ran the delete (the Raft leader), with `topic`, `incarnation`, `members` and `err`.
+
+**Cause.** After a topic delete, the leader asks every live member to remove its files of the deleted incarnation, detached from the client's request and under its own time budget of about 17 seconds. The members listed did not: one could not be reached, its replica did not apply the delete in time (each such member is asked up to three times), or it refused. The delete itself stands; the topic is gone for every client.
+
+**Check.** `err` names each member and why. `narad cluster members` for the members' state.
+
+**Fix.** The copies take disk space but are never served: a recreated topic of the same name is a different incarnation. Each listed member removes them at its next start (the startup orphan sweep). To reclaim the space sooner, restart the listed members one at a time.
+
+### `orphan assignment row for <topic>/<partition>` {#log-orphan-assignment-row}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `orphan assignment row for <topic>/<partition>; it is pruned once every member runs 3.1.0`, at error level on the Raft leader, with `topic`, `partition` and `owner`, once per row.
+
+**Cause.** The metadata holds an owner for a partition that does not exist: its topic was deleted, or the index is past the topic's partition count. A placement pass of a release before 3.1.0 could write such rows after a topic delete, and a topic created again under the name used to inherit them, owners and all. The leader prunes these rows with a Raft entry type that only this release applies, so it waits until every member, dead members and Raft servers without a member record included, runs it ([Raft entry types](../understand/metastore-and-raft.md#new-entry-types)).
+
+**Check.** The leader's `metastore: not using a new raft entry type yet` line, at info, at most once a minute while the rows stay: its `reason` names the member holding the prune back and the build it last reported (`unknown build` for a v3.0.x member), or says the Raft server has no member record yet. `narad cluster members` does not show a member's release; use it only to see whether that member is `dead`.
+
+**Fix.** Finish the upgrade, or remove the member that will not come back. The leader then prunes the rows within about a minute and logs `controller: pruned assignment rows that belonged to no partition`. No data moves: a row like this names no partition. Until then, a topic created again under that name takes over the rows' owners for the partitions they cover, so avoid recreating it before the upgrade completes.
 
 ### `move: set aside stale incarnation directory` {#log-stale-incarnation}
 

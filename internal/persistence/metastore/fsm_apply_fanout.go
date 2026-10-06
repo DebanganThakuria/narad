@@ -67,72 +67,98 @@ func (f *fsmState) applyAttachChild(data []byte) error {
 	}
 	schemaAdopted := false
 	err := f.update(func(tx *bolt.Tx) error {
-		if p.Parent == p.Child {
-			return fmt.Errorf("%w: a topic cannot be its own child", errs.ErrFanoutRoleConflict)
-		}
-		parent, err := getTopicRecord(tx, p.Parent)
-		if err != nil {
-			return err
-		}
-		child, err := getTopicRecord(tx, p.Child)
-		if err != nil {
-			return err
-		}
-
-		if parent.IsChild() {
-			return fmt.Errorf("%w: %q is a child of %q and cannot become a parent",
-				errs.ErrFanoutRoleConflict, p.Parent, parent.Parent)
-		}
-		switch {
-		case child.IsParent():
-			return fmt.Errorf("%w: %q is a parent and cannot become a child (fan-out is depth 1)",
-				errs.ErrFanoutRoleConflict, p.Child)
-		case child.IsChild() && child.Parent == p.Parent:
-			return fmt.Errorf("%w: %q is already attached to %q", ErrAlreadyExists, p.Child, p.Parent)
-		case child.IsChild():
-			return fmt.Errorf("%w: %q is already attached to parent %q",
-				errs.ErrFanoutRoleConflict, p.Child, child.Parent)
-		}
-		if len(parent.Children) >= topic.MaxChildrenPerParent {
-			return fmt.Errorf("%w: %q already has %d children",
-				errs.ErrFanoutChildLimit, p.Parent, len(parent.Children))
-		}
-		if p.DelayMs < 0 {
-			return fmt.Errorf("%w: delay_ms must be >= 0", errs.ErrFanoutRoleConflict)
-		}
-		if p.DelayMs > topic.MaxFanoutDelayMs {
-			return fmt.Errorf("%w: delay_ms (%d) exceeds the maximum of %d (1 year)",
-				errs.ErrFanoutDelayTooLong, p.DelayMs, topic.MaxFanoutDelayMs)
-		}
-		if err := checkDelayAgainstRetention(p.DelayMs, parent.RetentionMs, p.Parent); err != nil {
-			return err
-		}
-
-		schemaAdopted, err = reconcileSchemasForAttach(tx, p.Parent, p.Child)
-		if err != nil {
-			return err
-		}
-
-		parent.Role = topic.RoleParent
-		parent.Children = append(parent.Children, p.Child)
-		child.Role = topic.RoleChild
-		child.Parent = p.Parent
-		child.AttachEpoch = p.Epoch
-		child.FanoutDelayMs = p.DelayMs
-		child.AttachOffsets = p.Offsets
-		if err := putTopicRecord(tx, parent); err != nil {
-			return err
-		}
-		return putTopicRecord(tx, child)
+		var err error
+		schemaAdopted, err = attachChildTx(tx, p, attachRules{})
+		return err
 	})
 	if err == nil {
-		f.versions.bumpTopic(p.Parent)
-		f.versions.bumpTopic(p.Child)
-		if schemaAdopted {
-			f.versions.bumpSchema(p.Child)
-		}
+		f.bumpAttached(p.Parent, p.Child, schemaAdopted)
 	}
 	return err
+}
+
+// bumpAttached advances the versions an attach changed.
+func (f *fsmState) bumpAttached(parent, child string, schemaAdopted bool) {
+	f.versions.bumpTopic(parent)
+	f.versions.bumpTopic(child)
+	if schemaAdopted {
+		f.versions.bumpSchema(child)
+	}
+}
+
+// attachRules are what an attach checks beyond the fan-out invariants.
+// opAttachChild checks nothing more (its 3.0.x meaning); the newer
+// entry types compare schema histories by JSON value and count an
+// adopted history against the schema byte budgets.
+type attachRules struct {
+	// byValue compares the parent's and child's schema histories as
+	// JSON values instead of byte for byte.
+	byValue bool
+	// budgets, when set, refuses an adoption that would pass them.
+	budgets *schemaBudgets
+}
+
+// attachChildTx links p.Child under p.Parent inside tx, enforcing every
+// fan-out invariant, and reports whether the child adopted the parent's
+// schema history.
+func attachChildTx(tx *bolt.Tx, p childLinkPayload, rules attachRules) (adopted bool, err error) {
+	if p.Parent == p.Child {
+		return false, fmt.Errorf("%w: a topic cannot be its own child", errs.ErrFanoutRoleConflict)
+	}
+	parent, err := getTopicRecord(tx, p.Parent)
+	if err != nil {
+		return false, err
+	}
+	child, err := getTopicRecord(tx, p.Child)
+	if err != nil {
+		return false, err
+	}
+
+	if parent.IsChild() {
+		return false, fmt.Errorf("%w: %q is a child of %q and cannot become a parent",
+			errs.ErrFanoutRoleConflict, p.Parent, parent.Parent)
+	}
+	switch {
+	case child.IsParent():
+		return false, fmt.Errorf("%w: %q is a parent and cannot become a child (fan-out is depth 1)",
+			errs.ErrFanoutRoleConflict, p.Child)
+	case child.IsChild() && child.Parent == p.Parent:
+		return false, fmt.Errorf("%w: %q is already attached to %q", ErrAlreadyExists, p.Child, p.Parent)
+	case child.IsChild():
+		return false, fmt.Errorf("%w: %q is already attached to parent %q",
+			errs.ErrFanoutRoleConflict, p.Child, child.Parent)
+	}
+	if len(parent.Children) >= topic.MaxChildrenPerParent {
+		return false, fmt.Errorf("%w: %q already has %d children",
+			errs.ErrFanoutChildLimit, p.Parent, len(parent.Children))
+	}
+	if p.DelayMs < 0 {
+		return false, fmt.Errorf("%w: delay_ms must be >= 0", errs.ErrFanoutRoleConflict)
+	}
+	if p.DelayMs > topic.MaxFanoutDelayMs {
+		return false, fmt.Errorf("%w: delay_ms (%d) exceeds the maximum of %d (1 year)",
+			errs.ErrFanoutDelayTooLong, p.DelayMs, topic.MaxFanoutDelayMs)
+	}
+	if err := checkDelayAgainstRetention(p.DelayMs, parent.RetentionMs, p.Parent); err != nil {
+		return false, err
+	}
+
+	adopted, err = reconcileSchemasForAttach(tx, p.Parent, p.Child, rules)
+	if err != nil {
+		return false, err
+	}
+
+	parent.Role = topic.RoleParent
+	parent.Children = append(parent.Children, p.Child)
+	child.Role = topic.RoleChild
+	child.Parent = p.Parent
+	child.AttachEpoch = p.Epoch
+	child.FanoutDelayMs = p.DelayMs
+	child.AttachOffsets = p.Offsets
+	if err := putTopicRecord(tx, parent); err != nil {
+		return false, err
+	}
+	return adopted, putTopicRecord(tx, child)
 }
 
 // applyDetachChild unlinks child from parent. The child keeps whatever
@@ -152,24 +178,7 @@ func (f *fsmState) applyDetachChild(data []byte) error {
 		if err != nil {
 			return err
 		}
-		if !child.IsChild() || child.Parent != p.Parent {
-			return fmt.Errorf("%w: %q is not attached to %q", ErrNotFound, p.Child, p.Parent)
-		}
-
-		parent.Children = slices.DeleteFunc(parent.Children, func(c string) bool { return c == p.Child })
-		if len(parent.Children) == 0 {
-			parent.Children = nil
-			parent.Role = topic.RoleStandalone
-		}
-		child.Role = topic.RoleStandalone
-		child.Parent = ""
-		child.AttachEpoch = ""
-		child.FanoutDelayMs = 0
-		child.AttachOffsets = nil
-		if err := putTopicRecord(tx, parent); err != nil {
-			return err
-		}
-		return putTopicRecord(tx, child)
+		return detachChildTx(tx, p.Parent, p.Child, parent, child)
 	})
 	if err == nil {
 		f.versions.bumpTopic(p.Parent)
@@ -178,12 +187,36 @@ func (f *fsmState) applyDetachChild(data []byte) error {
 	return err
 }
 
+// detachChildTx unlinks childName from parentName, whose records
+// parent and child were read inside tx.
+func detachChildTx(tx *bolt.Tx, parentName, childName string, parent, child topic.Topic) error {
+	if !child.IsChild() || child.Parent != parentName {
+		return fmt.Errorf("%w: %q is not attached to %q", ErrNotFound, childName, parentName)
+	}
+	parent.Children = slices.DeleteFunc(parent.Children, func(c string) bool { return c == childName })
+	if len(parent.Children) == 0 {
+		parent.Children = nil
+		parent.Role = topic.RoleStandalone
+	}
+	child.Role = topic.RoleStandalone
+	child.Parent = ""
+	child.AttachEpoch = ""
+	child.FanoutDelayMs = 0
+	child.AttachOffsets = nil
+	if err := putTopicRecord(tx, parent); err != nil {
+		return err
+	}
+	return putTopicRecord(tx, child)
+}
+
 // reconcileSchemasForAttach enforces the attach-time schema gate: the
-// child's schema must be absent or byte-identical (every version) to
-// the parent's. A schema-less child under a schema'd parent adopts the
-// parent's full history so parent and child validate identically from
-// the attach point on. Reports whether an adoption happened.
-func reconcileSchemasForAttach(tx *bolt.Tx, parentName, childName string) (adopted bool, err error) {
+// child's schema must be absent or identical (every version) to the
+// parent's, byte for byte or, under rules.byValue, as JSON values. A
+// schema-less child under a schema'd parent adopts the parent's full
+// history so parent and child validate identically from the attach
+// point on; under rules.budgets the copy must fit the schema byte
+// budgets. Reports whether an adoption happened.
+func reconcileSchemasForAttach(tx *bolt.Tx, parentName, childName string, rules attachRules) (adopted bool, err error) {
 	parentSchemas, err := loadSchemaHistory(tx, parentName)
 	if err != nil {
 		return false, err
@@ -197,6 +230,15 @@ func reconcileSchemasForAttach(tx *bolt.Tx, parentName, childName string) (adopt
 	case len(childSchemas) == 0 && len(parentSchemas) == 0:
 		return false, nil
 	case len(childSchemas) == 0:
+		if rules.budgets != nil {
+			var adopt int64
+			for _, schema := range parentSchemas {
+				adopt += int64(len(schema))
+			}
+			if err := rules.budgets.check(tx, map[string]int64{childName: adopt}); err != nil {
+				return false, fmt.Errorf("%q cannot adopt the schema history of %q: %w", childName, parentName, err)
+			}
+		}
 		b := tx.Bucket(bucketSchemas)
 		for _, version := range sortedVersions(parentSchemas) {
 			if err := b.Put(schemaKey(childName, version), parentSchemas[version]); err != nil {
@@ -208,7 +250,11 @@ func reconcileSchemasForAttach(tx *bolt.Tx, parentName, childName string) (adopt
 		return false, fmt.Errorf("%w: child %q has a schema but parent %q does not",
 			errs.ErrFanoutSchemaMismatch, childName, parentName)
 	default:
-		if !schemaHistoriesEqual(parentSchemas, childSchemas) {
+		equal := schemaHistoriesEqual
+		if rules.byValue {
+			equal = schemaHistoriesValueEqual
+		}
+		if !equal(parentSchemas, childSchemas) {
 			return false, fmt.Errorf("%w: schema of %q differs from parent %q; align or clear it, then re-attach",
 				errs.ErrFanoutSchemaMismatch, childName, parentName)
 		}

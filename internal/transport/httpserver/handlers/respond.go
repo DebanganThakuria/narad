@@ -122,6 +122,12 @@ func (s *Set) writeError(w http.ResponseWriter, status int, msg string) {
 	}
 }
 
+// undecidedMarker is a response writer that records an answer written
+// without a decision on the change (the topic handlers' audit writer).
+type undecidedMarker interface {
+	MarkUndecided()
+}
+
 // logServerError logs 5xx responses only: 4xx errors are the client's
 // fault and would just be noise.
 func (s *Set) logServerError(status int, msg string, attrs ...slog.Attr) {
@@ -146,12 +152,31 @@ func (s *Set) logServerError(status int, msg string, attrs ...slog.Attr) {
 // partition this topic does not have (a handle carries no topic).
 // Out-of-order ack rejected by ackedAhead-cap maps to 503: the head is
 // genuinely stuck and the client should back off.
+//
+// A 503 whose change may still take effect (errs.ErrOutcomeUnknown: the
+// leader lost its leadership after appending it) is first reported to a
+// writer that records outcomes, so the topic audit logs it as unknown
+// rather than failed.
 func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
+	if errors.Is(err, errs.ErrOutcomeUnknown) {
+		if m, ok := w.(undecidedMarker); ok {
+			m.MarkUndecided()
+		}
+	}
 	switch {
+	case errors.Is(err, errs.ErrForbidden):
+		// The leader's ownership re-check refused the caller.
+		s.WriteError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, errs.ErrTopicNotFound):
 		s.WriteError(w, http.StatusNotFound, "topic not found")
 	case errors.Is(err, errs.ErrTopicAlreadyExists):
-		s.WriteError(w, http.StatusConflict, "topic already exists")
+		// The bare sentinel keeps its fixed text; a wrapped one says
+		// why (a name that differs from an existing one only in case).
+		msg := "topic already exists"
+		if err != errs.ErrTopicAlreadyExists {
+			msg = err.Error()
+		}
+		s.WriteError(w, http.StatusConflict, msg)
 	case errors.Is(err, errs.ErrHandleMalformed):
 		s.WriteError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, errs.ErrHandleStale):
@@ -180,6 +205,9 @@ func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 		// current state, not a malformed request.
 		errors.Is(err, errs.ErrSchemaVersionConflict),
 		errors.Is(err, errs.ErrSchemaHistoryFull),
+		// The topic changed under the request (deleted and recreated,
+		// or grown) after the leader checked it, twice in a row.
+		errors.Is(err, errs.ErrTopicChanged),
 		errors.Is(err, errs.ErrAlreadyExists):
 		s.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errs.ErrNotFound):

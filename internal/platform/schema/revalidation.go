@@ -155,6 +155,11 @@ type graphNode struct {
 	path string
 	eps  []epsEdge
 	desc []descEdge
+	// keys are the propertyNames subschemas, applied to each property
+	// name of an object value. A name is a string with no children, so
+	// no cycle passes through them; only buildCompiledGraph sets them,
+	// for the path count (countValidationPaths).
+	keys []int
 }
 
 type schemaGraph struct {

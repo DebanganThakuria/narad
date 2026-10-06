@@ -52,6 +52,9 @@ func AttachChild(s *handlers.Set) http.HandlerFunc {
 		if !s.DecodeAndValidate(w, r, &req) {
 			return
 		}
+		aw := newAuditWriter(w)
+		w = aw
+		defer func() { aw.audit(s, r, auditEventAttach, parent, "child", req.Child, "delay_ms", req.DelayMs) }()
 		if !s.AuthorizeTopicManage(w, r, parent) || !s.AuthorizeTopicManage(w, r, req.Child) {
 			return
 		}
@@ -82,6 +85,9 @@ func DetachChild(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, "parent and child topics required")
 			return
 		}
+		aw := newAuditWriter(w)
+		w = aw
+		defer func() { aw.audit(s, r, auditEventDetach, parent, "child", child) }()
 		if !s.AuthorizeTopicManageAny(w, r, parent, child) {
 			return
 		}

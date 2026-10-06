@@ -198,6 +198,30 @@ func TestBuildMetricsReturnsUsableRegistry(t *testing.T) {
 	}
 }
 
+// TestServeRegistersSchemaMetrics: the process registry serve builds
+// exposes the schema validation metrics. They were defined but never
+// registered, so a running node had none of them.
+func TestServeRegistersSchemaMetrics(t *testing.T) {
+	reg, _ := buildMetrics()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v", err)
+	}
+	found := map[string]bool{}
+	for _, f := range families {
+		found[f.GetName()] = true
+	}
+	for _, name := range []string{
+		"narad_schema_validation_seconds",
+		"narad_schema_validations_in_flight",
+		"narad_schema_rejections_total",
+	} {
+		if !found[name] {
+			t.Errorf("the serve registry has no %s", name)
+		}
+	}
+}
+
 func TestCloseWithLogDoesNothingOnNilError(t *testing.T) {
 	closeWithLog(slog.New(slog.NewTextHandler(io.Discard, nil)), "metastore", func() error { return nil })
 }
@@ -251,7 +275,7 @@ func (stubBroker) UpdateTopicRetention(context.Context, string, int64) (topic.To
 	return topic.Topic{}, nil
 }
 
-func (stubBroker) UpdateTopicCaps(context.Context, string, int64, int64) (topic.Topic, error) {
+func (stubBroker) UpdateTopicCaps(context.Context, string, *int64, *int64) (topic.Topic, error) {
 	return topic.Topic{}, nil
 }
 

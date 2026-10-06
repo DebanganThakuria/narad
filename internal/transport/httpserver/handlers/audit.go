@@ -20,7 +20,8 @@ func (s *Set) Audit(r *http.Request, event, target string) {
 
 // Audit outcomes of a mutation (see AuditOutcome).
 const (
-	// AuditOK: the change was applied (a 2xx).
+	// AuditOK: the change was applied (a 2xx, or the part of a PATCH
+	// this node applied before a later part failed).
 	AuditOK = "ok"
 	// AuditDenied: the caller was refused (403).
 	AuditDenied = "denied"
@@ -30,7 +31,10 @@ const (
 	AuditFailed = "failed"
 	// AuditUnknown: the request ended without a decision this node
 	// knows, so the change may or may not have been applied: a forward
-	// whose reply never came back, or a client that went away mid-change.
+	// whose reply never came back, a change the leader lost its
+	// leadership over while committing it, a client that went away
+	// mid-change, or the part of a forwarded PATCH before the part that
+	// failed.
 	AuditUnknown = "unknown"
 )
 

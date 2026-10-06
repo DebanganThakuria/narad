@@ -128,3 +128,18 @@ func (s *Store) ListTopics(_ context.Context, opts ListOptions) ([]topic.Topic, 
 	})
 	return out, nextToken, err
 }
+
+// TopicNameFoldConflict reports, from the local replica, an existing
+// topic whose name equals name except for letter case (and is not name
+// itself). Topic names are ASCII ([A-Za-z0-9._-]), so strings.EqualFold
+// is exactly the folding a case-insensitive filesystem applies. It walks
+// the topic keys without decoding the records.
+func (s *Store) TopicNameFoldConflict(name string) (existing string, found bool, err error) {
+	s.fsm.mu.RLock()
+	defer s.fsm.mu.RUnlock()
+	err = s.fsm.view(func(tx *bolt.Tx) error {
+		existing, found = foldedTopicName(tx, name)
+		return nil
+	})
+	return existing, found, err
+}
