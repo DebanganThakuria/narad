@@ -89,6 +89,22 @@ func (g *Gate) Wait(ctx context.Context) (probe bool, err error) {
 	}
 }
 
+// TryWait is Wait without blocking: ok is false when Wait would block
+// (the gate is closed and its probe is out or not yet due). A probe it
+// hands out must be reported like one from Wait.
+func (g *Gate) TryWait() (probe, ok bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.closed {
+		return false, true
+	}
+	if !g.probing && !g.now().Before(g.until) {
+		g.probing = true
+		return true, true
+	}
+	return false, false
+}
+
 // WaitDue blocks until the gate is open or its probe is due, without
 // taking the probe: a cursor waits here before reading its next slab so
 // a dead remote costs no reads.

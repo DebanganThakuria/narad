@@ -54,3 +54,30 @@ func TestIdleRemoteLinkKeepsItsTargetCheckAndSaysWhy(t *testing.T) {
 		t.Fatalf("state %s with records waiting, want target_replaced", snap.state)
 	}
 }
+
+// Quiet cursors' target checks are requests to the remote like chunks:
+// they go through its gate. A wrong password then costs the target one
+// failed login per node per gate backoff, not one per cursor per check
+// interval, and every quiet cursor still says why the link is stuck.
+func TestIdleRemoteChecksGoThroughTheGate(t *testing.T) {
+	limits := domremote.DefaultLimits()
+	limits.CheckIntervalMs = 1000
+	const partitions = 8
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{partitions: partitions},
+		password: "a-wrong-password-0123456789", limits: limits})
+	rg.src.start()
+	defer rg.src.stop()
+	for p := range partitions {
+		rg.waitState(t, p, topic.RemoteStateAuthFailed, 15*time.Second)
+	}
+	before := rg.target.faults.listings.Load()
+	time.Sleep(5 * time.Second)
+	if n := rg.target.faults.listings.Load() - before; n > 1 {
+		t.Fatalf("%d credentialed target checks in 5s from %d quiet cursors with a wrong password; want at most one per gate backoff", n, partitions)
+	}
+	for p := range partitions {
+		if snap, _ := rg.src.cursorState(p); snap.state != topic.RemoteStateAuthFailed {
+			t.Fatalf("partition %d shows %s, want auth_failed", p, snap.state)
+		}
+	}
+}

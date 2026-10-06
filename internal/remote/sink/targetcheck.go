@@ -77,6 +77,41 @@ type TargetResult struct {
 	Class string
 }
 
+// CheckOutcome is what a runtime target check tells the remote's gate.
+type CheckOutcome int
+
+const (
+	// CheckReached: the target answered in Narad's shape (a listing, or
+	// a refusal of the topic or the grant): the remote is reachable.
+	CheckReached CheckOutcome = iota
+	// CheckFailed: a remote-wide or transient failure (refused
+	// credentials, throttling, TLS, an outage, an edge answer), which
+	// the gate counts as a chunk's answer of the same class.
+	CheckFailed
+	// CheckUnsent: nothing went out (the dial was refused on this side).
+	CheckUnsent
+)
+
+// GateVerdict maps the check's outcome onto the remote's gate, as the
+// answer to a chunk of the same class would: the verdict is for
+// Gate.Failed when the outcome is CheckFailed.
+func (r TargetResult) GateVerdict() (Verdict, CheckOutcome) {
+	if r.Verified {
+		return Verdict{}, CheckReached
+	}
+	switch r.Class {
+	case topic.RemoteStateAuthFailed, topic.RemoteStateThrottled, topic.RemoteStateTLSFailed:
+		return verdict(ActGate, r.Class, 0), CheckFailed
+	case topic.RemoteStateUnavailable, topic.RemoteClassEdge:
+		v := verdict(ActRetry, topic.RemoteStateUnavailable, 0)
+		v.Class = r.Class
+		return v, CheckFailed
+	case topic.RemoteStateDestinationRefused:
+		return Verdict{}, CheckUnsent
+	}
+	return Verdict{}, CheckReached
+}
+
 // FetchListing reads the target's children listing for topicName with
 // the entry's credentials.
 func FetchListing(ctx context.Context, e *remote.Entry, topicName string) (*http.Response, []byte, error) {

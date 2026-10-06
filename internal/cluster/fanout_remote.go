@@ -95,6 +95,28 @@ type remoteState struct {
 	capsAt   time.Time
 	probing  bool
 	laneCaps map[*sink.ChunkCap]int
+	// gateState is the state of the last failure reported to the gate,
+	// which quiet cursors show while it stays closed.
+	gateState string
+}
+
+// gateFailed reports a failure to the remote's gate (Gate.Failed) and
+// remembers its state.
+func (rs *remoteState) gateFailed(v sink.Verdict, probe bool) (laneBackoff bool) {
+	rs.mu.Lock()
+	rs.gateState = v.State
+	rs.mu.Unlock()
+	return rs.gate.Failed(v, probe)
+}
+
+// closedState is why the gate is closed, "" while it is open.
+func (rs *remoteState) closedState() string {
+	if !rs.gate.Closed() {
+		return ""
+	}
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return rs.gateState
 }
 
 func (s *remoteSender) remoteState(name string) *remoteState {
@@ -977,6 +999,13 @@ func (s *remoteSender) checkTarget(ctx context.Context, c *remoteCursor, e *remo
 // wait: target_verified_at stays fresh on a healthy idle link, and a
 // replaced target, a missing one or refused credentials show before
 // anything is sent.
+//
+// The check is a credentialed request like a chunk, so it goes through
+// the remote's gate and its outcome paces the gate: while the gate is
+// closed only its due probe goes out, from any cursor, so a wrong
+// password costs the target one failed login per node per backoff and a
+// dead target one request, however many quiet cursors the node runs. A
+// cursor the gate keeps quiet shows why the gate closed.
 func (r *FanoutRunner) remoteIdle(ctx context.Context, key fanoutCursorKey, cur *remoteCursor) {
 	stub, err := r.store.GetTopic(ctx, key.child)
 	if err != nil || !stub.IsRemoteChild() || stub.Parent != key.parent || stub.AttachEpoch != key.epoch || stub.Remote.Paused {
@@ -988,7 +1017,31 @@ func (r *FanoutRunner) remoteIdle(ctx context.Context, key fanoutCursorKey, cur 
 	if state != "" {
 		return
 	}
-	if _, res, ran := s.checkTarget(ctx, cur, e, rs, stub); ran && !res.Verified {
+	probe, ok := rs.gate.TryWait()
+	if !ok {
+		if closed := rs.closedState(); closed != "" {
+			cur.setIdleCheck(idleCheckState(closed))
+		}
+		return
+	}
+	_, res, ran := s.checkTarget(ctx, cur, e, rs, stub)
+	if !ran {
+		if probe {
+			rs.gate.Released()
+		}
+		return
+	}
+	switch v, outcome := res.GateVerdict(); {
+	case outcome == sink.CheckReached:
+		rs.gate.Succeeded(probe)
+	case outcome == sink.CheckFailed && !rs.superseded(e):
+		rs.gateFailed(v, probe)
+	case probe:
+		// Nothing went out, or the answer is to a credential since
+		// replaced: it says nothing about the gate.
+		rs.gate.Released()
+	}
+	if !res.Verified {
 		cur.setIdleCheck(idleCheckState(res.Class))
 	}
 }
@@ -1186,7 +1239,7 @@ func (sh *slabShip) act(ctx context.Context, lane *laneShip, rs *remoteState, e 
 		}
 
 	case sink.ActRetry:
-		laneBackoff := rs.gate.Failed(v, probe)
+		laneBackoff := rs.gateFailed(v, probe)
 		if v.Shrink {
 			lane.cap.Shrink()
 		}
@@ -1215,7 +1268,7 @@ func (sh *slabShip) act(ctx context.Context, lane *laneShip, rs *remoteState, e 
 			}
 			return
 		}
-		rs.gate.Failed(v, probe)
+		rs.gateFailed(v, probe)
 		sh.cur.setLane(lane.idx, v.State)
 		sh.hold(lane, -1, rs.gate)
 

@@ -196,6 +196,51 @@ func TestGateReleasedHandsTheProbeOn(t *testing.T) {
 	}
 }
 
+func TestGateTryWaitHandsOutOnlyTheDueProbe(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_000, 0)}
+	g := NewGate()
+	g.now = clock.Now
+	if probe, ok := g.TryWait(); !ok || probe {
+		t.Fatalf("open gate: TryWait = (%v, %v), want (false, true)", probe, ok)
+	}
+	g.Failed(Verdict{Action: ActGate, State: topic.RemoteStateAuthFailed}, false)
+	if _, ok := g.TryWait(); ok {
+		t.Fatal("a closed gate let a request go before its probe was due")
+	}
+	clock.Advance(GateMaxBackoff)
+	if probe, ok := g.TryWait(); !ok || !probe {
+		t.Fatal("want the due probe")
+	}
+	if _, ok := g.TryWait(); ok {
+		t.Fatal("a second request went while the probe was out")
+	}
+}
+
+// A failed target check paces the gate as a chunk's answer of the same
+// class does; an answer in Narad's shape proves the remote reachable.
+func TestTargetCheckGateVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		res     TargetResult
+		outcome CheckOutcome
+		action  Action
+	}{
+		{TargetResult{Verified: true}, CheckReached, 0},
+		{TargetResult{Class: topic.RemoteStateAuthFailed}, CheckFailed, ActGate},
+		{TargetResult{Class: topic.RemoteStateThrottled}, CheckFailed, ActGate},
+		{TargetResult{Class: topic.RemoteStateTLSFailed}, CheckFailed, ActGate},
+		{TargetResult{Class: topic.RemoteStateUnavailable}, CheckFailed, ActRetry},
+		{TargetResult{Class: topic.RemoteClassEdge}, CheckFailed, ActRetry},
+		{TargetResult{Class: topic.RemoteStateDestinationRefused}, CheckUnsent, 0},
+		{TargetResult{Class: topic.RemoteStateForbidden}, CheckReached, 0},
+		{TargetResult{Class: topic.RemoteStateTargetMissing}, CheckReached, 0},
+	} {
+		v, outcome := tc.res.GateVerdict()
+		if outcome != tc.outcome || (outcome == CheckFailed && v.Action != tc.action) {
+			t.Errorf("%+v: got (%v, %v), want (%v, %v)", tc.res, v.Action, outcome, tc.action, tc.outcome)
+		}
+	}
+}
+
 func TestHeldBudgetFirstComeFirstServed(t *testing.T) {
 	var observed atomic.Int64
 	b := NewHeldBudget(100, func(v int64) { observed.Store(v) })
