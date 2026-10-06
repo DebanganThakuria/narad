@@ -6,6 +6,7 @@ package cluster
 // real router, optionally behind a fault switch and a latency proxy.
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -86,10 +87,12 @@ type rigFaults struct {
 	mode atomic.Value
 	// batches counts batch requests that reached the real router and
 	// were accepted.
-	accepted  atomic.Int64
-	batches   atomic.Int64
-	probes    atomic.Int64
-	listings  atomic.Int64
+	accepted atomic.Int64
+	batches  atomic.Int64
+	probes   atomic.Int64
+	listings atomic.Int64
+	// tooMany counts chunks refused in mode "max100".
+	tooMany   atomic.Int64
 	onAccept  atomic.Pointer[func()]
 	slowDelay time.Duration
 }
@@ -129,6 +132,22 @@ func (f *rigFaults) wrap(next http.Handler) http.Handler {
 			if batch {
 				http.NotFound(w, r)
 				return
+			}
+		case "max100":
+			// v3.1.0's batch produce: at most 100 messages per request.
+			if batch && r.Method == http.MethodPost && r.Header.Get("Content-Encoding") == "" {
+				raw, _ := io.ReadAll(r.Body)
+				var body struct {
+					Messages []json.RawMessage `json:"messages"`
+				}
+				if json.Unmarshal(raw, &body) == nil && len(body.Messages) > 100 {
+					f.tooMany.Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = io.WriteString(w, `{"error":"too many messages: more than 100 (max 100)"}`)
+					return
+				}
+				r.Body = io.NopCloser(bytes.NewReader(raw))
 			}
 		case "slow":
 			time.Sleep(f.slowDelay)

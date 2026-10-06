@@ -51,6 +51,12 @@ const (
 	// ActUncompressed: the target could not decode a compressed chunk;
 	// resend it uncompressed at once and stop compressing.
 	ActUncompressed
+	// ActRecapacity: the target refused the chunk's message count ("too
+	// many messages"): it takes fewer per request than its capabilities
+	// said (rolled back, or an older pod behind its load balancer).
+	// Nothing was stored and no record is at fault; forget the
+	// capabilities and resend at the default size.
+	ActRecapacity
 )
 
 // Verdict is a classified answer.
@@ -174,6 +180,8 @@ func (c Classifier) Classify(a Answer) Verdict {
 		v := verdict(ActGate, topic.RemoteStateThrottled, status)
 		v.RetryAfter = retryAfter(resp)
 		return v
+	case status == http.StatusBadRequest && strings.HasPrefix(msg, "too many messages"):
+		return verdict(ActRecapacity, "", status)
 	case status == http.StatusBadRequest:
 		if i := messageIndex(msg); i >= 0 {
 			v := verdict(ActResendPrefix, topic.RemoteStateRejectedRecord, status)

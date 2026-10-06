@@ -90,8 +90,11 @@ type remoteState struct {
 	capsID      string
 	capsCV      uint64
 	capsRetryAt time.Time
-	probing     bool
-	laneCaps    map[*sink.ChunkCap]int
+	// capsAt is when caps were probed; they are probed again after a
+	// check interval.
+	capsAt   time.Time
+	probing  bool
+	laneCaps map[*sink.ChunkCap]int
 }
 
 func (s *remoteSender) remoteState(name string) *remoteState {
@@ -221,16 +224,22 @@ func (rs *remoteState) superseded(e *remote.Entry) bool {
 }
 
 // capabilities is what the remote's batch produce takes, probed once
-// per remote per node and credential version. While a probe runs, or
-// after one proved nothing, the conservative defaults apply.
+// per remote per node and credential version, and again every check
+// interval so a target upgraded (or rolled back) behind the same remote
+// is picked up. While a first probe runs, or after one proved nothing or
+// the target refused a chunk's message count, the conservative defaults
+// apply; while a refresh runs, the caps it refreshes do.
 func (s *remoteSender) capabilities(ctx context.Context, rs *remoteState, e *remote.Entry, topicName string) sink.Capabilities {
 	rs.mu.Lock()
-	if rs.capsKnown && rs.capsID == e.RemoteID() && rs.capsCV == e.CredentialVersion() {
+	now := time.Now()
+	known := rs.capsKnown && rs.capsID == e.RemoteID() && rs.capsCV == e.CredentialVersion()
+	ttl := time.Duration(e.Limits().CheckIntervalMs) * time.Millisecond
+	if known && (rs.probing || now.Sub(rs.capsAt) < ttl) {
 		caps := rs.caps
 		rs.mu.Unlock()
 		return caps
 	}
-	if rs.probing || time.Now().Before(rs.capsRetryAt) {
+	if rs.probing || now.Before(rs.capsRetryAt) {
 		rs.mu.Unlock()
 		return sink.DefaultCapabilities()
 	}
@@ -248,8 +257,20 @@ func (s *remoteSender) capabilities(ctx context.Context, rs *remoteState, e *rem
 		rs.capsRetryAt = time.Now().Add(sink.StallRetry)
 		return sink.DefaultCapabilities()
 	}
-	rs.caps, rs.capsKnown, rs.capsID, rs.capsCV = caps, true, e.RemoteID(), e.CredentialVersion()
+	rs.caps, rs.capsKnown, rs.capsID, rs.capsCV, rs.capsAt = caps, true, e.RemoteID(), e.CredentialVersion(), time.Now()
 	return caps
+}
+
+// forgetCaps drops the probed capabilities after the target refused a
+// chunk's message count: the defaults apply until the next probe, one
+// check interval later, so a target whose pods answer differently
+// (mid-roll behind a load balancer) is not probed in a loop.
+func (rs *remoteState) forgetCaps(e *remote.Entry) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	rs.capsKnown = false
+	rs.caps = sink.DefaultCapabilities()
+	rs.capsRetryAt = time.Now().Add(time.Duration(e.Limits().CheckIntervalMs) * time.Millisecond)
 }
 
 // disableZstd turns compression off for this remote on this node until
@@ -595,14 +616,14 @@ func (s *remoteSender) commit(ctx context.Context, key fanoutCursorKey, child to
 
 // slabShip is one slab on its way to the remote.
 type slabShip struct {
-	s           *remoteSender
-	cur         *remoteCursor
-	key         fanoutCursorKey
-	cancel      context.CancelFunc
+	s      *remoteSender
+	cur    *remoteCursor
+	key    fanoutCursorKey
+	cancel context.CancelFunc
 	// stopWaits ends every lane's waits (not its requests in flight);
 	// sendCtx is what requests run under.
-	stopWaits context.CancelFunc
-	sendCtx   context.Context
+	stopWaits   context.CancelFunc
+	sendCtx     context.Context
 	retentionMs int64
 	lanes       []*laneShip
 
@@ -1077,7 +1098,7 @@ func (sh *slabShip) sendChunk(ctx context.Context, lane *laneShip, e *remote.Ent
 		lcancel()
 		v = sink.ResolveRoute(lresp, lbody, lerr)
 	}
-	if v.Action != sink.ActCommitted && rl != nil {
+	if v.Action != sink.ActCommitted && v.Action != sink.ActRecapacity && rl != nil {
 		rl.ErrorsTotal.WithLabelValues(rs.name, v.Class).Inc()
 	}
 	sh.act(ctx, lane, rs, e, v, n, probe)
@@ -1212,6 +1233,13 @@ func (sh *slabShip) act(ctx context.Context, lane *laneShip, rs *remoteState, e 
 			rs.gate.Released()
 		}
 		rs.disableZstd(e)
+	case sink.ActRecapacity:
+		// The target is reachable and refused no record: resend the same
+		// records at the default chunk size.
+		rs.gate.Succeeded(probe)
+		rs.forgetCaps(e)
+		s.r.logger.Warn("remote child target takes fewer messages per request than it did; sending default-size chunks until the next capability probe",
+			"parent", sh.key.parent, "partition", sh.key.partition, "child", sh.key.child, "remote", rs.name)
 	}
 }
 
