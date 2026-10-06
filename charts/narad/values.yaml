@@ -216,16 +216,16 @@ security:
   # secured cluster on plaintext Raft unless told the port is fenced.
   #
   # The chart tells it so (NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true) only
-  # when clusterTLS is off and either networkPolicy.enabled is true (this
-  # chart then fences 7943/tcp and 7942/udp itself) or this value is
-  # true. Set it only if something else already fences 7943/tcp and
-  # 7942/udp (the QUIC node RPC plane) to the narad pods: your own
-  # NetworkPolicy, a service mesh, a firewall. With security on,
-  # clusterTLS off, networkPolicy off and this false, the install fails
-  # and names the three ways out.
+  # when clusterTLS is off and either networkPolicy.enabled is true (the
+  # default: this chart then fences 7943/tcp and 7942/udp itself) or this
+  # value is true. Set it only if you turn the chart's policy off and
+  # something else already fences 7943/tcp and 7942/udp (the QUIC node
+  # RPC plane) to the narad pods: your own NetworkPolicy, a service mesh,
+  # a firewall. With security on, clusterTLS off, networkPolicy off and
+  # this false, the install fails and names the three ways out.
   allowPlaintextRaft: false
 
-# NetworkPolicy for the narad pods, off by default. It needs a CNI that
+# NetworkPolicy for the narad pods, on by default. It needs a CNI that
 # enforces NetworkPolicy (Calico, Cilium and most managed offerings do);
 # on one that does not, the policy is accepted and ignored, and the
 # ports stay as open as without it. Ingress only; egress is left alone.
@@ -241,10 +241,13 @@ security:
 #     it closed; kubectl port-forward still reaches it);
 #   - the rules in extraIngress, appended as given.
 # Kubelet probes come from the pod's own node, which a NetworkPolicy does
-# not block. With clusterTLS off, enabling this is also what lets the
-# chart acknowledge plaintext Raft (see security.allowPlaintextRaft).
+# not block. With clusterTLS off, this policy is also what lets the chart
+# acknowledge plaintext Raft (see security.allowPlaintextRaft): turning
+# it off then needs clusterTLS or allowPlaintextRaft. An upgrade with
+# --reuse-values from a release older than this key keeps rendering
+# without a policy, as it did before.
 networkPolicy:
-  enabled: false
+  enabled: true
   # NetworkPolicyPeer entries, for example:
   #   - namespaceSelector:
   #       matchLabels:

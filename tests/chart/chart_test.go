@@ -20,9 +20,9 @@ var releaseSelector = map[string]any{
 	"app.kubernetes.io/instance": "narad",
 }
 
-// fenced is the smallest set of values that renders with security on:
-// it acknowledges plaintext Raft as fenced by something outside the chart.
-var fenced = []string{"--set", "security.allowPlaintextRaft=true"}
+// fenced turns the chart's NetworkPolicy off and acknowledges plaintext
+// Raft as fenced by something outside the chart instead.
+var fenced = []string{"--set", "networkPolicy.enabled=false", "--set", "security.allowPlaintextRaft=true"}
 
 func chartDir(t *testing.T) string {
 	t.Helper()
@@ -174,13 +174,22 @@ func podSelectorPeer(labels map[string]any) any {
 	return map[string]any{"podSelector": map[string]any{"matchLabels": labels}}
 }
 
-// The chart only ever renders a NetworkPolicy when asked to: it needs a
-// CNI that enforces it, and an unexpected one can cut traffic the
-// operator relies on.
-func TestNetworkPolicyIsOffByDefault(t *testing.T) {
+// The chart fences Raft and the node RPC plane with its own
+// NetworkPolicy unless told not to: Raft has no authentication of its
+// own, and the default install runs it in plaintext. Turning it off
+// renders none.
+func TestNetworkPolicyIsOnByDefault(t *testing.T) {
+	for _, args := range [][]string{
+		{},
+		{"--set", "security.clusterTLS.enabled=true"},
+	} {
+		if n := len(ofKind(render(t, args...), "NetworkPolicy")); n != 1 {
+			t.Fatalf("helm template %v rendered %d NetworkPolicies, want 1", args, n)
+		}
+	}
 	for _, args := range [][]string{
 		fenced,
-		{"--set", "security.clusterTLS.enabled=true"},
+		{"--set", "networkPolicy.enabled=false", "--set", "security.clusterTLS.enabled=true"},
 	} {
 		if n := len(ofKind(render(t, args...), "NetworkPolicy")); n != 0 {
 			t.Fatalf("helm template %v rendered %d NetworkPolicies, want none", args, n)
@@ -192,7 +201,7 @@ func TestNetworkPolicyIsOffByDefault(t *testing.T) {
 // the cluster secret, so the policy admits both from the release's own
 // pods only, while the API and the metrics port stay open to clients.
 func TestNetworkPolicyFencesRaftAndNodeRPCToTheReleasePods(t *testing.T) {
-	docs := render(t, "--set", "networkPolicy.enabled=true")
+	docs := render(t)
 	np := only(t, docs, "NetworkPolicy")
 
 	if got := at(np, "spec", "podSelector", "matchLabels"); !reflect.DeepEqual(got, releaseSelector) {
@@ -279,16 +288,18 @@ func TestNetworkPolicyFencesRaftAndNodeRPCToTheReleasePods(t *testing.T) {
 
 // NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT tells the broker the Raft port is
 // fenced. The chart used to set it by default while shipping nothing
-// that fenced the port; it now says so only when something does, and a
-// secured install with neither Raft TLS nor a fence fails to render and
-// names the three ways out.
+// that fenced the port; it now says so only when something does (its own
+// NetworkPolicy by default), and a secured install with the policy off,
+// no Raft TLS and no other fence fails to render and names the three
+// ways out.
 func TestPlaintextRaftIsAcknowledgedOnlyWhenFenced(t *testing.T) {
-	out, err := helmTemplate(t)
+	out, err := helmTemplate(t, "--set", "networkPolicy.enabled=false")
 	if err == nil {
-		t.Fatalf("the default values rendered (plaintext Raft acknowledged: %v); want a refusal, since nothing fences the Raft port",
+		t.Fatalf("rendered with the NetworkPolicy off (plaintext Raft acknowledged: %v); want a refusal, since nothing fences the Raft port",
 			strings.Contains(out, "NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT"))
 	}
 	for _, want := range []string{
+		"networkPolicy.enabled is false",
 		"security.clusterTLS.enabled=true",
 		"networkPolicy.enabled=true",
 		"security.allowPlaintextRaft=true",
@@ -303,8 +314,8 @@ func TestPlaintextRaftIsAcknowledgedOnlyWhenFenced(t *testing.T) {
 		args []string
 		ack  bool
 	}{
-		{"the chart's NetworkPolicy fences it", []string{"--set", "networkPolicy.enabled=true"}, true},
-		{"the operator fences it", []string{"--set", "security.allowPlaintextRaft=true"}, true},
+		{"the default values: the chart's NetworkPolicy fences it", nil, true},
+		{"the operator fences it", fenced, true},
 		{"Raft runs over TLS", []string{"--set", "security.clusterTLS.enabled=true"}, false},
 		{"Raft runs over TLS behind the policy", []string{"--set", "security.clusterTLS.enabled=true", "--set", "networkPolicy.enabled=true"}, false},
 		{"Raft runs over TLS and the operator also fences it", []string{"--set", "security.clusterTLS.enabled=true", "--set", "security.allowPlaintextRaft=true"}, false},
@@ -324,7 +335,9 @@ func TestPlaintextRaftIsAcknowledgedOnlyWhenFenced(t *testing.T) {
 // helm upgrade --reuse-values renders with the previous chart's values,
 // where every key this chart added is missing and the old defaults are
 // set. Setting a key to null drops it the same way. The render must
-// still work and fall back to this chart's defaults.
+// still work and fall back to this chart's defaults, except that a
+// missing networkPolicy key reads as off: the upgrade must not add a
+// policy the operator never chose.
 func TestChartRendersWithValuesFromAnOlderRelease(t *testing.T) {
 	docs := render(t,
 		"--set", "networkPolicy=null",
@@ -347,9 +360,9 @@ func TestChartRendersWithValuesFromAnOlderRelease(t *testing.T) {
 func TestChartPassesHelmLint(t *testing.T) {
 	helm := helmBinary(t)
 	for _, args := range [][]string{
+		{},
 		fenced,
-		{"--set", "networkPolicy.enabled=true"},
-		{"--set", "security.clusterTLS.enabled=true", "--set", "networkPolicy.enabled=true", "--set", "narad.pprof.enabled=true"},
+		{"--set", "security.clusterTLS.enabled=true", "--set", "narad.pprof.enabled=true"},
 	} {
 		cmd := exec.Command(helm, append([]string{"lint", chartDir(t), "--namespace", "narad"}, args...)...)
 		if out, err := cmd.CombinedOutput(); err != nil {

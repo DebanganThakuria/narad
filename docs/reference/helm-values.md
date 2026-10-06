@@ -10,7 +10,6 @@ Look up every Narad Helm chart value, the objects the chart creates, its ports a
 
 ```sh title="Command"
 helm template narad ./charts/narad \
-  --set networkPolicy.enabled=true \
   --set narad.defaultPartitions=6 \
   | grep -A1 NARAD_TOPIC_DEFAULT_PARTITIONS
 ```
@@ -35,7 +34,7 @@ The chart lives in the repository at [`charts/narad`](https://github.com/Debanga
 | `servicemonitor.yaml`<br>ServiceMonitor | `serviceMonitor.enabled` | Scraping by the Prometheus Operator. |
 | `pdb.yaml`<br>PodDisruptionBudget | `podDisruptionBudget.enabled` | At most one pod down at a time during voluntary evictions, whatever the cluster size. |
 | `serviceaccount.yaml`<br>ServiceAccount | `serviceAccount.create` | A service account that mounts no API token. |
-| `networkpolicy.yaml`<br>NetworkPolicy | `networkPolicy.enabled` | Admits Raft and the node RPC plane from the release's own pods only (unreleased); see [Network policy](#network-policy). |
+| `networkpolicy.yaml`<br>NetworkPolicy | `networkPolicy.enabled`, on by default | Admits Raft and the node RPC plane from the release's own pods only (unreleased); see [Network policy](#network-policy). |
 | `scalein-guard-job.yaml`<br>Job `<name>-scale-in-guard`, a hook | `scaleInGuard.enabled` | Runs before every `helm upgrade` and `helm rollback`, and refuses one that would delete pods that are still cluster members (unreleased); see [Scale in](../operate/scaling.md#scale-in). |
 | `validate.yaml`<br>none | always | Stops a render that would break the cluster; see below. |
 
@@ -44,7 +43,7 @@ The chart lives in the repository at [`charts/narad`](https://github.com/Debanga
 - `initialClusterSize` is less than 1 or even;
 - `replicaCount` is less than `initialClusterSize`;
 - `clusterPeerCount` (when set) is less than `initialClusterSize`;
-- `security.enabled` is on, `security.clusterTLS.enabled` is off, and neither `networkPolicy.enabled` nor `security.allowPlaintextRaft` says the Raft port is fenced (unreleased). The message names the three fixes; see [Production checklist](../operate/production-checklist.md#raft-tls).
+- `security.enabled` is on, `security.clusterTLS.enabled` is off, `networkPolicy.enabled` is turned off, and `security.allowPlaintextRaft` does not say the Raft port is fenced some other way (unreleased). The message names the three fixes; see [Production checklist](../operate/production-checklist.md#raft-tls).
 - `replicaCount` is lower than the running StatefulSet's replicas and `allowScaleInTo` is not that new `replicaCount` (unreleased; it used to be `allowScaleIn: true`, which is no longer read). `helm template` cannot see the running StatefulSet, so this check runs only on a real install or upgrade, and `helm rollback` never runs it: the scale-in guard Job covers rollbacks.
 
 For example, an even `initialClusterSize`:
@@ -139,7 +138,7 @@ What to set before production traffic is in the [Production checklist](../operat
 
 | Value | What it does |
 |---|---|
-| `networkPolicy.enabled`<br>default `false` | Creates a NetworkPolicy for the narad pods. It admits Raft (`service.ports.cluster`, TCP) and the node RPC plane (`service.ports.api`, UDP) from this release's pods only, and with `clusterTLS` off it is what lets the chart set [`security.allow_plaintext_raft`](configuration.md#logging-and-security). It restricts ingress only. It needs a CNI that enforces NetworkPolicy; on one that does not, it is accepted and changes nothing. |
+| `networkPolicy.enabled`<br>default `true` | Creates a NetworkPolicy for the narad pods. It admits Raft (`service.ports.cluster`, TCP) and the node RPC plane (`service.ports.api`, UDP) from this release's pods only, and with `clusterTLS` off it is what lets the chart set [`security.allow_plaintext_raft`](configuration.md#logging-and-security); turning it off then needs `clusterTLS` or `security.allowPlaintextRaft`. It restricts ingress only. It needs a CNI that enforces NetworkPolicy; on one that does not, it is accepted and changes nothing. An upgrade with `--reuse-values` from v3.0.1, whose values have no `networkPolicy` key, renders without it, as before. |
 | `networkPolicy.apiFrom`<br>default `[]` | NetworkPolicyPeer entries allowed to reach the API (`service.ports.api`, TCP). Empty means anywhere. When set, the scale-in guard's pod is admitted too. |
 | `networkPolicy.metricsFrom`<br>default `[]` | Peers allowed to reach the metrics port, when `metrics.enabled`. Empty means anywhere. |
 | `networkPolicy.pprofFrom`<br>default `[]` | Peers allowed to reach pprof, when `narad.pprof.enabled`. Empty keeps it closed. |

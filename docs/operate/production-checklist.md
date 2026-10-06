@@ -31,9 +31,9 @@ Narad keeps its [metadata](../reference/glossary.md#metastore) (topics, users wi
 A node with security on refuses to start unless one of two things is true (a node with no peers is exempt only while its `cluster.addr` is a loopback address, unreleased):
 
 - **Raft runs over mutual TLS.** Set `security.clusterTLS.enabled: true` in the chart. Steps: [Raft TLS certificates](raft-tls.md).
-- **The port is fenced.** The chart's `networkPolicy.enabled: true` fences it ([next section](#network-policy)); `security.allowPlaintextRaft: true` says you fence it some other way.
+- **The port is fenced.** The chart's NetworkPolicy fences it, and it is on by default (`networkPolicy.enabled`, [next section](#network-policy)); `security.allowPlaintextRaft: true` says you fence it some other way.
 
-The chart tells the node that the port is fenced (`NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT`) only when one of those two is set and `clusterTLS` is off (unreleased). With security on and none of the three, the install fails and names them. The v3.0.1 chart set `allowPlaintextRaft: true` by default instead, while shipping nothing that fenced the port, so a default v3.0.1 install runs Raft in plaintext with nothing in front of it. Each node says at startup which transport it runs:
+The chart tells the node that the port is fenced (`NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT`) only when one of those two is set and `clusterTLS` is off (unreleased). With security on, Raft TLS off, the policy turned off and no `allowPlaintextRaft`, the install fails and names the three fixes. The v3.0.1 chart set `allowPlaintextRaft: true` by default instead, while shipping nothing that fenced the port, so a default v3.0.1 install runs Raft in plaintext with nothing in front of it. Each node says at startup which transport it runs:
 
 ```bash
 kubectl logs -n narad narad-0 \
@@ -48,7 +48,7 @@ How the two planes are secured is in [Networking and security](../understand/net
 
 ## Fence the cluster ports {#network-policy}
 
-Two ports carry node-to-node traffic: Raft on 7943/tcp, and the node RPC plane, which uses QUIC on the API port number over UDP (7942/udp). Restrict both to the Narad pods, whether or not Raft uses TLS. The chart does it with `networkPolicy.enabled` (unreleased); this keeps the metrics port to your Prometheus namespace too:
+Two ports carry node-to-node traffic: Raft on 7943/tcp, and the node RPC plane, which uses QUIC on the API port number over UDP (7942/udp). Restrict both to the Narad pods, whether or not Raft uses TLS. The chart does it with its NetworkPolicy, on by default (`networkPolicy.enabled`, unreleased); these values keep the metrics port to your Prometheus namespace too:
 
 ```yaml title="narad-values.yaml"
 networkPolicy:

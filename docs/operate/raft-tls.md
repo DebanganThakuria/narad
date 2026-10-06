@@ -68,11 +68,10 @@ helm install narad ./charts/narad -n narad \
   --set replicaCount=3 \
   --set persistence.size=50Gi \
   --set image.tag=v3.0.1 \
-  --set security.clusterTLS.enabled=true \
-  --set networkPolicy.enabled=true
+  --set security.clusterTLS.enabled=true
 ```
 
-With TLS on, the chart never tells the node that plaintext Raft is fenced, so `security.allowPlaintextRaft` does not matter. `networkPolicy.enabled` still keeps the node RPC plane (7942/udp) and Raft to the Narad pods ([Fence the cluster ports](production-checklist.md#network-policy); unreleased, the v3.0.1 chart ignores it).
+With TLS on, the chart never tells the node that plaintext Raft is fenced, so `security.allowPlaintextRaft` does not matter. The chart's NetworkPolicy, on by default, still keeps the node RPC plane (7942/udp) and Raft to the Narad pods ([Fence the cluster ports](production-checklist.md#network-policy); unreleased, the v3.0.1 chart has no policy).
 
 Each node logs which transport it runs. Check one:
 

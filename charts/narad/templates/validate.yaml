@@ -17,14 +17,14 @@
 Plaintext Raft. With security on, Raft replicates the users (password
 hashes and grants) and has no authentication of its own, so the broker
 refuses to start on plaintext Raft unless told the port is fenced. The
-chart says so only when it is: by its own NetworkPolicy, or by the
-operator's word (security.allowPlaintextRaft). With neither and no Raft
-TLS, refuse here with the three ways out instead of letting every pod
-crash-loop.
+chart says so only when it is: by its own NetworkPolicy (on by
+default), or by the operator's word (security.allowPlaintextRaft). With
+the policy turned off, neither of the others and no Raft TLS, refuse
+here with the three ways out instead of letting every pod crash-loop.
 */ -}}
 {{- $sec := .Values.security -}}
 {{- if and $sec.enabled (not $sec.clusterTLS.enabled) (not $sec.allowPlaintextRaft) (ne (include "narad.networkPolicyEnabled" .) "true") -}}
-{{- fail (printf "security is enabled but Raft (the cluster port, %v/tcp) would run in plaintext with nothing fencing it. Raft has no authentication of its own, and anything that reaches the port can rewrite the cluster metadata, password hashes and grants included; the broker refuses to start this way. Choose one: --set security.clusterTLS.enabled=true with the %s Secret (Raft mutual TLS, see docs/operate/raft-tls.md); --set networkPolicy.enabled=true (this chart's NetworkPolicy admits %v/tcp and %v/udp from the release's own pods only; it needs a CNI that enforces NetworkPolicy); or --set security.allowPlaintextRaft=true if those two ports are already fenced to the narad pods some other way." .Values.service.ports.cluster $sec.clusterTLS.secretName .Values.service.ports.cluster .Values.service.ports.api) -}}
+{{- fail (printf "security is enabled and networkPolicy.enabled is false, so Raft (the cluster port, %v/tcp) would run in plaintext with nothing fencing it. Raft has no authentication of its own, and anything that reaches the port can rewrite the cluster metadata, password hashes and grants included; the broker refuses to start this way. Choose one: --set security.clusterTLS.enabled=true with the %s Secret (Raft mutual TLS, see docs/operate/raft-tls.md); --set networkPolicy.enabled=true, the default (this chart's NetworkPolicy admits %v/tcp and %v/udp from the release's own pods only; it needs a CNI that enforces NetworkPolicy); or --set security.allowPlaintextRaft=true if those two ports are already fenced to the narad pods some other way." .Values.service.ports.cluster $sec.clusterTLS.secretName .Values.service.ports.cluster .Values.service.ports.api) -}}
 {{- end -}}
 {{- /*
 Scale-in acknowledgement. Lowering replicaCount deletes the

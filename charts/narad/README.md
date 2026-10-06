@@ -8,11 +8,11 @@ PVC-backed storage.
 ```sh
 helm upgrade --install narad ./charts/narad \
   --namespace narad \
-  --create-namespace \
-  --set networkPolicy.enabled=true
+  --create-namespace
 ```
 
-With security on (the default), Raft needs mutual TLS or a fence; see
+With security on (the default), Raft needs mutual TLS or a fence. The
+chart's NetworkPolicy, on by default, is that fence; see
 [Network policy and Raft TLS](#network-policy-and-raft-tls).
 
 Enable an EKS LoadBalancer when you want to hit Narad from outside the cluster:
@@ -21,7 +21,6 @@ Enable an EKS LoadBalancer when you want to hit Narad from outside the cluster:
 helm upgrade --install narad ./charts/narad \
   --namespace narad \
   --create-namespace \
-  --set networkPolicy.enabled=true \
   --set service.loadBalancer.enabled=true
 ```
 
@@ -68,7 +67,7 @@ only when that is true. Pick one:
 
 * `security.clusterTLS.enabled=true`: Raft mutual TLS, with the
   certificates in the `narad-cluster-tls` Secret. The production choice.
-* `networkPolicy.enabled=true`: the chart renders a NetworkPolicy that
+* `networkPolicy.enabled=true`, the default: the chart renders a NetworkPolicy that
   admits Raft (`7943/tcp`) and the node RPC plane (`7942/udp`) from this
   release's pods only, and leaves the API (`7942/tcp`) and metrics ports
   open, or limited to `networkPolicy.apiFrom` and
@@ -77,9 +76,11 @@ only when that is true. Pick one:
 * `security.allowPlaintextRaft=true`: you fence `7943/tcp` and `7942/udp`
   to the narad pods some other way.
 
-With none of the three, the install fails and names them. The policy is
-useful with Raft TLS too: it keeps the node RPC plane to the release's
-pods.
+Turn the policy off (`networkPolicy.enabled=false`) with neither of the
+others and the install fails and names all three. The policy is useful
+with Raft TLS too: it keeps the node RPC plane to the release's pods. An
+upgrade with `--reuse-values` from a chart older than the policy renders
+without it, as before.
 
 ## Scaling in
 

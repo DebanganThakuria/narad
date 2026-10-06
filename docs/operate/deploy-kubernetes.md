@@ -92,17 +92,16 @@ The chart lives in the repository, so the install starts from a clone of the rel
     helm install narad ./charts/narad -n narad -f narad-values.yaml
     ```
 
-    For a trial, skip the file and set the few values that matter on the command line. This runs the Raft port without TLS, fenced to the Narad pods by the chart's NetworkPolicy:
+    For a trial, skip the file and set the few values that matter on the command line. This runs the Raft port without TLS, fenced to the Narad pods by the chart's NetworkPolicy, which is on by default:
 
     ```bash
     helm install narad ./charts/narad -n narad \
       --set replicaCount=3 \
       --set persistence.size=50Gi \
-      --set image.tag=v3.0.1 \
-      --set networkPolicy.enabled=true
+      --set image.tag=v3.0.1
     ```
 
-    The policy holds only on a CNI that enforces NetworkPolicy ([Fence the cluster ports](production-checklist.md#network-policy)). Without TLS or the policy, a chart after v3.0.1 refuses to install and names the alternatives (unreleased); the v3.0.1 chart has no policy, ignores `networkPolicy.enabled` and runs the Raft port unfenced.
+    The policy holds only on a CNI that enforces NetworkPolicy ([Fence the cluster ports](production-checklist.md#network-policy)). Turn it off (`networkPolicy.enabled=false`) without TLS or `security.allowPlaintextRaft`, and a chart after v3.0.1 refuses to install and names the alternatives (unreleased); the v3.0.1 chart has no policy, ignores `networkPolicy.enabled` and runs the Raft port unfenced.
 
     Pin `image.tag` to a release either way. The chart's default is `latest`, which follows `master`.
 
