@@ -259,9 +259,17 @@ func TestCLIWaitExitsAtOnceOnEveryStateThatNeedsAFix(t *testing.T) {
 		state   string
 		stalled bool
 	}{
-		{"tls_failed", true}, {"target_missing", true}, {"no_batch_produce", true}, {"redirect_refused", true},
-		{"auth_failed", true}, {"rejected_record", true}, {"paused", true},
-		{"unavailable", false}, {"throttled", false}, {"unknown", false}, {"running", false},
+		{"tls_failed", true},
+		{"target_missing", true},
+		{"no_batch_produce", true},
+		{"redirect_refused", true},
+		{"auth_failed", true},
+		{"rejected_record", true},
+		{"paused", true},
+		{"unavailable", false},
+		{"throttled", false},
+		{"unknown", false},
+		{"running", false},
 	} {
 		mu.Lock()
 		state = c.state

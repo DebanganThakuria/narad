@@ -63,8 +63,10 @@ func TestIdleRemoteChecksGoThroughTheGate(t *testing.T) {
 	limits := domremote.DefaultLimits()
 	limits.CheckIntervalMs = 1000
 	const partitions = 8
-	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{partitions: partitions},
-		password: "a-wrong-password-0123456789", limits: limits})
+	rg := newRemoteRig(t, remoteRigOpts{
+		rigSourceOpts: rigSourceOpts{partitions: partitions},
+		password:      "a-wrong-password-0123456789", limits: limits,
+	})
 	rg.src.start()
 	defer rg.src.stop()
 	for p := range partitions {

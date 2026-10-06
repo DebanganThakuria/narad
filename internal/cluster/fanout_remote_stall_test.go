@@ -18,8 +18,10 @@ import (
 // slab is read again after the stall wait; the pass after that must
 // still send its one retry, or nothing ever clears the stall.
 func TestRemoteChildStallClearsWithoutAHeldBudget(t *testing.T) {
-	rg := newRemoteRig(t, remoteRigOpts{grant: []string{"other"},
-		rigSourceOpts: rigSourceOpts{heldBudget: -1, stallRetry: 300 * time.Millisecond}})
+	rg := newRemoteRig(t, remoteRigOpts{
+		grant:         []string{"other"},
+		rigSourceOpts: rigSourceOpts{heldBudget: -1, stallRetry: 300 * time.Millisecond},
+	})
 	rg.src.start()
 	defer rg.src.stop()
 	want := rg.src.produce(t, 0, 20, 3, 0)
@@ -36,8 +38,10 @@ func TestRemoteChildStallClearsWithoutAHeldBudget(t *testing.T) {
 // the stalled link retries at once instead of waiting a whole stall
 // interval again.
 func TestRemoteChildStalledLinkRetriesAtOnceAfterAResume(t *testing.T) {
-	rg := newRemoteRig(t, remoteRigOpts{grant: []string{"other"},
-		rigSourceOpts: rigSourceOpts{stallRetry: 8 * time.Second}})
+	rg := newRemoteRig(t, remoteRigOpts{
+		grant:         []string{"other"},
+		rigSourceOpts: rigSourceOpts{stallRetry: 8 * time.Second},
+	})
 	rg.src.start()
 	defer rg.src.stop()
 	want := rg.src.produce(t, 0, 20, 3, 0)

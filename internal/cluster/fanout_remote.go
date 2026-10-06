@@ -616,8 +616,10 @@ func (s *remoteSender) commit(ctx context.Context, key fanoutCursorKey, child to
 	defer cancel()
 	waitCtx, stopWaits := context.WithCancel(shipCtx)
 	defer stopWaits()
-	sh := &slabShip{s: s, cur: cur, key: key, cancel: cancel, stopWaits: stopWaits, sendCtx: shipCtx,
-		link: child, linkVersion: childVersion, slabStart: slabStart}
+	sh := &slabShip{
+		s: s, cur: cur, key: key, cancel: cancel, stopWaits: stopWaits, sendCtx: shipCtx,
+		link: child, linkVersion: childVersion, slabStart: slabStart,
+	}
 	if parent, err := s.r.store.GetTopic(ctx, key.parent); err == nil {
 		sh.retentionMs = parent.RetentionMs
 	}

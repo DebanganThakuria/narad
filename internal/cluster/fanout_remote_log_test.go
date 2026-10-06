@@ -69,8 +69,10 @@ func TestRemoteChildAuthFailedIsLoggedOnceAsAnError(t *testing.T) {
 }
 
 func TestRemoteChildStallIsLoggedOncePerStateNotPerRetry(t *testing.T) {
-	rg := newRemoteRig(t, remoteRigOpts{grant: []string{"other"},
-		rigSourceOpts: rigSourceOpts{stallRetry: 200 * time.Millisecond}})
+	rg := newRemoteRig(t, remoteRigOpts{
+		grant:         []string{"other"},
+		rigSourceOpts: rigSourceOpts{stallRetry: 200 * time.Millisecond},
+	})
 	logs := &recordedLog{}
 	rg.src.runner.logger = slog.New(logs)
 	rg.src.start()

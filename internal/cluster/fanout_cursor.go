@@ -709,8 +709,10 @@ func (r *FanoutRunner) cursorReadError(key fanoutCursorKey, err error) {
 // offsets from and to. A remote child's are lost for the other cluster,
 // which has no other copy: that is logged at error level with the remote.
 func (r *FanoutRunner) recordDropped(ctx context.Context, key fanoutCursorKey, dropped, from, to int64) {
-	attrs := []any{"parent", key.parent, "partition", key.partition, "child", key.child,
-		"dropped", dropped, "from_offset", from, "to_offset", to}
+	attrs := []any{
+		"parent", key.parent, "partition", key.partition, "child", key.child,
+		"dropped", dropped, "from_offset", from, "to_offset", to,
+	}
 	if key.remote {
 		if r.store != nil {
 			if stub, err := r.store.GetTopic(ctx, key.child); err == nil && stub.Remote != nil {
