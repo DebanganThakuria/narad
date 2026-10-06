@@ -102,7 +102,7 @@ A cluster with [remote children](../reference/glossary.md#remote-child) adds the
 | Alert | Expression | What it means |
 |---|---|---|
 | Link stalled | `max by (parent, child, state) (narad_fanout_remote_state{state=~NEEDS_FIX}) == 1`, with `NEEDS_FIX` below | The link holds in a state only a person fixes. Page at once ([Troubleshooting](troubleshooting.md#remote-link-stalled)). |
-| Link not running | `max by (parent, child, state) (narad_fanout_remote_state{state!~HEALTHY}) == 1`, held for 5 minutes (`for: 5m`) | Any other state (`unavailable`, `throttled`, `tls_failed`, `target_missing`, `no_batch_produce`, `redirect_refused`, `unknown`) that has not cleared on its own. |
+| Link not running | `max by (parent, child, state) (narad_fanout_remote_state{state!~HEALTHY}) == 1`, held for 5 minutes (`for: 5m`) | Any other state (`unavailable`, `throttled`, `unknown`) that has not cleared on its own. |
 | Recovery point | `max by (parent, child) (narad_fanout_remote_lag_seconds) > <objective>` | The oldest record not yet on the remote is older than your recovery point objective. |
 | Headroom | `min by (parent, child) (narad_fanout_remote_retention_headroom_seconds) < 4 * 3600` (warn below 12 hours) | The oldest unshipped record ages out of the parent within 4 hours: drop-behind comes next ([Troubleshooting](troubleshooting.md#remote-headroom-low)). |
 | No progress | `time() - narad_fanout_remote_last_success_timestamp_seconds > 300` while `narad_fanout_lag_messages` for the link is above 0 | Nothing reached the remote for 5 minutes although records wait. |
@@ -121,7 +121,7 @@ A cluster with [remote children](../reference/glossary.md#remote-child) adds the
 The two state selectors, as PromQL regular expressions:
 
 ```text
-NEEDS_FIX = "remote_missing|credential_unreadable|node_insecure|destination_refused|auth_failed|forbidden|target_replaced|target_has_remote_children|rejected_record|record_too_large"
+NEEDS_FIX = "remote_missing|credential_unreadable|node_insecure|destination_refused|auth_failed|forbidden|target_replaced|target_has_remote_children|target_missing|no_batch_produce|redirect_refused|tls_failed|rejected_record|record_too_large"
 HEALTHY   = "running|paused"
 ```
 

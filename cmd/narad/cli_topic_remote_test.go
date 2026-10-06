@@ -237,3 +237,45 @@ func TestCLILsShowsWhereAStubSends(t *testing.T) {
 		t.Fatalf("ls output %q, want the stub's remote", out)
 	}
 }
+
+// `topic wait` exits 2 at once on every link state the docs say only a
+// fix clears (one shared list) and on paused, never on the states that
+// clear on their own.
+func TestCLIWaitExitsAtOnceOnEveryStateThatNeedsAFix(t *testing.T) {
+	var mu sync.Mutex
+	state := ""
+	_, url := newFakeAPI(t, func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		body, _ := json.Marshal(map[string]any{"children": []map[string]any{{
+			"name": "orders-to-b", "lag_messages": 4, "lag_complete": true, "state": state,
+		}}})
+		_, _ = w.Write(body)
+	})
+	exited := -1
+	cliExit = func(code int) { exited = code }
+	t.Cleanup(func() { cliExit = os.Exit })
+	for _, c := range []struct {
+		state   string
+		stalled bool
+	}{
+		{"tls_failed", true}, {"target_missing", true}, {"no_batch_produce", true}, {"redirect_refused", true},
+		{"auth_failed", true}, {"rejected_record", true}, {"paused", true},
+		{"unavailable", false}, {"throttled", false}, {"unknown", false}, {"running", false},
+	} {
+		mu.Lock()
+		state = c.state
+		mu.Unlock()
+		exited = -1
+		var err error
+		_ = captureStdout(t, func() {
+			err = route([]string{"topic", "wait", "orders", "orders-to-b", "--lag-zero", "--timeout", "200ms", "--interval", "30ms", "--server", url})
+		})
+		if c.stalled && exited != exitStalled {
+			t.Errorf("state %s: exit %d (%v), want %d at once", c.state, exited, err, exitStalled)
+		}
+		if !c.stalled && (exited != -1 || err == nil || !strings.Contains(err.Error(), "timed out")) {
+			t.Errorf("state %s: exit %d (%v), want to keep waiting until the timeout", c.state, exited, err)
+		}
+	}
+}

@@ -170,6 +170,22 @@ const (
 	RemoteClassEncoding = "encoding"
 )
 
+// RemoteStateNeedsFix reports a link state that only a person's fix
+// clears (the link-states table's "needs a fix" rows). unavailable,
+// throttled and unknown clear on their own; paused is a decision, not a
+// fault. The CLI's `topic wait` and the monitoring guide's NEEDS_FIX
+// alert use this one list.
+func RemoteStateNeedsFix(state string) bool {
+	switch state {
+	case RemoteStateRemoteMissing, RemoteStateCredentialUnreadable, RemoteStateNodeInsecure,
+		RemoteStateDestinationRefused, RemoteStateTargetHasRemoteChildren, RemoteStateTargetReplaced,
+		RemoteStateAuthFailed, RemoteStateForbidden, RemoteStateTargetMissing, RemoteStateNoBatchProduce,
+		RemoteStateRedirectRefused, RemoteStateTLSFailed, RemoteStateRejectedRecord, RemoteStateRecordTooLarge:
+		return true
+	}
+	return false
+}
+
 // RemoteStateSeverity lists the link states worst first; a link shows
 // its worst partition.
 var RemoteStateSeverity = []string{

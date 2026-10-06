@@ -142,7 +142,7 @@ Flags of `narad topic wait` (unreleased):
 | `--timeout <duration>` | `30m` | Give up after this long. |
 | `--interval <duration>` | `2s` | Poll interval. |
 
-Give exactly one of `--lag-zero` and `--source-drained`. It exits `0` when the condition holds, `1` on `--timeout`, and `2` at once when the link is stalled in a state that needs a fix, printing the state and the stuck record.
+Give exactly one of `--lag-zero` and `--source-drained`. It exits `0` when the condition holds, `1` on `--timeout`, and `2` at once when the link is stalled in a state that needs a fix (every [link state](remote-children.md#link-states) but `unavailable`, `throttled`, `unknown` and `running`; `paused` included), printing the state and the stuck record.
 
 ## narad pub {#pub}
 

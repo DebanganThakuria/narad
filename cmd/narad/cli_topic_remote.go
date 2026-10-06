@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 )
 
 // exitStalled is `narad topic wait`'s exit status for a link stuck in a
@@ -158,12 +160,10 @@ type childView struct {
 	} `json:"blocked_at"`
 }
 
-// stalledStates are the link states that need a fix, not time.
-var stalledStates = map[string]bool{
-	"remote_missing": true, "credential_unreadable": true, "node_insecure": true, "destination_refused": true,
-	"target_has_remote_children": true, "target_replaced": true, "auth_failed": true, "forbidden": true,
-	"target_missing": true, "no_batch_produce": true, "redirect_refused": true, "rejected_record": true,
-	"record_too_large": true, "paused": true,
+// stalled reports a link state `topic wait` stops on: one that needs a
+// fix, not time (topic.RemoteStateNeedsFix), or paused.
+func stalled(state string) bool {
+	return topic.RemoteStateNeedsFix(state) || state == topic.RemoteStatePaused
 }
 
 func topicWaitCmd() *cobra.Command {
@@ -191,7 +191,7 @@ record).`,
 				if err != nil {
 					return err
 				}
-				if stalledStates[v.State] {
+				if stalled(v.State) {
 					fmt.Printf("%s is stalled: state %s", args[1], v.State)
 					if v.BlockedAt != nil {
 						fmt.Printf(", blocked at partition %d offset %d (%s)", v.BlockedAt.Partition, v.BlockedAt.Offset, v.BlockedAt.State)
