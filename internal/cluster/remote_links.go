@@ -309,14 +309,7 @@ func (l *RemoteLinks) attach(ctx context.Context, req nodewire.RemoteWriteReques
 			fmt.Sprintf("this cluster already links to that remote topic through %q", linked)), topic.RemoteStateTargetHasRemoteChildren)
 	}
 
-	checkReq := remote.CheckRequest{
-		Remote: b.Remote, Topic: b.RemoteTopic, Source: b.Parent, SourceID: parent.ID,
-		CredentialVersion: rec.CredentialVersion,
-	}
-	if history, err := schema.PersistedHistory(ctx, l.d.Store, b.Parent); err == nil && len(history) > 0 {
-		checkReq.SourceSchema = history[len(history)-1].Raw
-	}
-	reports, err := l.d.Plane.Checks.CheckEverywhere(ctx, checkReq)
+	reports, err := l.d.Plane.Checks.CheckEverywhere(ctx, l.checkRequest(ctx, b.Remote, b.RemoteTopic, parent, rec.CredentialVersion))
 	if err != nil {
 		return refuse(checkErrorResponse(err, reports), "check")
 	}
@@ -367,6 +360,21 @@ func (l *RemoteLinks) attach(ctx context.Context, req nodewire.RemoteWriteReques
 		slog.String("remote", b.Remote), slog.String("remote_topic", b.RemoteTopic),
 		slog.String("from", b.From), slog.Int("lanes", b.Lanes), slog.Int64("delay_ms", b.DelayMs))
 	return jsonResponse(http.StatusCreated, stubWithWarnings{Topic: stub, Warnings: warnings})
+}
+
+// checkRequest is the check request of an attach and of a resume, which
+// runs the attach checks again: the parent's ID for the target-is-source
+// check and its current schema for the schema check, so both run on
+// both paths.
+func (l *RemoteLinks) checkRequest(ctx context.Context, remoteName, remoteTopic string, parent topic.Topic, credentialVersion uint64) remote.CheckRequest {
+	req := remote.CheckRequest{
+		Remote: remoteName, Topic: remoteTopic, Source: parent.Name, SourceID: parent.ID,
+		CredentialVersion: credentialVersion,
+	}
+	if history, err := schema.PersistedHistory(ctx, l.d.Store, parent.Name); err == nil && len(history) > 0 {
+		req.SourceSchema = history[len(history)-1].Raw
+	}
+	return req
 }
 
 // stubWithWarnings is the attach answer: the stub record, plus any
@@ -490,9 +498,11 @@ func (l *RemoteLinks) setState(ctx context.Context, req nodewire.RemoteWriteRequ
 			l.audit(event, req, target, "refused", topic.RemoteStateRemoteMissing)
 			return errorResponse(http.StatusConflict, "remote "+strconv.Quote(stub.Remote.Name)+" does not exist; create it again first")
 		}
-		reports, err := l.d.Plane.Checks.CheckEverywhere(ctx, remote.CheckRequest{
-			Remote: stub.Remote.Name, Topic: stub.Remote.Topic, Source: b.Parent, CredentialVersion: rec.CredentialVersion,
-		})
+		parent, err := l.d.Store.GetTopic(ctx, b.Parent)
+		if err != nil {
+			return errorResponse(http.StatusNotFound, "parent topic not found")
+		}
+		reports, err := l.d.Plane.Checks.CheckEverywhere(ctx, l.checkRequest(ctx, stub.Remote.Name, stub.Remote.Topic, parent, rec.CredentialVersion))
 		if err == nil {
 			var targetID string
 			if targetID, err = remote.Verdict(reports, rec.CredentialVersion); err == nil {

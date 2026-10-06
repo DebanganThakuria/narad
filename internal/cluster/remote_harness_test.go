@@ -471,17 +471,26 @@ type fakeCheckRunner struct {
 	posture  error
 	releases error
 	calls    int
+	// last is the most recent check request.
+	last remote.CheckRequest
 }
 
 func (f *fakeCheckRunner) CheckEverywhere(_ context.Context, req remote.CheckRequest) ([]remote.NodeReport, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	f.last = req
 	r := remote.NodeReport{Node: "node-self", Result: "pass", CredentialVersion: req.CredentialVersion, TargetID: f.targetID, TargetServesIDs: f.targetID != "", Warnings: []string{}}
 	if f.fail != "" {
 		r.Result, r.Class = "fail", f.fail
 	}
 	return []remote.NodeReport{r}, nil
+}
+
+func (f *fakeCheckRunner) lastRequest() remote.CheckRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.last
 }
 
 func (f *fakeCheckRunner) RequirePosture(context.Context) error {
