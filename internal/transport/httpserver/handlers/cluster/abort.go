@@ -78,8 +78,10 @@ func AbortMove(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusConflict, fmt.Sprintf("no move is in flight for %s/%d", topicName, partition))
 			return
 		}
+		// The answer names the current target and never echoes the
+		// caller's target back.
 		if want := r.URL.Query().Get("target"); want != "" && want != a.TargetID {
-			s.WriteError(w, http.StatusConflict, fmt.Sprintf("the move of %s/%d now targets %s, not %s; nothing was aborted", topicName, partition, a.TargetID, want))
+			s.WriteError(w, http.StatusConflict, fmt.Sprintf("the move of %s/%d now targets %s, not the node named in target; nothing was aborted", topicName, partition, a.TargetID))
 			return
 		}
 
