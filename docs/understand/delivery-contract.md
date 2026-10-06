@@ -40,6 +40,7 @@ These events deliver a message again:
 - **A node commits accepted messages again after a crash.** Its dispatcher keeps in memory which messages above its checkpoint are already committed, so a crash commits those again at new offsets. After a power loss the checkpoint can also be up to 250 ms old (from v3.1.0; v3.0.1 syncs it on every store).
 - **A partition's owner crashes after storing a commit but before answering it.** The node that accepted the messages cannot tell that the commit landed, so it sends them again: to the same partition once the owner is back, or, after 3 s of failures, to a live sibling partition. Each message is then stored twice, and each copy is delivered and leased on its own, so two consumers can hold and ack the two copies at the same time.
 - **A partition moves.** Leases still out when a [rebalance or decommission](rebalance.md) hands the partition to a new owner are delivered again by that owner.
+- **A remote child resends a request** (unreleased). When a request to the remote times out or fails without an answer, the cursor sends its records again, so the copy on the remote can hold a record twice, each delivered on its own there ([What a remote child promises](../build/remote-children.md#promises)).
 
 A graceful stop writes every ack to disk first, so a rolling restart delivers no acked message again. It does forget the leases of the stopping node, as a crash does.
 
@@ -67,6 +68,8 @@ Two tools protect message data against a lost volume, and [Back up and replicate
 
 - A [replica child](../reference/glossary.md#replica-child) is an asynchronous full copy of a topic, placed on nodes other than the parent's partitions when it is created. It trails the parent by the fan-out lag.
 - Volume snapshots give each node a restore point.
+
+**Unreleased:** a [remote child](../reference/glossary.md#remote-child) also keeps an asynchronous copy of a topic on another Narad cluster, which survives the loss of this whole cluster or its region. It trails the parent by the link's lag ([Set up disaster recovery](../operate/playbooks/disaster-recovery.md)).
 
 Run Narad on storage you trust, such as cloud persistent volumes or RAID.
 
@@ -141,6 +144,7 @@ Each row is one event: what clients see while it lasts, what it can lose, and wh
 | A move's source dies mid-move | As for a node that is down | After 2 minutes the copy is promoted; messages acked in the source's last moments may come back | What the source committed after the destination's last read, if it never returns. On v3.0.1, records committed after the promote could also stay undelivered (fixed in v3.1.0) | Keep any copy the returning source quarantines; see [Scale out and in](../operate/scaling.md) |
 | A rolling restart | Requests move to the other pods; Raft leadership moves in about 150 ms | Messages leased on the restarting node come back; acked ones do not | Nothing | [Roll one pod at a time](../operate/upgrade.md#upgrade) |
 | An unacked message outlives retention | Nothing | It is never delivered; the frontier skips it, and the owner logs it | That message, by policy | [Alert on lag](../operate/monitoring.md#alerts), and keep retention above your longest consumer outage |
+| A remote child's target is unreachable (unreleased) | Nothing | Nothing here; the copy on the remote falls behind by the outage, then catches up, with some records twice | Only records that age out of the parent before they ship, counted in `narad_fanout_child_dropped_messages` | [Alert on headroom](../operate/monitoring.md#remote-alerts), and keep the parent's retention above the longest outage you accept |
 
 Every status code, and whether to retry it, is in [Status codes and errors](../reference/status-codes.md).
 

@@ -120,6 +120,8 @@ Every command now talks to `staging`, until you select another context or overri
 3. the selected context;
 4. `http://127.0.0.1:7942` with no credentials.
 
+**Unreleased:** `--ctx <name>` picks a context for one command, without selecting it: `narad --ctx staging topic ls`. With `--ctx`, the environment variables are not read at all (flags, then that context, then the default), and the CLI refuses `--ctx` while `NARAD_ADDR`, `NARAD_USER` or `NARAD_PASS` is set, so a command meant for one cluster never reaches another or carries its password there. Scripts that drive two clusters, such as the [remote children playbooks](../operate/playbooks/offload.md), use it on every command.
+
 !!! warning "Contexts store passwords in clear text"
     Contexts live in `narad/contexts.json` in your user config directory (`~/.config` on Linux, `~/Library/Application Support` on macOS), or in `$NARAD_CONFIG_DIR` when it is set. The file is readable only by you, but anyone who gets a copy of it, from a backup or a synced dotfiles folder, has your passwords. Treat it like an SSH private key, or leave the password out and set `NARAD_PASS` instead.
 

@@ -20,7 +20,7 @@ A change that has to break the contract goes to a new `/v2` prefix, and both ver
 
 ## Node-to-node protocol {#node-protocol}
 
-Nodes talk to each other over a versioned protocol under the same rule. Operation codes are only ever added. New fields are optional and go at the end of a message. A node that does not know a new field answers with a clean `400`, and the sender retries in the older shape. That is what lets a cluster run two releases side by side during a rolling upgrade. Release-specific conditions, such as the config keys an older binary refuses, are in [Upgrade Narad](../operate/upgrade.md#version-notes).
+Nodes talk to each other over a versioned protocol under the same rule. Operation codes are only ever added. New fields are optional and go at the end of a message. A node that does not know a new field answers with a clean `400`, and the sender retries in the older shape. That is what lets a cluster run two releases side by side during a rolling upgrade. The two operations remote replication adds (unreleased) have no older shape; they are refused with `412` until every member runs the release that knows them. Release-specific conditions, such as the config keys an older binary refuses, are in [Upgrade Narad](../operate/upgrade.md#version-notes).
 
 ## Which release these docs describe {#docs-version}
 

@@ -95,7 +95,8 @@ Every topic change is checked twice. The node that receives the request checks i
 These routes need the `admin` grant, reads included:
 
 - every `/v1/users` route, except a user changing their own password;
-- every `/v1/cluster` route: members and moves (they show node addresses and topic names) and decommission.
+- every `/v1/cluster` route: members and moves (they show node addresses and topic names) and decommission;
+- (unreleased) every `/v1/remotes` route and the re-encrypt, and a [remote child](glossary.md#remote-child)'s attach, pause, resume and skip. These also need security on: with security off they answer `403` (`remotes require security`) instead of letting every request through. A remote child lends the remote's credential, whose grants on the other cluster are the replicator user's, not the caller's, so owning the parent is not enough to attach one.
 
 ## No escalation {#no-escalation}
 
@@ -120,7 +121,10 @@ A request that breaks one of these gets `403`. Grant and password updates change
 | `PATCH /v1/topics/{topic}`, `DELETE /v1/topics/{topic}` | ownership |
 | `POST /v1/topics/{parent}/children` | ownership of the parent and the child |
 | `GET /v1/topics/{parent}/children` | any grant on the parent, or ownership |
-| `DELETE /v1/topics/{parent}/children/{child}` | ownership of the parent or the child |
+| `DELETE /v1/topics/{parent}/children/{child}` | ownership of the parent or the child; for a remote child (unreleased), ownership of the parent, with security on |
+| `POST /v1/topics/{parent}/children` with `remote`, `POST .../children/{child}/pause`, `/resume`, `/skip` (unreleased) | `admin`, with security on |
+| `DELETE /v1/topics/{topic}` of a remote child's stub (unreleased) | ownership of its parent, with security on; the stub has no owner |
+| every `/v1/remotes` route, `POST /v1/cluster/reencrypt-remotes` (unreleased) | `admin`, with security on |
 | `POST /v1/topics/{topic}/produce`, `.../produce/batch` | `produce` on the topic |
 | `GET /v1/topics/{topic}/consume`, `POST /v1/topics/{topic}/ack` | `consume` on the topic |
 | `PUT /v1/users/{username}/password` | the user themself, with `current_password` |

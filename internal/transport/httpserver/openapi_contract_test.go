@@ -569,7 +569,8 @@ func (a *statusAnalysis) reachableCodes(t *testing.T, roots []funcRef) map[int]b
 // http.StatusInternalServerError, case http.StatusOK:) is a test, not an
 // answer, and does not count. A method call resolves when the type of
 // its receiver is known: from fn's receiver and parameters, a var
-// declaration, a composite literal, or a struct field of a known type.
+// declaration, a composite literal, the declared result of a tree
+// function it was assigned from, or a struct field of a known type.
 // Calls through interfaces do not resolve; the codes they carry are
 // constants at the call sites that choose them, which are scanned.
 func (a *statusAnalysis) scanFunc(t *testing.T, fn *contractFunc, codes map[int]bool) []funcRef {
@@ -640,6 +641,18 @@ func (a *statusAnalysis) scanFunc(t *testing.T, fn *contractFunc, codes map[int]
 				}
 			}
 		case *ast.AssignStmt:
+			// c := begin(...): a variable takes the declared result
+			// type of the tree function that made it.
+			if len(n.Rhs) == 1 {
+				for i, typ := range a.resultTypes(fn, n.Rhs[0]) {
+					if i >= len(n.Lhs) {
+						break
+					}
+					if id, ok := n.Lhs[i].(*ast.Ident); ok && typ.recv != "" {
+						vars[id.Name] = typ
+					}
+				}
+			}
 			for i, rhs := range n.Rhs {
 				if i >= len(n.Lhs) {
 					break
@@ -680,6 +693,46 @@ func (a *statusAnalysis) scanFunc(t *testing.T, fn *contractFunc, codes map[int]
 		return true
 	})
 	return calls
+}
+
+// resultTypes is the tree type of each result of the function call e
+// makes, when e calls a function of the tree (f(...) or pkg.F(...)); a
+// result whose type is not a tree type has a zero funcRef.
+func (a *statusAnalysis) resultTypes(fn *contractFunc, e ast.Expr) []funcRef {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	var ref funcRef
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		ref = funcRef{dir: fn.dir, name: fun.Name}
+	case *ast.SelectorExpr:
+		x, ok := fun.X.(*ast.Ident)
+		if !ok {
+			return nil
+		}
+		path, isPkg := fn.imports[x.Name]
+		if !isPkg || !strings.HasPrefix(path, contractTree) {
+			return nil
+		}
+		ref = funcRef{dir: dirOf(path), name: fun.Sel.Name}
+	default:
+		return nil
+	}
+	callees := a.lookup(ref)
+	if len(callees) != 1 || callees[0].decl.Type.Results == nil {
+		return nil
+	}
+	callee := callees[0]
+	var out []funcRef
+	for _, field := range callee.decl.Type.Results.List {
+		typ, _ := a.typeRef(callee.dir, callee.imports, field.Type)
+		for range max(len(field.Names), 1) {
+			out = append(out, typ)
+		}
+	}
+	return out
 }
 
 // typeRef names the tree type typ denotes (T, *T, pkg.T or *pkg.T), as

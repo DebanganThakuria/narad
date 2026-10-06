@@ -74,6 +74,7 @@ After the four layers are applied, the whole configuration is checked. Any probl
 | `http.max_connections`<br>`NARAD_HTTP_MAX_CONNECTIONS` | `4096` | Open client connections per node; more wait in the listen backlog. `0` removes the cap. |
 | `http.max_consume_in_flight_per_identity`<br>`NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY` | `1024` | Concurrent consumes per user, or per client IP with security off, per node; more get `429`. A batch consume counts as its `max`, clamped to the cap. `0` removes the cap. |
 | `http.max_produce_in_flight_per_identity` (v3.1.0)<br>`NARAD_HTTP_MAX_PRODUCE_IN_FLIGHT_PER_IDENTITY` | `0` (off) | Concurrent produces per user, or per client IP with security off, per node; more get `429`. A batch produce counts as its message count, clamped to the cap, and as one while its body is read. v3.0.1 refuses to start with the file key. |
+| `http.max_batch_body_bytes_in_flight` (unreleased)<br>`NARAD_HTTP_MAX_BATCH_BODY_BYTES_IN_FLIGHT` | `268435456` (256 MiB) | Batch produce bodies over 1 MiB being read and decoded at once on this node. A body takes its share a megabyte at a time as it grows; one that cannot is answered `503` with `Retry-After: 1` and counted in `narad_http_batch_body_budget_rejections_total`. Bodies of 1 MiB or less never touch it. `0` removes the cap. v3.1.0 refuses to start with the file key. |
 | `http.metrics_addr`<br>`NARAD_HTTP_METRICS_ADDR` | empty | When set, `/metrics`, `/healthz` and `/readyz` are served on this address without credentials, and `/metrics` leaves the API port. Keep it inside the cluster. May equal `http.pprof_addr`. |
 | `http.metrics_unauthenticated`<br>`NARAD_HTTP_METRICS_UNAUTHENTICATED` | `false` | Serve `/metrics` on the API port without credentials. Its series name every topic. Ignored when `http.metrics_addr` is set. |
 | `http.pprof_addr`<br>`NARAD_HTTP_PPROF_ADDR` | empty | Serves Go's `net/http/pprof` on this address, without credentials. Keep it inside the cluster. |
@@ -166,6 +167,22 @@ What each topic field does is in [Create a topic](http-api.md#create-topic).
 
 Larger batches mean fewer syncs on the child and more delay for each record. How the copy works is in [Fan-out engine](../understand/fanout-engine.md).
 
+## Remotes {#remotes}
+
+**Unreleased:** in master, not in v3.1.0.
+
+Where this node's [remotes](glossary.md#remote) may point, and how much memory remote children may hold. Admins manage remotes through the API; these are the bounds an admin cannot widen through it, so widening one is a config change and a restart. Setting any of them to other than its default with security off stops the node at startup (`remotes settings require security.enabled`).
+
+| Setting | Default | Notes |
+|---|---|---|
+| `remotes.allowed_hosts`<br>`NARAD_REMOTES_ALLOWED_HOSTS` | empty | Exact host names and `*.suffix` patterns a remote's URL may name (comma-separated in the environment), matched on the canonical host. An entry that does not canonicalize stops the node at startup. Empty admits any host the address guard allows: a node that holds remotes then logs a warning at startup and exports `narad_remotes_allowlist_configured` 0. Set it in production ([operating condition 4](../operate/remotes.md#operating-conditions)). With it set, remote tests run on every node and report connect times. |
+| `remotes.allowed_ports`<br>`NARAD_REMOTES_ALLOWED_PORTS` | `[443]` | Ports a remote's URL may name and a dial may reach. At least one, each 1 to 65535. |
+| `remotes.allow_addresses`<br>`NARAD_REMOTES_ALLOW_ADDRESSES` | empty | CIDRs the address guard lets through although they are loopback, link-local or metadata addresses, such as `127.0.0.0/8` for a test rig. Logged at startup when set. Leave it empty in production. |
+| `remotes.max_held_bytes`<br>`NARAD_REMOTES_MAX_HELD_BYTES` | `268435456` (256 MiB) | Records remote children may hold in memory on this node while they wait out a failure; past it, a cursor reads its records again later. At least 0. |
+| `remotes.api_hop_encrypted`<br>`NARAD_REMOTES_API_HOP_ENCRYPTED` | `false` | Your attestation that the hop from your ingress to this pod is encrypted (a service mesh with mutual TLS, or an ingress that re-encrypts to the pod). A remote create or password change carries the password in its body, so this node answers those `412` without it. Logged at startup when set. |
+
+What each bound guards is in [Remote replication](../understand/remote-children.md#transport).
+
 ## Logging and security {#logging-and-security}
 
 | Setting | Default | Notes |
@@ -174,19 +191,20 @@ Larger batches mean fewer syncs on the child and more delay for each record. How
 | `log.format`<br>`NARAD_LOG_FORMAT` | `json` | `json` or `text`. |
 | `security.enabled`<br>`NARAD_SECURITY_ENABLED` | `true` | HTTP Basic authentication and grants on the API, and the shared secret between nodes. |
 | `NARAD_ADMIN_PASSWORD`<br>environment only | generated | The root admin's password, used when a secured cluster first starts with no users. Unset, the node that creates the root admin generates a password and writes it to `admin-password` in its data directory, mode 0600, and never logs it (from v3.1.0; it used to be logged once). Set on a cluster that already has users, it changes nothing, and a node warns at startup when it is not root's password (from v3.1.0). See [Manage the root user](../operate/users.md#root-admin). |
-| `NARAD_CLUSTER_SECRET`<br>environment only | none | The shared secret every node proves to the others on the node-to-node port. Required when security is on and `cluster.peers` is set. A secured node with no peers and none set generates a random one for the life of the process (from v3.1.0), so no other process can use its node-to-node port; set the same secret on every node, the first one included, before adding peers. Adding peers also needs the first node to have started on a `cluster.addr` the others can reach, with Raft TLS on every node or `security.allow_plaintext_raft`: a node whose Raft first started on a loopback address can never take peers ([Raft TLS](../understand/networking-and-security.md#raft-tls)). |
+| `NARAD_CLUSTER_SECRET`<br>environment only | none | The shared secret every node proves to the others on the node-to-node port. Required when security is on and `cluster.peers` is set. A secured node with no peers and none set generates a random one for the life of the process (from v3.1.0), so no other process can use its node-to-node port; set the same secret on every node, the first one included, before adding peers. Adding peers also needs the first node to have started on a `cluster.addr` the others can reach, with Raft TLS on every node or `security.allow_plaintext_raft`: a node whose Raft first started on a loopback address can never take peers ([Raft TLS](../understand/networking-and-security.md#raft-tls)). **Unreleased:** it also derives the key that seals [remote](glossary.md#remote) passwords, so sealing one needs a secret that decodes, as standard base64 or hex, to at least 32 bytes (`openssl rand -base64 32`), and a node whose metadata holds a remote refuses to start without one. |
+| `NARAD_CLUSTER_SECRET_PREVIOUS` (unreleased)<br>environment only | unset | Set only while you rotate the cluster secret: it opens remote passwords sealed under the previous secret until `narad remote reencrypt` has run. Cluster RPC never accepts it. Unset it afterwards. See [Rotate the cluster secret](../operate/remotes.md#rotate-cluster-secret). |
 | `security.cluster_tls_cert_file`<br>`NARAD_CLUSTER_TLS_CERT_FILE`<br>`security.cluster_tls_key_file`<br>`NARAD_CLUSTER_TLS_KEY_FILE`<br>`security.cluster_tls_ca_file`<br>`NARAD_CLUSTER_TLS_CA_FILE` | empty | Mutual TLS for Raft: all three or none. Read once at startup; see [Raft TLS certificates](../operate/raft-tls.md). |
 | `security.allow_plaintext_raft`<br>`NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT` | `false` | With security on, a node refuses to start without the Raft TLS files unless this says the Raft port is fenced some other way, such as by a NetworkPolicy. A node with no `cluster.peers` whose `cluster.addr` is a loopback address needs neither (from v3.1.0; this used to apply only with `cluster.peers` set). |
 | `security.allow_insecure_cluster`<br>`NARAD_SECURITY_ALLOW_INSECURE_CLUSTER` | `false` | Required to run several nodes with security off, which leaves the API, the node-to-node port and Raft open. One node needs nothing. A node with security off and no cluster secret, alone or not, serves its node-to-node port unauthenticated and logs a warning saying so (from v3.1.0). |
 | `security.allow_legacy_cluster_auth`<br>`NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH` | `false` | Also accept the older node-to-node authentication, for a rolling upgrade from a release that used it. Turn it off once every node has rolled. See [Upgrade Narad](../operate/upgrade.md#version-notes). |
 
-The two secrets can only be set in the environment, so config files and ConfigMaps never hold them. Why each setting exists is in [Networking and security](../understand/networking-and-security.md), and what to set before going live is in the [Production checklist](../operate/production-checklist.md).
+The secrets can only be set in the environment, so config files and ConfigMaps never hold them. Why each setting exists is in [Networking and security](../understand/networking-and-security.md), and what to set before going live is in the [Production checklist](../operate/production-checklist.md).
 
 ## Config file {#config-file}
 
 The file named by `--config` is JSON. It is strict:
 
-- A key the loader does not know, at any level, stops the node from starting. That includes a key from a newer release, which matters when rolling back: remove `storage.consumer_offset_commit_interval_ms`, `storage.ingress_wal_prealloc` and `http.max_produce_in_flight_per_identity` from the file before a node runs v3.0.1 or earlier ([Upgrade Narad](../operate/upgrade.md#roll-back)).
+- A key the loader does not know, at any level, stops the node from starting. That includes a key from a newer release, which matters when rolling back: remove `storage.consumer_offset_commit_interval_ms`, `storage.ingress_wal_prealloc` and `http.max_produce_in_flight_per_identity` from the file before a node runs v3.0.1 or earlier ([Upgrade Narad](../operate/upgrade.md#roll-back)). v3.1.0 likewise refuses `http.max_batch_body_bytes_in_flight` and the `remotes` block (unreleased).
 - Durations are strings with a unit, such as `"10s"` or `"500ms"`. A bare number is refused.
 - JSON has no comments.
 

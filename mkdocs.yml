@@ -175,10 +175,7 @@ nav:
       - Topic features:
           - Fan out and delay messages: build/fanout-and-delay.md
           - Enforce schemas on a topic: build/schemas.md
-          # RESERVED SLOT: remote children (inter-cluster copy).
-          # The Build guide for this feature lands here as
-          # build/remote-children.md when its branch merges.
-          # Do not create the page, a stub or a link before then.
+          - Replicate a topic to another cluster: build/remote-children.md
       - Clients:
           - Go SDK: build/go-sdk.md
           - Narad CLI: build/cli.md
@@ -188,14 +185,17 @@ nav:
           - Production checklist: operate/production-checklist.md
           - Raft TLS certificates: operate/raft-tls.md
           - Manage users and grants: operate/users.md
+          - Manage remotes: operate/remotes.md
       - Run:
           - Monitor and alert: operate/monitoring.md
           - Scale out and in: operate/scaling.md
           - Back up and replicate topics: operate/backups.md
           - Upgrade Narad: operate/upgrade.md
-      # RESERVED SLOT: a "Playbooks" group for remote children
-      # (inter-cluster copy) lands here, pages under operate/playbooks/,
-      # when that branch merges. Do not create it before then.
+      - Playbooks:
+          - Move a topic to another cluster: operate/playbooks/offload.md
+          - Set up disaster recovery: operate/playbooks/disaster-recovery.md
+          - Fail over to the recovery cluster: operate/playbooks/failover.md
+          - Fail back to the original cluster: operate/playbooks/failback.md
       - Troubleshooting: operate/troubleshooting.md
   - Understand:
       - Overview:
@@ -207,6 +207,7 @@ nav:
           - Storage engine: understand/storage-engine.md
           - Consume path: understand/consume-path.md
           - Fan-out engine: understand/fanout-engine.md
+          - Remote replication: understand/remote-children.md
       - Cluster:
           - Metastore and Raft: understand/metastore-and-raft.md
           - Networking and security: understand/networking-and-security.md
@@ -218,6 +219,7 @@ nav:
           - Status codes and errors: reference/status-codes.md
           - Access model and grants: reference/access-model.md
           - Schema validation rules: reference/schema-rules.md
+          - Remotes and remote children: reference/remote-children.md
           - API stability and versions: reference/api-stability.md
       - Server and CLI:
           - Configuration reference: reference/configuration.md

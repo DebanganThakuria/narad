@@ -44,7 +44,7 @@ Gauges that describe partitions (lag, sizes, segments) are refreshed by a poller
 | `narad_bytes_produced_total`<br>counter; labels `topic`, `partition` | Payload bytes appended. |
 | `narad_messages_consumed_total`<br>counter; labels `topic`, `partition` | Messages handed to queue consumers. Replays are not counted. A message delivered again is counted again. |
 | `narad_bytes_consumed_total`<br>counter; labels `topic`, `partition` | Payload bytes handed to queue consumers. |
-| `narad_produce_rejections_total`<br>counter; labels `topic`, `reason` | Produces refused before they were stored: `schema` (the schema refused the payload) or `delayed_child` (a produce to a delay child). |
+| `narad_produce_rejections_total`<br>counter; labels `topic`, `reason` | Produces refused before they were stored: `schema` (the schema refused the payload), `delayed_child` (a produce to a delay child) or (unreleased) `remote_child` (a produce to a remote child's stub). |
 | `narad_consume_wait_seconds`<br>histogram; labels `topic`, `outcome` | Time consumes spent waiting, by `outcome`: `hit`, `timeout`, `cancelled` or `no_wait`. |
 | `narad_consume_empty_total`<br>counter; labels `topic` | Consumes that returned no message: idle consumers polling. |
 | `narad_http_requests_total`<br>counter; labels `route`, `method`, `status` | HTTP requests. `route` is the matched route pattern, such as `GET /v1/topics/{topic}`; a request that matches no route is `unmatched`. |
@@ -52,8 +52,9 @@ Gauges that describe partitions (lag, sizes, segments) are refreshed by a poller
 | `narad_http_request_bytes_in_total`<br>counter; labels `route` | Request bytes, from `Content-Length`. |
 | `narad_http_response_bytes_out_total`<br>counter; labels `route` | Response bytes. |
 | `narad_http_requests_in_flight`<br>gauge; no labels | HTTP requests being served. |
+| `narad_http_batch_body_budget_rejections_total` (unreleased)<br>counter; no labels | Batch produce bodies over 1 MiB answered `503` because the node's budget for them (`http.max_batch_body_bytes_in_flight`) was full. |
 
-The HTTP series count requests, not messages. A batch produce (**v3.1.0**) has its own route, `POST /v1/topics/{topic}/produce/batch`. A batch consume and a batch ack use the single-message routes, and a batch ack answers `200` where a single ack answers `204`. One batch carries up to 100 messages, so take message rates from `narad_messages_produced_total` and `narad_messages_consumed_total`. A panel that selects `route=~".*/produce"` misses batch produces, and one that counts acks as `status="204"` misses batch acks.
+The HTTP series count requests, not messages. A batch produce (**v3.1.0**) has its own route, `POST /v1/topics/{topic}/produce/batch`. A batch consume and a batch ack use the single-message routes, and a batch ack answers `200` where a single ack answers `204`. One batch carries up to 100 messages (a batch produce up to 1,000, unreleased), so take message rates from `narad_messages_produced_total` and `narad_messages_consumed_total`. A panel that selects `route=~".*/produce"` misses batch produces, and one that counts acks as `status="204"` misses batch acks.
 
 ## Schema validation {#schema-validation}
 
@@ -106,6 +107,42 @@ narad_http_requests_total{route="POST /v1/topics/{topic}/ack",status="410"}
 | `narad_fanout_child_dropped_messages`<br>counter; labels `parent`, `child` | Parent messages a child never got: they aged out of the parent's retention before the child's cursor reached them, or could not be read. Each is data loss for that child; alert on any increase. |
 | `narad_fanout_batch_records`<br>histogram; no labels | Messages per copied batch. |
 | `narad_fanout_batch_bytes`<br>histogram; no labels | Payload bytes per copied batch. |
+
+## Remote replication {#remote-replication}
+
+**Unreleased:** in master, not in v3.1.0.
+
+A [remote child](glossary.md#remote-child) exports its link per parent partition from the node that runs the cursor, which is the owner of that parent partition; a cursor that stops on a node (its partition moved, the link was deleted) removes its per-partition series there. Each remote exports its transport, credential and key state per node. No series carries a URL, a username, a key version or a ciphertext. `narad_fanout_lag_messages`, `narad_fanout_committed_total` and `narad_fanout_child_dropped_messages` above count remote children too. Alerts are in [Monitor and alert](../operate/monitoring.md#remote-alerts).
+
+| Series | Meaning |
+|---|---|
+| `narad_fanout_remote_state`<br>gauge; labels `parent`, `child`, `partition`, `state` | 1 for the cursor's current [link state](remote-children.md#link-states). A state change removes the series of the state before, so each partition has one series. |
+| `narad_fanout_remote_lag_seconds`<br>gauge; labels `parent`, `child`, `partition` | Age of the oldest parent record the remote has not accepted yet: the live recovery point. Kept fresh every 5 seconds while a slab does not ship. |
+| `narad_fanout_remote_retention_headroom_seconds`<br>gauge; labels `parent`, `child`, `partition` | The parent's retention minus that age: the time left before drop-behind. |
+| `narad_fanout_remote_last_success_timestamp_seconds`<br>gauge; labels `parent`, `child` | Unix time of the last request the remote accepted. |
+| `narad_fanout_remote_check_failures_total`<br>counter; labels `parent`, `child` | Target checks while the link runs that errored. A check that errors never stops sending. |
+| `narad_fanout_remote_skipped_records_total`<br>counter; labels `parent`, `child` | Parent records dropped because an admin skipped them: each is a record not copied. |
+| `narad_remote_requests_total`<br>counter; labels `remote`, `code` | Requests this node sent to a remote, by status code (`error` for a transport failure). |
+| `narad_remote_request_seconds`<br>histogram; labels `remote` | Round-trip time of those requests. |
+| `narad_remote_rtt_seconds`<br>gauge; labels `remote` | TCP connect time to the remote, as the last check measured it. |
+| `narad_remote_errors_total`<br>counter; labels `remote`, `class` | Failed requests, by class: a link state, `edge` (something in front of the target answered) or `encoding` (the target could not decode a compressed request). |
+| `narad_remote_resent_records_total`<br>counter; labels `remote` | Records sent again after a failure that left it unknown whether they landed: the duplicate volume on the remote. |
+| `narad_remote_gate_backoff_seconds`<br>gauge; labels `remote` | The remote's current backoff on this node; 0 while healthy. |
+| `narad_remote_held_bytes`<br>gauge; no labels | Bytes of records held in memory across a failure, against `remotes.max_held_bytes`. |
+| `narad_remote_inflight_wait_seconds`<br>histogram; labels `remote` | Time a request waited for one of the remote's `max_in_flight` slots. |
+| `narad_remote_chunk_bytes_limit`<br>gauge; labels `remote` | The remote's adaptive request size cap on this node: 960 KiB when healthy, down to 64 KiB after timeouts. |
+| `narad_remote_wire_bytes_total`, `narad_remote_body_bytes_total`<br>counter; labels `remote` | Request body bytes sent to the remote, after and before compression. |
+| `narad_remote_credential_state`<br>gauge; labels `remote`, `state` | 1 for this node's [credential cache state](remote-children.md#cache-states) of the remote: `ready`, `stale`, `credential_unreadable` or `node_insecure`. |
+| `narad_remote_credential_decrypts_total`<br>counter; labels `remote` | Password decryptions by this node's cache. It moves once per credential version; a rise without a remote change is a bug. |
+| `narad_remote_credential_age_seconds`<br>gauge; labels `remote` | Seconds since the remote's password was last set. |
+| `narad_remote_credential_key_current`<br>gauge; labels `remote` | 1 when the remote's password is sealed under the current key; 0 means a cluster secret rotation was not finished with a re-encrypt. |
+| `narad_remote_key_seals`<br>gauge; labels `key` | Seals counted under a key (`current` or `previous`), a lower bound. A key seals at most 2^30. |
+| `narad_remote_key_age_seconds`<br>gauge; labels `key` | Seconds since the current key first sealed a password. |
+| `narad_remote_seals_total`<br>counter; no labels | Passwords this node sealed. |
+| `narad_remote_reseal_opens_total`<br>counter; no labels | Passwords this node opened to re-encrypt them, as leader. |
+| `narad_remote_destination_refused_total`<br>counter; labels `remote`, `reason` | Dials and redirects the address guard, the port list or the host allowlist refused. |
+| `narad_remotes_allowlist_configured`<br>gauge; no labels | 1 when `remotes.allowed_hosts` is set on this node. |
+| `narad_remotes_plaintext_raft`<br>gauge; no labels | 1 when this node holds remotes and its Raft transport runs without TLS. |
 
 ## Storage engine {#storage-engine}
 

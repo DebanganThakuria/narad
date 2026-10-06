@@ -178,6 +178,45 @@ After a node comes back, some partitions deliver in bursts with quiet gaps betwe
 
 **Fix.** None is needed, and nothing is lost. Give a consumer fleet draining a backlog after an outage more than one visibility timeout before you conclude it stopped. To shorten the gaps, lower the topic's `visibility_timeout_ms` to what your slowest handler needs: the gaps shrink one for one. The mechanism: [Consume path](../understand/consume-path.md#after-an-outage).
 
+### `412` on a remote write or a remote child {#status-412}
+
+**Unreleased.**
+
+A remotes request, or a remote child's attach, pause, resume or skip, answers `412` and writes nothing.
+
+**Cause.** The message, and the `members` field of the body, name the precondition:
+
+- `not every cluster member runs a release that applies the remote Raft entry types; upgrade or remove the member named here: ...`: a member, possibly a dead one or a Raft server without a member record, still reports an older release.
+- `a cluster member's security posture forbids remotes (security off or legacy cluster auth on)`, or `every cluster member must answer the remotes posture check`: a member runs with security off or `security.allow_legacy_cluster_auth`, or did not answer.
+- `remote writes carry a password, so this node needs an encrypted API hop ...`: the node that took a create or a password change does not set `remotes.api_hop_encrypted`.
+- `the cluster secret (NARAD_CLUSTER_SECRET) must decode, as standard base64 or hex, to at least 32 random bytes ...`, or `no cluster secret`: nothing can be sealed under this secret.
+- `remote check failed: stale`, `unreachable`, `old_release` or `target_disagreement`: a member had not applied the latest change to the remote yet, did not answer the checks, runs an older release, or saw a different target.
+- `the cluster leader runs an older release ...`: the leader has not been upgraded.
+
+**Check.** `narad cluster members` for dead members and Raft servers without a record; the image each pod runs; `narad remote ls` for the posture each node reports.
+
+**Fix.** Finish the upgrade, and decommission or [forget](../reference/cli.md#cluster) a member that will not come back; turn legacy cluster authentication off; set `remotes.api_hop_encrypted` once the hop is really encrypted ([Before you start](remotes.md#before-you-start)); replace a weak cluster secret ([Rotate the cluster secret](remotes.md#rotate-cluster-secret)); retry a `stale` check after a few seconds.
+
+### `409` has unshipped records on a detach or delete {#remote-unshipped}
+
+**Unreleased.**
+
+`narad topic detach <parent> <child>`, or a delete of a remote child's stub or of its parent, answers `409` `has unshipped records`, with `lag_messages`, `lag_complete` and `dispatch_backlog` in the body.
+
+**Cause.** Some record of the parent is not on the remote yet: a cursor has lag, a partition's owner did not report (`lag_complete` false, or `not_answering`), or a node still holds records of the parent it answered `202` for and has not committed (`dispatch_backlog`, by node). The leader refuses rather than abandon them.
+
+**Fix.** Stop the producers, then `narad topic wait <parent> <child> --lag-zero --stable 60s` and detach again. If the link is stalled, fix that first ([below](#remote-link-stalled)). To abandon the records on purpose, `narad topic detach <parent> <child> --force`; `narad topic rm --force` does not abandon anything. A second attempt within 10 seconds answers `429`: wait for `Retry-After`.
+
+### `409` lives on remote {#remote-stub}
+
+**Unreleased.**
+
+A produce, consume or ack answers `409` `remote child "<name>" lives on remote <remote>; consume it there`.
+
+**Cause.** The topic is a [remote child](../reference/glossary.md#remote-child)'s stub, which has no partitions: its messages are on the remote.
+
+**Fix.** Produce to the parent, and consume the copy on the remote's topic (`remote.topic` in `narad topic info <name>`).
+
 ## Readiness
 
 ### Ready on some pods, not on one {#not-ready-one-pod}
@@ -306,6 +345,51 @@ narad cluster members forget narad-3
 ```
 
 It answers `{"id":"narad-3","voter":true}` (or `false` for a non-voter), and the leader logs `forgot a raft server with no member record` (`component=audit`). Forget moves and deletes no data. It refuses a server with a member record, alive, dead or draining (`409`; [decommission](scaling.md#decommission) it instead), one a partition assignment names (`409`), and the leader itself (`400`). It also refuses a voter while the voters left after the removal could lack a quorum (`409`, `forgetting the voter could leave the cluster without a quorum`). Raft commits the removal under the new configuration, so unless the leader and the voters it reaches are a majority of the voters left, the cluster loses its leader and no change can commit to undo it. Take voters `narad-0` (the leader), `narad-1` and the stray `narad-3` with `narad-1` down: forgetting `narad-3` would leave `narad-0` and `narad-1`, which cannot commit without `narad-1`. The message names the voters whose Raft heartbeats are failing: bring them back, then run forget again. A leader that has led for less than 12 s refuses every voter (`has led for less than 12s`) until it has seen its heartbeats long enough; run it again. A non-voter carries no quorum weight and is forgotten without this check. A leader on an older release answers `501`: finish the upgrade first. If the node comes back later, it asks to join again and is staged as a new non-voter.
+
+### `narad_fanout_remote_state` is not `running` {#remote-link-stalled}
+
+**Unreleased.**
+
+A remote child's link holds in a state other than `running` or `paused`, and its lag grows. The node that owns the parent partition logs `remote child stalled` (warning) with the `state` and the target's `status`, or `remote child stalled by its target check`, or `remote child blocked on a record the target refuses` with the `offset`.
+
+**Check.** `narad topic children <parent> --partitions` names the state per partition and `blocked_at`; [Link states](../reference/remote-children.md#link-states) says what each means. `narad remote ls` shows each node's credential state and `last_error`, and `narad remote test <remote> --topic <topic> --source <parent>` runs every check now.
+
+**Fix.** By state:
+
+- `auth_failed`, `forbidden`: the replicator user on the target was deleted, its password changed, or its `produce` grant is missing. Fix it on the target, or set the remote's password again ([Rotate a remote's password](remotes.md#rotate-password)).
+- `target_missing`: create the topic on the target.
+- `target_replaced`: the target topic was recreated, or the URL reaches another cluster. Check it is the topic you want, then `narad topic resume <parent> <child> --accept-target`.
+- `target_has_remote_children`: the target topic has a remote child of its own, which would make a chain or a loop. Detach it on the target.
+- `remote_missing`: the remote was deleted with `--force`. Create it again under the same name.
+- `credential_unreadable`, `node_insecure`: see [below](#remote-credential-unreadable).
+- `destination_refused`: the host now resolves to an address the guard refuses, or the URL's port or host is outside the node's bounds; `narad_remote_destination_refused_total{reason}` says which. Fix DNS or the `remotes.*` settings.
+- `tls_failed`: the target's certificate does not verify against the remote's `ca_pem` or the system roots, or has expired. Fix the certificate, or set the CA bundle again with the password.
+- `redirect_refused`: the URL answers with a redirect. Register the address that answers directly.
+- `no_batch_produce`: upgrade the target to v3.1.0 or later.
+- `rejected_record`, `record_too_large`: one record the target refuses for good, named in `blocked_at`. Fix the target's schema or upgrade the target, or [skip](../build/remote-children.md#skip) the record.
+- `unavailable`, `throttled`: the target is down, overloaded or rate limiting. The link retries on its own; watch the headroom.
+
+The link resumes on its own once the cause is fixed: a stalled cursor retries every 30 seconds, and at once when the remote changes. Nothing is lost while the headroom lasts.
+
+### `narad_fanout_remote_retention_headroom_seconds` falls {#remote-headroom-low}
+
+**Unreleased.**
+
+A remote child's oldest unshipped record approaches the parent's retention.
+
+**Cause.** The link is stalled or paused, or it ships slower than the parent is produced to.
+
+**Fix.** Raise the parent's retention now (`narad topic edit <parent> --retention 168h`): it takes effect at once while the headroom is above 0. Then fix the link ([above](#remote-link-stalled)), or speed it up: more `lanes` (detach and attach again), a higher `max_in_flight` on the remote, `compression: zstd`. Once the headroom reaches 0, the oldest unshipped records age out and are counted in `narad_fanout_child_dropped_messages`.
+
+### `narad_remote_credential_state` shows `credential_unreadable` or `node_insecure` {#remote-credential-unreadable}
+
+**Unreleased.**
+
+A node cannot use a remote's stored password, and its links hold in the same state. It logs `remote credential unreadable on this node` with the `remote` and whether the password's key is `current`, `previous` or `unknown` here, never the key itself.
+
+**Cause.** For `credential_unreadable`, the node lacks the cluster secret the password was sealed under: the cluster secret changed without `NARAD_CLUSTER_SECRET_PREVIOUS`, or the node runs with a different secret from the others. For `node_insecure`, the node runs with security off or legacy cluster authentication on.
+
+**Fix.** Give every node the same `NARAD_CLUSTER_SECRET`, and during a rotation the previous one too, then finish it with `narad remote reencrypt` ([Rotate the cluster secret](remotes.md#rotate-cluster-secret)). If the old secret is gone, enter each password again with `narad remote set <name> --remote-password-stdin`. For `node_insecure`, fix the node's security settings and restart it.
 
 ## Log lines
 
@@ -638,6 +722,46 @@ The Raft leader logs `raft: failed to heartbeat to: peer=<addr>` with `error="tl
 **Cause.** The node's Raft certificate is signed by a CA its peers do not trust. It cannot join and stays not ready, and its partitions are unavailable.
 
 **Fix.** Give the node a certificate from the trusted CA and restart it. To change the CA without this, follow the three rolls in [Rotate the CA](raft-tls.md#rotate-ca). Details: [Untrusted certificate](raft-tls.md#untrusted-cert).
+
+### `this node's metastore holds remotes, so it must run with security.enabled` at start {#log-remotes-security-off}
+
+**Unreleased.**
+
+`narad serve` exits at start with this message, or with `this node's metastore holds remotes, so NARAD_CLUSTER_SECRET is required`.
+
+**Cause.** The cluster holds a remote, whose password is sealed under the cluster secret, and this node runs with security off or without a secret. A node without API authorization must not hold outbound credentials.
+
+**Fix.** Start the node with security on and the cluster's `NARAD_CLUSTER_SECRET`, as every other member.
+
+### `this node holds remotes and its Raft transport runs without TLS` {#log-remotes-plaintext-raft}
+
+**Unreleased.**
+
+A warning at startup, or when the first remote appears, with `narad_remotes_plaintext_raft` 1.
+
+**Cause.** The node runs Raft without TLS. Remote passwords cross Raft only as ciphertext, but whoever can reach the Raft port can delete remotes and stall links.
+
+**Fix.** Turn on [Raft TLS](raft-tls.md). It is not required; the warning repeats on every start until it is on.
+
+### `this node holds remotes and remotes.allowed_hosts is empty` {#log-remotes-allowlist}
+
+**Unreleased.**
+
+A warning at startup, with `narad_remotes_allowlist_configured` 0.
+
+**Cause.** Remotes may point at any host the address guard allows.
+
+**Fix.** Set `remotes.allowed_hosts` to the hosts your remotes use ([operating condition 4](remotes.md#operating-conditions)), then restart the node.
+
+### `this node holds remotes and its cluster secret fails the strength rule` {#log-remotes-weak-secret}
+
+**Unreleased.**
+
+An error at startup. The node runs, but every create, password change and re-encrypt answers `412` until the secret is replaced.
+
+**Cause.** The cluster secret does not decode, as standard base64 or hex, to at least 32 bytes that are not all the same.
+
+**Fix.** Rotate to a secret made with `openssl rand -base64 32`, with the old one as `NARAD_CLUSTER_SECRET_PREVIOUS`, then `narad remote reencrypt` ([Rotate the cluster secret](remotes.md#rotate-cluster-secret)).
 
 ## Kubernetes
 

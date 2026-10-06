@@ -234,6 +234,18 @@ curl -u "$AUTH" "$NARAD/v1/topics/orders/children"
 - Listing needs any grant on the parent.
 - `DELETE /v1/topics/orders/children/orders-analytics` detaches a child and answers `204`. The child keeps its messages and becomes an ordinary topic again. Detaching needs ownership of either topic, or admin. With the CLI: `narad topic children orders` and `narad topic detach orders orders-analytics`.
 
+## Children on another cluster {#remote-children}
+
+**Unreleased:** in master, not in v3.1.0.
+
+A child can also live on another Narad cluster. An admin registers that cluster once as a [remote](../reference/glossary.md#remote), then attaches a [remote child](../reference/glossary.md#remote-child):
+
+```sh
+narad topic attach orders orders-to-b --remote b --remote-topic orders
+```
+
+The owners of the parent's partitions send every record to the remote's topic through its batch produce, at least once, with the cursors, attach epochs, drop-behind and delay described here. On this cluster the child is a stub with no partitions: consume the copy on the remote. Detaching one is refused while records are unshipped, unless forced. [Replicate a topic to another cluster](remote-children.md) has the whole story.
+
 ## Fan-out cost {#cost}
 
 Every child stores its own full copy of the parent's messages; that is what makes children independent. Ten children means ten extra copies of every message on disk and ten extra writes for each one, so budget disk and retention for every child. [Fan-out engine](../understand/fanout-engine.md) explains how the copying works and what happens when a child falls behind.
@@ -242,4 +254,5 @@ Every child stores its own full copy of the parent's messages; that is what make
 
 - [Back up and replicate topics](../operate/backups.md#replica-children): use a child as a second copy on other nodes.
 - [Handle retries and dead letters](handling-retries.md#backoff-topics): build retry tiers from delay children.
+- [Replicate a topic to another cluster](remote-children.md): a child whose copy lives on another Narad cluster (unreleased).
 - [Fan-out engine](../understand/fanout-engine.md): how copies are made, and how far behind a child can fall.
