@@ -66,6 +66,9 @@ const (
 	unshippedScanLimit = 1_000_000
 	// unshippedAskTimeout bounds the fan-out of the unshipped query.
 	unshippedAskTimeout = 15 * time.Second
+	// unshippedFlightTimeout bounds a whole check: the query fan-out,
+	// then the cursor lag from every partition owner.
+	unshippedFlightTimeout = 2 * unshippedAskTimeout
 )
 
 // RemoteLinks serves child.* and topic.delete on the leader and the
@@ -901,13 +904,29 @@ func (l *RemoteLinks) unshippedChecked(ctx context.Context, parent topic.Topic) 
 		l.lastCheck[parent.Name] = now
 		l.mu.Unlock()
 
-		f.report, f.err = l.unshippedNow(ctx, parent)
-
-		l.mu.Lock()
-		delete(l.flights, parent.Name)
-		l.mu.Unlock()
-		close(f.done)
-		return f.report, f.err
+		// The check is shared, so it runs detached from the delete that
+		// started it, bounded on its own: that delete's client going
+		// away ends only its own wait below, never the answer every
+		// other waiter gets.
+		go func() {
+			fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unshippedFlightTimeout)
+			defer cancel()
+			f.report, f.err = l.unshippedNow(fctx, parent)
+			l.mu.Lock()
+			delete(l.flights, parent.Name)
+			if f.err != nil {
+				// Only a check that answered paces the next one.
+				delete(l.lastCheck, parent.Name)
+			}
+			l.mu.Unlock()
+			close(f.done)
+		}()
+		select {
+		case <-f.done:
+			return f.report, f.err
+		case <-ctx.Done():
+			return unshippedReport{}, ctx.Err()
+		}
 	}
 }
 
