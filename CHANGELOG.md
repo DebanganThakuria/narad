@@ -10,6 +10,8 @@ summarized more briefly than the 1.x and later entries.
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-10-06
+
 ### Added
 - This changelog, covering every release back to the first alpha.
 - `MAINTAINERS.md`, stating who reviews changes, what a single-maintainer project means for review turnaround and bus factor, and how to become a maintainer.
@@ -570,7 +572,8 @@ First production release.
 ### Added
 - Narad's first alpha, published for early evaluation, local development, and design review, with a container image on GHCR. The remaining production-readiness gates (API auth, rate limiting, TLS, and a tested durability and disaster-recovery contract) were documented as still open.
 
-[Unreleased]: https://github.com/DebanganThakuria/narad/compare/v3.0.1...HEAD
+[Unreleased]: https://github.com/DebanganThakuria/narad/compare/v3.1.0...HEAD
+[3.1.0]: https://github.com/DebanganThakuria/narad/compare/v3.0.1...v3.1.0
 [3.0.1]: https://github.com/DebanganThakuria/narad/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/DebanganThakuria/narad/compare/v2.2.2...v3.0.0
 [2.2.2]: https://github.com/DebanganThakuria/narad/compare/v2.2.1...v2.2.2
