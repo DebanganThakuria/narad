@@ -13,8 +13,8 @@ Before you start: every pod ready, Helm access to the release, and the [changelo
 1. Get the chart of the target release. In a clone made as in [Deploy on Kubernetes](deploy-kubernetes.md#install):
 
     ```bash
-    git fetch --depth 1 origin tag v3.0.1
-    git checkout v3.0.1
+    git fetch --depth 1 origin tag v3.1.0
+    git checkout v3.1.0
     ```
 
 2. Read the [version notes](#version-notes) for every release you cross.
@@ -24,7 +24,7 @@ Before you start: every pod ready, Helm access to the release, and the [changelo
     ```bash
     helm upgrade narad ./charts/narad -n narad \
       --reset-then-reuse-values \
-      --set image.tag=v3.0.1
+      --set image.tag=v3.1.0
     kubectl rollout status statefulset/narad -n narad
     ```
 
