@@ -217,6 +217,16 @@ func (g *Gate) Backoff() time.Duration {
 	return g.backoff
 }
 
+// WouldWait reports whether Wait would block now: the gate is closed
+// and its probe is either out or not yet due. A lane holds its records
+// before such a wait; one that would take the due probe holds nothing,
+// so a lane that cannot hold still gets to probe.
+func (g *Gate) WouldWait() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.closed && (g.probing || g.now().Before(g.until))
+}
+
 // Closed reports whether the gate is backing off.
 func (g *Gate) Closed() bool {
 	g.mu.Lock()

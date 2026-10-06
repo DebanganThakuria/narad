@@ -571,6 +571,14 @@ func (s *remoteSender) commit(ctx context.Context, key fanoutCursorKey, child to
 		return nil, false
 	}
 	cur.noteProgress(lanes, marks)
+	if sh.paused.Load() && ctx.Err() == nil {
+		// A planned pause, not a budget shortfall: no re-read is counted
+		// and nothing is logged. remoteBeforeRead parks the cursor with
+		// nothing held, and the progress marks keep what the target
+		// accepted from being sent again after the resume.
+		cur.clearLanes()
+		return nil, true
+	}
 	if sh.reread.Load() && ctx.Err() == nil {
 		if rl := s.r.remoteMetrics(); rl != nil {
 			rl.RereadsTotal.WithLabelValues(key.parent, key.child).Inc()
@@ -606,6 +614,9 @@ type slabShip struct {
 	slabStart int64
 
 	reread atomic.Bool
+	// paused marks a slab ended because its link was paused: the cursor
+	// reads it again after the resume, holding nothing meanwhile.
+	paused atomic.Bool
 	// rereadWait is what the lane that could not hold its records was
 	// about to wait for: a duration, or -1 for the remote's gate.
 	rereadWait atomic.Int64
@@ -674,15 +685,37 @@ func (sh *slabShip) wait(ctx context.Context, d time.Duration) bool {
 	return sh.s.waitChange(ctx, sh.key.child, version, d, tick)
 }
 
+// endForPause ends the slab because its link is paused: every lane's
+// waits end (a request in flight still gets its answer) and commit
+// returns it for a re-read, so no lane holds records across the pause.
+func (sh *slabShip) endForPause() {
+	sh.paused.Store(true)
+	sh.stopWaits()
+}
+
 // refreshWhileShipping keeps the lag gauges live while the slab's lanes
-// wait (on the gate, a backoff, a stall), until ctx ends.
+// wait (on the gate, a backoff, a stall), until ctx ends. It also
+// watches the stub, so a pause or a detach reaches lanes parked on the
+// gate or a slot at once instead of when they next wake.
 func (sh *slabShip) refreshWhileShipping(ctx context.Context) {
 	ticker := time.NewTicker(sh.s.lagRefresh)
 	defer ticker.Stop()
+	poll := time.NewTicker(sh.s.changePoll)
+	defer poll.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-poll.C:
+			stub, ok := sh.currentLink(ctx)
+			switch {
+			case !ok:
+				sh.cancel()
+				return
+			case stub.Remote.Paused:
+				sh.endForPause()
+				return
+			}
 		case <-ticker.C:
 			oldest := sh.oldestUnshippedMs()
 			sh.s.r.refreshRemoteLag(ctx, sh.key, sh.cur, sh.startOffset(), &oldest)
@@ -774,12 +807,9 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 		}
 		link := stub.Remote
 		if link.Paused {
-			sh.cur.setLane(lane.idx, topic.RemoteStatePaused)
-			if !sh.hold(lane, s.stallRetry, nil) || !sh.wait(ctx, s.stallRetry) {
-				return
-			}
-			sh.cur.setLane(lane.idx, "")
-			continue
+			// Hold nothing across a pause: end the slab.
+			sh.endForPause()
+			return
 		}
 		if lane.blocked != nil {
 			if link.Skipped(sh.key.partition, lane.recs[0].Offset) {
@@ -800,6 +830,12 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 		// waited out an auth failure must send with the entry a corrected
 		// password built, not the one it held before the wait.
 		rs := s.remoteState(link.Name)
+		// A lane about to wait on a closed gate keeps its records in the
+		// held budget first, so an outage never pins parent log frames
+		// outside max_held_bytes; a full budget asks for a re-read.
+		if rs.gate.WouldWait() && !sh.hold(lane, -1, rs.gate) {
+			return
+		}
 		probe, err := rs.gate.Wait(ctx)
 		if err != nil {
 			return
@@ -809,6 +845,13 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 				rs.gate.Released()
 			}
 		}
+		// The wait may have been long: a pause or a detach applied
+		// meanwhile wins over sending.
+		if stub, ok = sh.currentLink(ctx); !ok || stub.Remote.Paused {
+			release()
+			continue
+		}
+		link = stub.Remote
 		entry, _, state := s.entry(link.Name)
 		if state != "" {
 			release()
@@ -970,6 +1013,15 @@ func (sh *slabShip) sendChunk(ctx context.Context, lane *laneShip, e *remote.Ent
 		// A password rotation (or a new remote under the name) arrived
 		// while the lane waited for a slot: send nothing with the old
 		// credential; the lane looks the entry up again.
+		rs.sem.Release()
+		if probe {
+			rs.gate.Released()
+		}
+		return
+	}
+	if stub, ok := sh.currentLink(ctx); !ok || stub.Remote.Paused {
+		// Paused or detached while the lane waited for a slot: send
+		// nothing; the lane loop ends the slab.
 		rs.sem.Release()
 		if probe {
 			rs.gate.Released()
