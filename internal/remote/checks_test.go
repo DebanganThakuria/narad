@@ -284,7 +284,9 @@ func TestTargetIsSourceWithoutIncarnationIDs(t *testing.T) {
 	for name, mod := range map[string]func(*remote.CheckRequest){
 		"created at another time": idless("legacy", 1_600_000_001),
 		"another name":            idless("orders", 1_600_000_000),
-		"a source with an ID":     func(r *remote.CheckRequest) { r.Source, r.SourceID, r.SourceCreatedAt = "legacy", "source-id", 1_600_000_000 },
+		"a source with an ID": func(r *remote.CheckRequest) {
+			r.Source, r.SourceID, r.SourceCreatedAt = "legacy", "source-id", 1_600_000_000
+		},
 	} {
 		if got := run(t, c, "legacy", mod); got.Result != remote.ResultPass {
 			t.Fatalf("%s: %s %s, want pass", name, got.Result, got.Class)
