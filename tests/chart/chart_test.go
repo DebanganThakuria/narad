@@ -584,3 +584,33 @@ func TestRemotesMaxHeldBytesRendersZero(t *testing.T) {
 		}
 	}
 }
+
+// With security off, the render refuses every remotes value the binary
+// counts as configured (any value off its default), so the operator
+// sees the refusal at helm upgrade instead of every pod crash-looping
+// at config validation. The defaults, spelled out or absent, render.
+func TestRemotesSettingsWithSecurityOffFailTheRender(t *testing.T) {
+	insecure := []string{"--set", "security.enabled=false", "--set", "security.allowInsecureCluster=true"}
+	for _, c := range []struct {
+		args   []string
+		refuse bool
+	}{
+		{nil, false},
+		{[]string{"--set", "remotes=null"}, false},
+		{[]string{"--set", "remotes.allowedPorts={443}", "--set", "remotes.maxHeldBytes=268435456"}, false},
+		{[]string{"--set", "remotes.allowedPorts=null", "--set", "remotes.maxHeldBytes=null"}, false},
+		{[]string{"--set", "remotes.allowedPorts={8443}"}, true},
+		{[]string{"--set", "remotes.allowedPorts={443,8443}"}, true},
+		{[]string{"--set", "remotes.maxHeldBytes=0"}, true},
+		{[]string{"--set", "remotes.maxHeldBytes=1048576"}, true},
+		{[]string{"--set", "remotes.allowedHosts={b.example.com}"}, true},
+		{[]string{"--set", "remotes.allowAddresses={127.0.0.0/8}"}, true},
+		{[]string{"--set", "remotes.apiHopEncrypted=true"}, true},
+	} {
+		out, err := helmTemplate(t, append(append([]string{}, insecure...), c.args...)...)
+		refused := err != nil && strings.Contains(out, "remotes settings require security.enabled")
+		if refused != c.refuse || (err != nil && !refused) {
+			t.Errorf("security off with %v: render error %v, want refused %v\n%s", c.args, err, c.refuse, out)
+		}
+	}
+}

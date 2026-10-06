@@ -151,7 +151,7 @@ Kubelet probes come from the pod's own node, which a NetworkPolicy does not bloc
 
 **Unreleased:** in master, not in v3.1.0.
 
-The node bounds of [remote replication](../operate/remotes.md), passed as environment variables. An admin cannot widen them through the API; widening one is a values change and a rollout. Every pod needs egress to each remote's ingress on its port, not only the pods that own parent partitions: the attach, resume and test checks run on every member. A render with `security.enabled: false` and any of `allowedHosts`, `allowAddresses` or `apiHopEncrypted` set fails.
+The node bounds of [remote replication](../operate/remotes.md), passed as environment variables. An admin cannot widen them through the API; widening one is a values change and a rollout. Every pod needs egress to each remote's ingress on its port, not only the pods that own parent partitions: the attach, resume and test checks run on every member. With `security.enabled: false`, a render with any of them off its default fails (`remotes settings require security.enabled`), as the node itself would refuse to start: `allowedHosts`, `allowAddresses` or `apiHopEncrypted` set, `allowedPorts` other than `[443]`, or `maxHeldBytes` other than `268435456`, `0` included.
 
 | Value | What it does |
 |---|---|

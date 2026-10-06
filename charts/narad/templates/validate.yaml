@@ -1,8 +1,23 @@
 {{- $replicas := int .Values.replicaCount -}}
 {{- $initial := int (default 3 .Values.initialClusterSize) -}}
 {{- $peers := int (include "narad.clusterPeerCount" .) -}}
+{{- /*
+Mirrors the binary's RemotesConfig.Configured: with security off, a
+node refuses to start on any remotes value off its default, so refuse
+the render instead of letting every pod crash-loop. An empty or absent
+allowedPorts or maxHeldBytes renders no variable, which is the default.
+*/ -}}
 {{- $r := .Values.remotes | default dict -}}
-{{- if and (not .Values.security.enabled) (or $r.allowedHosts $r.allowAddresses $r.apiHopEncrypted) -}}
+{{- $ports := list -}}
+{{- range ($r.allowedPorts | default list) -}}
+{{- $ports = append $ports (toString (int64 .)) -}}
+{{- end -}}
+{{- $portsChanged := and $ports (ne (join "," $ports) "443") -}}
+{{- $heldChanged := false -}}
+{{- if and (hasKey $r "maxHeldBytes") (ne (toString $r.maxHeldBytes) "<nil>") -}}
+{{- $heldChanged = ne (int64 $r.maxHeldBytes) (int64 268435456) -}}
+{{- end -}}
+{{- if and (not .Values.security.enabled) (or $r.allowedHosts $r.allowAddresses $r.apiHopEncrypted $portsChanged $heldChanged) -}}
 {{- fail "remotes settings require security.enabled: a node without API authorization must not hold remote credentials." -}}
 {{- end -}}
 {{- if lt $initial 1 -}}
