@@ -462,6 +462,10 @@ type listAnswer struct {
 	Key       *keyView            `json:"key,omitempty"`
 	Remotes   []remote.RemoteView `json:"remotes"`
 	Lingering []lingeringView     `json:"lingering"`
+	// NotAnswering names every member that was asked and did not
+	// answer, whether or not any answering member still holds a
+	// deleted remote: a silent member may still hold one.
+	NotAnswering []string `json:"not_answering"`
 }
 
 // List handles GET /v1/remotes[?nodes=false].
@@ -477,7 +481,7 @@ func List(s *handlers.Set) http.HandlerFunc {
 			c.fail(http.StatusServiceUnavailable, "remotes could not be read; retry")
 			return
 		}
-		ans := listAnswer{Allowlist: "none", Remotes: []remote.RemoteView{}, Lingering: []lingeringView{}}
+		ans := listAnswer{Allowlist: "none", Remotes: []remote.RemoteView{}, Lingering: []lingeringView{}, NotAnswering: []string{}}
 		if s.Deps.Remote.Service.AllowlistConfigured() {
 			ans.Allowlist = "set"
 		}
@@ -486,7 +490,7 @@ func List(s *handlers.Set) http.HandlerFunc {
 		for _, rec := range records {
 			ans.Remotes = append(ans.Remotes, viewWithNodes(s, rec, statuses))
 		}
-		ans.Lingering = lingering(records, statuses)
+		ans.Lingering, ans.NotAnswering = lingering(records, statuses)
 		s.WriteJSON(c.w, http.StatusOK, ans)
 		c.audit(http.StatusOK)
 	}
@@ -564,13 +568,15 @@ func viewWithNodes(s *handlers.Set, rec domremote.Record, statuses []remote.Memb
 }
 
 // lingering lists the remotes some node's cache still holds that the
-// live registry does not, and the nodes that did not answer.
-func lingering(records []domremote.Record, statuses []remote.MemberStatus) []lingeringView {
+// live registry does not, and the nodes that did not answer. The silent
+// nodes are returned on their own too, so they are reported even when
+// no answering node holds anything.
+func lingering(records []domremote.Record, statuses []remote.MemberStatus) ([]lingeringView, []string) {
 	live := map[string]bool{}
 	for _, r := range records {
 		live[r.Name] = true
 	}
-	var silent []string
+	silent := []string{}
 	holding := map[string][]string{}
 	for _, ms := range statuses {
 		if ms.Report == nil {
@@ -583,11 +589,12 @@ func lingering(records []domremote.Record, statuses []remote.MemberStatus) []lin
 			}
 		}
 	}
+	sort.Strings(silent)
 	out := []lingeringView{}
 	for name, nodes := range holding {
 		sort.Strings(nodes)
 		out = append(out, lingeringView{Remote: name, Holding: nodes, NotAnswering: append([]string{}, silent...)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Remote < out[j].Remote })
-	return out
+	return out, silent
 }

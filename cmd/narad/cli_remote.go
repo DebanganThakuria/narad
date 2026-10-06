@@ -270,11 +270,39 @@ func newRemoteLsCmd() *cobra.Command {
 			if noNodes {
 				path += "?nodes=false"
 			}
-			return cliClient().getAndPrint(path)
+			resp, err := cliClient().do(http.MethodGet, path, nil)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			raw, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return err
+			}
+			if err := printResponse(&http.Response{StatusCode: resp.StatusCode, Body: io.NopCloser(strings.NewReader(string(raw)))}); err != nil {
+				return err
+			}
+			if warn := silentMembersWarning(raw); warn != "" {
+				fmt.Fprintln(os.Stderr, warn)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&noNodes, "no-nodes", false, "skip asking every node for its cache status")
 	return cmd
+}
+
+// silentMembersWarning names the members a remote listing could not
+// ask. Such a member may still hold a deleted remote's credential, so
+// the listing alone does not prove every node let go of it.
+func silentMembersWarning(body []byte) string {
+	var ans struct {
+		NotAnswering []string `json:"not_answering"`
+	}
+	if json.Unmarshal(body, &ans) != nil || len(ans.NotAnswering) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("warning: %s did not answer; a node that did not answer may still hold a deleted remote's credential", strings.Join(ans.NotAnswering, ", "))
 }
 
 func newRemoteTestCmd() *cobra.Command {

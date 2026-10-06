@@ -170,13 +170,15 @@ The command exits `0` only when `result` is `pass`; otherwise it ends with `nara
       ]
     }
   ],
-  "lingering": []
+  "lingering": [],
+  "not_answering": []
 }
 ```
 
 - A node's `state` is `ready`, `stale` while it still holds an older `credential_version` than the remote, `credential_unreadable` when it cannot open the password (it lacks the secret it was sealed under), `node_insecure` when its own settings forbid remotes, `missing` before it has built an entry, or `unknown` when it did not answer.
 - `last_error` is a class, never text from the remote.
 - `lingering` lists deleted remotes some node still holds, and the nodes that did not answer.
+- `not_answering` lists every node that did not answer, even when no answering node holds a deleted remote, and `narad remote ls` prints a warning naming them (unreleased).
 - `--no-nodes` (`?nodes=false`) skips asking the nodes.
 
 ## Change a remote {#change}
@@ -215,7 +217,7 @@ Revoking on the target is the fence, so it comes first.
 
 1. **On the target, delete the user** (`narad --ctx b user rm repl-from-a-7f3k9q`). Every node of this cluster that still sends gets `401`, and its links hold in `auth_failed`.
 2. **Here, delete the remote** even though links use it: `narad --ctx a remote rm b --force`. Each node drops its cached credential and closes its connections when it applies the delete, and the links hold in `remote_missing`. The delete checks only the cluster metadata, so it works while a node is down.
-3. **Check every node let go:** `narad --ctx a remote ls` lists under `lingering` any node that still holds the deleted remote or did not answer. A node cut off from the Raft leader but still able to reach the target keeps its cached credential until it catches up, which is why step 1 comes first.
+3. **Check every node let go:** `narad --ctx a remote ls` lists under `lingering` any node that still holds the deleted remote, and under `not_answering` (with a warning) any node that did not answer. Step 3 passes only when both are empty. A node cut off from the Raft leader but still able to reach the target keeps its cached credential until it catches up, which is why step 1 comes first.
 
 Nothing is lost while the parent's retention lasts. Create a new user on the target and a new remote of the same name here, and the links resume after their target check.
 

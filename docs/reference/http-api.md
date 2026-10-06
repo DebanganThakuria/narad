@@ -2531,7 +2531,9 @@ member's credential cache holds for it: its state, the credential
 and key versions it decrypted, when it last reached the remote, and
 the server certificate's expiry. `lingering` lists deleted remotes
 some member still holds (it has not applied the delete) and the
-members that did not answer. `key` is the current encryption key's
+members that did not answer; `not_answering` names every member
+that did not answer, even when no answering member holds a deleted
+remote. `key` is the current encryption key's
 version and age, absent before the first remote.
 
 **Grant needed:** `admin`, with security on.
@@ -2540,7 +2542,7 @@ version and age, absent before the first remote.
 
 | Name | Description |
 |---|---|
-| `nodes`<br>query, boolean, optional, default `True` | `false` skips asking the members for their caches; the answer then has no `nodes` and no `lingering`. |
+| `nodes`<br>query, boolean, optional, default `True` | `false` skips asking the members for their caches; the answer then has no `nodes`, no `lingering` and no `not_answering`. |
 
 **Responses**
 
@@ -2588,6 +2590,7 @@ version and age, absent before the first remote.
 | `remotes[].nodes[].server_cert_not_after`<br>string | When the remote's certificate expires, as the last check saw it. |
 | `remotes[].nodes[].rtt_ms`<br>integer | Connect time to the remote; only with `remotes.allowed_hosts` set. |
 | `lingering`<br>array of object | Deleted remotes some member still holds, with the members `holding` them and the ones `not_answering`. |
+| `not_answering`<br>array of string | Every member that was asked and did not answer, whether or not an answering member still holds a deleted remote. Such a member may still hold one. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" "$NARAD/v1/remotes"
@@ -2647,7 +2650,8 @@ Date: Tue, 06 Oct 2026 13:06:32 GMT
       ]
     }
   ],
-  "lingering": []
+  "lingering": [],
+  "not_answering": []
 }
 ```
 

@@ -289,3 +289,12 @@ func TestCtxFlagRefusesConnectionEnvironment(t *testing.T) {
 		t.Fatalf("--ctx b = %+v, %v", c, err)
 	}
 }
+
+func TestRemoteLsWarnsAboutMembersThatDidNotAnswer(t *testing.T) {
+	if w := silentMembersWarning([]byte(`{"remotes":[],"lingering":[],"not_answering":["narad-2"]}`)); !strings.Contains(w, "narad-2 did not answer") {
+		t.Fatalf("warning = %q", w)
+	}
+	if w := silentMembersWarning([]byte(`{"remotes":[],"lingering":[],"not_answering":[]}`)); w != "" {
+		t.Fatalf("warning with every member answering = %q", w)
+	}
+}

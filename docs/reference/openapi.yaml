@@ -2100,14 +2100,16 @@ paths:
         and key versions it decrypted, when it last reached the remote, and
         the server certificate's expiry. `lingering` lists deleted remotes
         some member still holds (it has not applied the delete) and the
-        members that did not answer. `key` is the current encryption key's
+        members that did not answer; `not_answering` names every member
+        that did not answer, even when no answering member holds a deleted
+        remote. `key` is the current encryption key's
         version and age, absent before the first remote.
       x-narad-grant: |
         `admin`, with security on.
       parameters:
         - name: nodes
           in: query
-          description: '`false` skips asking the members for their caches; the answer then has no `nodes` and no `lingering`.'
+          description: '`false` skips asking the members for their caches; the answer then has no `nodes`, no `lingering` and no `not_answering`.'
           schema:
             type: boolean
             default: true
@@ -2136,7 +2138,7 @@ paths:
             Content-Type: application/json
             Date: Tue, 06 Oct 2026 13:06:32 GMT
 
-            {"allowlist":"set","key":{"key_version":"b51c9412df29325d","first_sealed_at":"2026-10-06T13:06:22Z","age_seconds":10},"remotes":[{"name":"b","id":"8ccffc20e36f644c","url":"https://localhost:8443","username":"repl-from-a-7f3k9q","password":{"fingerprint":"ced1ea5d18d1","set_at":"2026-10-06T13:06:22Z","set_by":"admin","key_version":"b51c9412df29325d"},"credential_version":1,"ca_pem_sha512":"a85bc5f06c550eb18ff2a2a29187fe3a290b1fc74c76d0ef2781531bd4df4f84187980295b5484a6e363a2ff24c52fd9cec309bd74405beb5c815fb48b1e80b0","limits":{"max_in_flight":16,"request_timeout_ms":30000,"idle_conn_timeout_ms":30000,"conn_max_age_ms":300000,"check_interval_ms":60000,"compression":"none"},"revision":1,"created_at":"2026-10-06T13:06:22Z","created_by":"admin","nodes":[{"node":"narad-0","state":"ready","credential_version":1,"key_version":"b51c9412df29325d","fingerprint":"ced1ea5d18d1","last_ok_at":"2026-10-06T13:06:32Z","last_error":"none","server_cert_not_after":"2026-11-05T13:04:25Z","rtt_ms":0}]}],"lingering":[]}
+            {"allowlist":"set","key":{"key_version":"b51c9412df29325d","first_sealed_at":"2026-10-06T13:06:22Z","age_seconds":10},"remotes":[{"name":"b","id":"8ccffc20e36f644c","url":"https://localhost:8443","username":"repl-from-a-7f3k9q","password":{"fingerprint":"ced1ea5d18d1","set_at":"2026-10-06T13:06:22Z","set_by":"admin","key_version":"b51c9412df29325d"},"credential_version":1,"ca_pem_sha512":"a85bc5f06c550eb18ff2a2a29187fe3a290b1fc74c76d0ef2781531bd4df4f84187980295b5484a6e363a2ff24c52fd9cec309bd74405beb5c815fb48b1e80b0","limits":{"max_in_flight":16,"request_timeout_ms":30000,"idle_conn_timeout_ms":30000,"conn_max_age_ms":300000,"check_interval_ms":60000,"compression":"none"},"revision":1,"created_at":"2026-10-06T13:06:22Z","created_by":"admin","nodes":[{"node":"narad-0","state":"ready","credential_version":1,"key_version":"b51c9412df29325d","fingerprint":"ced1ea5d18d1","last_ok_at":"2026-10-06T13:06:32Z","last_error":"none","server_cert_not_after":"2026-11-05T13:04:25Z","rtt_ms":0}]}],"lingering":[],"not_answering":[]}
   /v1/remotes/{name}:
     parameters:
       - $ref: '#/components/parameters/RemoteNamePath'
@@ -3284,6 +3286,11 @@ components:
           description: Deleted remotes some member still holds, with the members `holding` them and the ones `not_answering`.
           items:
             type: object
+        not_answering:
+          type: array
+          description: Every member that was asked and did not answer, whether or not an answering member still holds a deleted remote. Such a member may still hold one.
+          items:
+            type: string
     TestRemoteRequest:
       type: object
       required: [topic]
