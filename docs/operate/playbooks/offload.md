@@ -35,7 +35,7 @@ The plan: the source keeps taking produces while a [remote child](../../referenc
     narad --ctx a remote test b --topic orders --source orders
     ```
 
-    `remote ls` must show every node `ready`, with the remote's fingerprint and `credential_version`, and `remote test` must exit `0`. Then delete `repl-password`. Undo: `narad --ctx a remote rm b`.
+    `remote ls` must show every node `ready`, with the remote's fingerprint and `credential_version`, and `remote test` must exit `0`. Set `remotes.allowed_hosts` first: without it, `remote test` runs on the one node that took the request, and proves nothing about the other nodes' egress, which step 5's attach checks from every node after the consumers are already stopped. Then delete `repl-password`. Undo: `narad --ctx a remote rm b`.
 
 3. **Buffer.** Raise the source's retention to cover the migration plus the longest target outage you accept: `narad --ctx a topic edit orders --retention 72h`. While the link exists, the source's retention cannot go below 24 hours.
 

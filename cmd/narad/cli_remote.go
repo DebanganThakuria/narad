@@ -309,7 +309,7 @@ func newRemoteTestCmd() *cobra.Command {
 	var topicName, source string
 	cmd := &cobra.Command{
 		Use:   "test <name>",
-		Short: "run the attach checks against a remote topic; exits 0 only if every node passes",
+		Short: "run the attach checks against a remote topic; exits 0 only if every node that ran them passes (every node with remotes.allowed_hosts set, only the answering node without)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if topicName == "" {
