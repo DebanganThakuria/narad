@@ -379,3 +379,40 @@ func TestGateKnowsWhoseProbeIsOut(t *testing.T) {
 		t.Fatalf("after the answer WouldWaitFor = (%v, %v), want (false, false)", wait, own)
 	}
 }
+
+// A chunk sent before the gate closed can be accepted while a sibling's
+// probe is still out: the gate opens with the probe held. A lane parked
+// on that probe must not sleep through the open and then through the
+// probe's own answer, which on an open gate changes nothing else.
+func TestGateProbeWaiterWakesWhenTheGateOpensUnderTheProbe(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_000, 0)}
+	g := NewGate()
+	g.now = clock.Now
+	for range GateTripAfter {
+		g.Failed(unavailable(), false)
+	}
+	clock.Advance(GateMaxBackoff)
+	slab := new(int)
+	if probe, err := g.WaitAs(context.Background(), slab); err != nil || !probe {
+		t.Fatalf("WaitAs = (%v, %v), want the due probe", probe, err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- g.AwaitProbe(context.Background(), slab) }()
+	select {
+	case <-done:
+		t.Fatal("AwaitProbe returned while the owner's probe was out")
+	case <-time.After(50 * time.Millisecond):
+	}
+	g.Succeeded(false) // an earlier chunk's 202
+	// Let the waiter wake, find the probe still out and park again.
+	time.Sleep(50 * time.Millisecond)
+	g.Succeeded(true) // the probe's 202
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("AwaitProbe = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("AwaitProbe slept through the gate opening and the probe's answer")
+	}
+}

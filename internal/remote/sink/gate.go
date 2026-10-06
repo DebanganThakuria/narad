@@ -136,14 +136,16 @@ func (g *Gate) WaitDue(ctx context.Context) error {
 	}
 }
 
-// AwaitProbe blocks while the gate's probe is out and held by owner,
-// or until ctx ends. A lane whose sibling holds the probe waits here
-// for its answer instead of giving up its records: ending the slab
-// would end the probe before the target answered it.
+// AwaitProbe blocks while the gate is closed and its probe is out and
+// held by owner, or until ctx ends. A lane whose sibling holds the
+// probe waits here for its answer instead of giving up its records:
+// ending the slab would end the probe before the target answered it.
+// A gate that opens under the probe (a chunk sent before it closed was
+// accepted) ends the wait at once: the lane may send.
 func (g *Gate) AwaitProbe(ctx context.Context, owner any) error {
 	for {
 		g.mu.Lock()
-		if !g.probing || owner == nil || g.prober != owner {
+		if !g.closed || !g.probing || owner == nil || g.prober != owner {
 			g.mu.Unlock()
 			return nil
 		}
@@ -174,20 +176,26 @@ func sleepOrWake(ctx context.Context, wake <-chan struct{}, d time.Duration) err
 
 // Succeeded records an answer that proves the remote reachable and
 // willing (an accepted chunk, or a refusal of one record or one topic):
-// the gate opens and its backoff resets.
+// the gate opens and its backoff resets. A probe's answer always wakes
+// the waiters, even on a gate already open: a sibling of the prober may
+// be waiting for that probe.
 func (g *Gate) Succeeded(probe bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	handedBack := probe && g.probing
 	if probe {
 		g.probing, g.prober = false, nil
 	}
 	g.failures = 0
-	if g.closed || g.backoff != 0 {
+	opened := g.closed || g.backoff != 0
+	if opened {
 		g.closed, g.backoff = false, 0
-		g.signalLocked()
 		if g.observe != nil {
 			g.observe(0)
 		}
+	}
+	if opened || handedBack {
+		g.signalLocked()
 	}
 }
 
@@ -209,6 +217,8 @@ func (g *Gate) Failed(v Verdict, probe bool) (laneBackoff bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if probe {
+		// A failed probe always closes the gate again below, which
+		// wakes the prober's siblings.
 		g.probing, g.prober = false, nil
 	}
 	if g.closed && !probe {
