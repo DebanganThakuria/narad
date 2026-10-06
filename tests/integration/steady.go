@@ -87,7 +87,7 @@ type steadyStats struct {
 	produce429, produce503, produceErr     atomic.Int64
 	consume429, consume503, consumeErr     atomic.Int64
 	ackGone, ack429, ack503, ackErr        atomic.Int64
-	dupBeforeAck, dupAfterAck              atomic.Int64
+	dupBeforeAck, dupAfterAck, dupCopy     atomic.Int64
 	unknownID, ambiguousProduce            atomic.Int64
 	latProduce, latConsume, latAck, latE2E hist
 }
@@ -105,6 +105,62 @@ type inFlightRecord struct {
 	// broker never handed out from one whose ack failed, in the
 	// post-mortem listing at the end of the run.
 	delivered atomic.Bool
+
+	// copies holds every stored copy of this message a consumer was
+	// handed, and whether a consumer has confirmed an ack of it. The
+	// broker can store an accepted message twice after a crash (the
+	// delivery contract's at-least-once paths), and two consumers may
+	// then each lease and ack their own copy at the same time, which is
+	// not a double lease.
+	copiesMu sync.Mutex
+	copies   map[messageCopy]bool
+}
+
+// messageCopy is where one stored copy of a message lives.
+type messageCopy struct {
+	topic     string
+	partition int
+	offset    int64
+}
+
+// noteCopy records that copy c was delivered and reports whether it is
+// a further copy: the message had already been delivered from another
+// one.
+func (r *inFlightRecord) noteCopy(c messageCopy) (further bool) {
+	r.copiesMu.Lock()
+	defer r.copiesMu.Unlock()
+	if r.copies == nil {
+		r.copies = map[messageCopy]bool{}
+	}
+	if _, seen := r.copies[c]; seen {
+		return false
+	}
+	further = len(r.copies) > 0
+	r.copies[c] = false
+	return further
+}
+
+// confirmCopy records a 204 for an ack of copy c and reports whether a
+// consumer had already confirmed one for that same copy.
+func (r *inFlightRecord) confirmCopy(c messageCopy) (again bool) {
+	r.copiesMu.Lock()
+	defer r.copiesMu.Unlock()
+	if r.copies == nil {
+		r.copies = map[messageCopy]bool{}
+	}
+	again = r.copies[c]
+	r.copies[c] = true
+	return again
+}
+
+// doubleLease reports whether a 204 proves that two consumers held one
+// lease at once: the message was not acked when this delivery returned,
+// another consumer's ack was confirmed since, and that ack was for this
+// same stored copy. Another copy of the message acked meanwhile is the
+// at-least-once duplicate a crash can store, each copy with a lease of
+// its own.
+func doubleLease(ackedAtDelivery, firstConfirmation, copyConfirmedBefore bool) bool {
+	return !ackedAtDelivery && !firstConfirmation && copyConfirmedBefore
 }
 
 func runSteady(cfg config) (err error) {
@@ -309,6 +365,13 @@ func runSteady(cfg config) (err error) {
 				}
 				rec := v.(*inFlightRecord)
 				rec.delivered.Store(true)
+				stored := messageCopy{topic: msg.Topic, partition: msg.Partition, offset: msg.Offset}
+				if rec.noteCopy(stored) {
+					// The broker stored this message more than once (a
+					// crash replay, or a commit retried after its owner
+					// died): at-least-once, not a lease problem.
+					st.dupCopy.Add(1)
+				}
 				if rec.ambiguous.CompareAndSwap(true, false) {
 					// Delivered, so the server did accept it despite our error.
 					st.produced.Add(1)
@@ -354,26 +417,29 @@ func runSteady(cfg config) (err error) {
 						st.ackErr.Add(1)
 					}
 				case astatus == http.StatusNoContent:
-					if rec.acked.CompareAndSwap(false, true) {
+					copyConfirmedBefore := rec.confirmCopy(stored)
+					first := rec.acked.CompareAndSwap(false, true)
+					if first {
 						st.acked.Add(1)
 						st.latE2E.observe(time.Since(rec.producedAt))
-					} else if !redeliveredAfterAck {
-						// A second 204 for a message this delivery did not
-						// find already acked: another consumer confirmed it
-						// between the check above and this swap. The two
-						// held it at the same time, which is the safety
-						// property a visibility timeout exists to provide.
+					} else if doubleLease(redeliveredAfterAck, first, copyConfirmedBefore) {
+						// A second 204 for the same stored copy, which this
+						// delivery did not find already acked: another
+						// consumer confirmed it between the check above and
+						// this swap. The two held one lease at the same
+						// time, which is the safety property a visibility
+						// timeout exists to provide.
 						//
-						// The redeliveredAfterAck guard is what keeps this
-						// honest. A redelivery after an ack is acked again
-						// on the path above and also lands here with the
-						// swap failing, but that is sequential, expected
-						// under at-least-once, and already counted as
-						// dupAfterAck. A lapsed lease answers 410 and is
-						// counted as ackGone. Neither is a double lease.
+						// Not counted here: a redelivery after an ack
+						// (sequential, expected under at-least-once, and
+						// counted as dupAfterAck), a lapsed lease (410,
+						// counted as ackGone), and another stored copy of
+						// the message acked meanwhile (each copy has a lease
+						// of its own; counted as dupCopy on delivery).
 						st.dupBeforeAck.Add(1)
 						if cfg.fatalDupBeforeAck {
-							fatal.CompareAndSwap(nil, fmt.Errorf("message %q was acked twice concurrently, so two consumers held it at once", msg.Payload.ID))
+							fatal.CompareAndSwap(nil, fmt.Errorf("message %q (%s/%d offset %d) was acked twice concurrently, so two consumers held one lease at once",
+								msg.Payload.ID, msg.Topic, msg.Partition, msg.Offset))
 						}
 					}
 				case astatus == http.StatusGone:
@@ -397,11 +463,11 @@ func runSteady(cfg config) (err error) {
 			d = cur.sub(prev)
 		}
 		secs := math.Max(d.elapsed.Seconds(), 0.001)
-		fmt.Printf("%-6s t=%-5s prod/s=%-8.0f cons/s=%-8.0f ack/s=%-8.0f inflight=%-7d | 429 p/c/a=%d/%d/%d 503=%d/%d/%d gone=%d err=%d/%d/%d dup=%d/%d | p50/p99 produce=%s/%s consume=%s/%s ack=%s/%s e2e=%s/%s\n",
+		fmt.Printf("%-6s t=%-5s prod/s=%-8.0f cons/s=%-8.0f ack/s=%-8.0f inflight=%-7d | 429 p/c/a=%d/%d/%d 503=%d/%d/%d gone=%d err=%d/%d/%d dup=%d/%d copies=%d | p50/p99 produce=%s/%s consume=%s/%s ack=%s/%s e2e=%s/%s\n",
 			label, time.Since(start).Round(time.Second),
 			float64(d.produced)/secs, float64(d.consumed)/secs, float64(d.acked)/secs, cur.produced-cur.acked,
 			d.produce429, d.consume429, d.ack429, d.produce503, d.consume503, d.ack503, d.ackGone,
-			d.produceErr, d.consumeErr, d.ackErr, d.dupBeforeAck, d.dupAfterAck,
+			d.produceErr, d.consumeErr, d.ackErr, d.dupBeforeAck, d.dupAfterAck, d.dupCopy,
 			d.latProduce.pct(0.5), d.latProduce.pct(0.99), d.latConsume.pct(0.5), d.latConsume.pct(0.99),
 			d.latAck.pct(0.5), d.latAck.pct(0.99), d.latE2E.pct(0.5), d.latE2E.pct(0.99))
 		return &cur
@@ -447,11 +513,11 @@ drain:
 
 	total := snapshotSteady(&st)
 	elapsed := time.Since(start)
-	fmt.Printf("TOTAL  duration=%s produced=%d consumed=%d acked=%d | overall ack/s=%.0f (over %s of production) | 429 p/c/a=%d/%d/%d 503=%d/%d/%d gone=%d err=%d/%d/%d dup=%d/%d unknown=%d ambiguous_produce=%d | p50/p99 produce=%s/%s consume=%s/%s ack=%s/%s e2e=%s/%s\n",
+	fmt.Printf("TOTAL  duration=%s produced=%d consumed=%d acked=%d | overall ack/s=%.0f (over %s of production) | 429 p/c/a=%d/%d/%d 503=%d/%d/%d gone=%d err=%d/%d/%d dup=%d/%d copies=%d unknown=%d ambiguous_produce=%d | p50/p99 produce=%s/%s consume=%s/%s ack=%s/%s e2e=%s/%s\n",
 		elapsed.Round(time.Second), total.produced, total.consumed, total.acked,
 		float64(total.acked)/math.Max(cfg.duration.Seconds(), 0.001), cfg.duration,
 		total.produce429, total.consume429, total.ack429, total.produce503, total.consume503, total.ack503, total.ackGone,
-		total.produceErr, total.consumeErr, total.ackErr, total.dupBeforeAck, total.dupAfterAck, total.unknownID, st.ambiguousProduce.Load(),
+		total.produceErr, total.consumeErr, total.ackErr, total.dupBeforeAck, total.dupAfterAck, total.dupCopy, total.unknownID, st.ambiguousProduce.Load(),
 		total.latProduce.pct(0.5), total.latProduce.pct(0.99), total.latConsume.pct(0.5), total.latConsume.pct(0.99),
 		total.latAck.pct(0.5), total.latAck.pct(0.99), total.latE2E.pct(0.5), total.latE2E.pct(0.99))
 
@@ -511,6 +577,7 @@ type steadySnapshot struct {
 	consume429, consume503, consumeErr     int64
 	ackGone, ack429, ack503, ackErr        int64
 	dupBeforeAck, dupAfterAck, unknownID   int64
+	dupCopy                                int64
 	latProduce, latConsume, latAck, latE2E histSnap
 }
 
@@ -522,6 +589,7 @@ func snapshotSteady(st *steadyStats) steadySnapshot {
 		consume429: st.consume429.Load(), consume503: st.consume503.Load(), consumeErr: st.consumeErr.Load(),
 		ackGone: st.ackGone.Load(), ack429: st.ack429.Load(), ack503: st.ack503.Load(), ackErr: st.ackErr.Load(),
 		dupBeforeAck: st.dupBeforeAck.Load(), dupAfterAck: st.dupAfterAck.Load(), unknownID: st.unknownID.Load(),
+		dupCopy:    st.dupCopy.Load(),
 		latProduce: st.latProduce.snapshot(), latConsume: st.latConsume.snapshot(), latAck: st.latAck.snapshot(), latE2E: st.latE2E.snapshot(),
 	}
 }
@@ -534,6 +602,7 @@ func (s steadySnapshot) sub(p *steadySnapshot) steadySnapshot {
 		consume429: s.consume429 - p.consume429, consume503: s.consume503 - p.consume503, consumeErr: s.consumeErr - p.consumeErr,
 		ackGone: s.ackGone - p.ackGone, ack429: s.ack429 - p.ack429, ack503: s.ack503 - p.ack503, ackErr: s.ackErr - p.ackErr,
 		dupBeforeAck: s.dupBeforeAck - p.dupBeforeAck, dupAfterAck: s.dupAfterAck - p.dupAfterAck, unknownID: s.unknownID - p.unknownID,
+		dupCopy:    s.dupCopy - p.dupCopy,
 		latProduce: s.latProduce.sub(p.latProduce), latConsume: s.latConsume.sub(p.latConsume), latAck: s.latAck.sub(p.latAck), latE2E: s.latE2E.sub(p.latE2E),
 	}
 }
