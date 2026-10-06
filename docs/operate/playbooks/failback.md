@@ -14,7 +14,7 @@ The target of a remote child must not have remote children of its own, and every
 
 ## Fail back {#steps}
 
-1. **Prove `a` is quiet.** `rate(narad_messages_produced_total{topic="orders"}[10m])` is 0 on `a`, and `narad_ingress_dispatch_backlog_records` is 0 on every `a` node.
+1. **Prove `a` is quiet.** `rate(narad_messages_produced_total{topic="orders"}[10m])` is 0 on `a`. Records of `orders` an `a` node accepted and has not committed yet are invisible to the lag; the detach in step 2 counts them, by node, for `orders` alone, and refuses while any remain. `narad_ingress_dispatch_backlog_records` is no proof here: it counts every topic the node serves.
 
 2. **Drain and detach the link from `a` to `b`:**
 

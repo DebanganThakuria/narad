@@ -55,18 +55,18 @@ The link sends JSON payloads as they are and anything else as base64. Between re
 
 ## Watch the link {#watch}
 
-At the moment `a`'s region fails, the data at risk is the link's lag (records committed on `a` that `b` has not answered `202` for) plus `a`'s ingress dispatch backlog (records `a` answered `202` for and had not committed yet, which the lag cannot see). Nothing on `b`'s side is at risk: a `202` from `b` is durable on `b`.
+At the moment `a`'s region fails, the data at risk is the link's lag (records committed on `a` that `b` has not answered `202` for) plus `a`'s ingress dispatch backlog of `orders` (records `a` answered `202` for and had not committed yet, which the lag cannot see). No metric counts that backlog for one topic: `narad_ingress_dispatch_backlog_records` counts every topic the node serves, so it is an upper bound. Nothing on `b`'s side is at risk: a `202` from `b` is durable on `b`.
 
 | Signal | Why | Alert |
 |---|---|---|
 | `max(narad_fanout_remote_lag_seconds{child="orders-dr"})` | The recovery point | Page above your objective |
-| `narad_ingress_dispatch_backlog_records` on `a` | The part of the recovery point the lag cannot see | Warn when above 0 for 30 s |
+| `narad_ingress_dispatch_backlog_records` on `a` | An upper bound on the part of the recovery point the lag cannot see; node-wide, across every topic | Warn when it keeps rising for 10 minutes: records are not reaching their owners. A node that takes produce is rarely at 0, so do not alert on above 0 |
 | `sum(rate(narad_fanout_committed_total{parent="orders",child="orders-dr"}[5m])) / sum(rate(narad_messages_produced_total{topic="orders"}[5m]))` | Below 1, the link is falling behind | Warn below 1 for 15 minutes |
 | `narad_fanout_remote_retention_headroom_seconds` | Time left before drop-behind | Warn below 12 hours, page below 4 |
 | `narad_fanout_remote_state` | Why the link stopped | As in [Monitor and alert](../monitoring.md#remote-alerts) |
 | `narad_remote_chunk_bytes_limit` | Below 960 KiB, the path is cutting uploads short | Warn at the 64 KiB floor for 10 minutes |
 
-- **Watch `a` from outside `a`'s region.** Send `a`'s metrics, over an authenticated connection, to a store in `b`'s region or a global one. Do not open `a`'s metrics listener to another region: it serves without credentials, for scrapes inside the cluster. After a failure, the data at risk is then the last stored `lag_seconds` plus one scrape interval, plus the last dispatch backlog.
+- **Watch `a` from outside `a`'s region.** Send `a`'s metrics, over an authenticated connection, to a store in `b`'s region or a global one. Do not open `a`'s metrics listener to another region: it serves without credentials, for scrapes inside the cluster. After a failure, the data at risk is then the last stored `lag_seconds` plus one scrape interval, plus at most the last dispatch backlog.
 - **Optionally, watch from `b`'s side too.** Give a small topic on `a` its own remote child to `b`, produce `{"ts": <a's Unix ms>}` to it every 5 seconds, and page from `b` when the newest one is more than 30 seconds old. Give the job and the monitor their own users, never the replicator's. The signal outlives `a`'s monitoring; its error is the clock offset between the regions.
 
 ## Clocks {#clocks}

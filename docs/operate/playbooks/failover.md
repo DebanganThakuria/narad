@@ -14,7 +14,7 @@ Before you start: a remote child from the cluster in use, `a`, to the recovery c
 
 1. **Decide that `a`'s region is lost, not just the link.** A link that is down while `a` still serves its clients is a lag incident: see [Troubleshooting](../troubleshooting.md#remote-link-stalled), not this page.
 
-2. **Record the data at risk:** the last stored `narad_fanout_remote_lag_seconds` for the link plus one scrape interval, and the last `narad_ingress_dispatch_backlog_records` of each `a` node. That is what `b` may never receive.
+2. **Record the data at risk:** the last stored `narad_fanout_remote_lag_seconds` for the link plus one scrape interval, and the last `narad_ingress_dispatch_backlog_records` of each `a` node. That is at most what `b` may never receive: the gauge counts every topic the node serves, so for one link it is an upper bound.
 
 3. **Choose the fence.**
 
