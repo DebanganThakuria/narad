@@ -520,8 +520,11 @@ func (s *Service) Status() NodeStatusReport {
 		rep.Remotes = s.cfg.Cache.Status()
 	}
 	if !s.AllowlistConfigured() {
+		// Blind by design (ch. 5.8): nothing the target answered, the
+		// same fields Blind strips from a test answer.
 		for i := range rep.Remotes {
 			rep.Remotes[i].RTTMs = nil
+			rep.Remotes[i].CertNotAfter = ""
 		}
 	}
 	return rep

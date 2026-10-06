@@ -760,6 +760,17 @@ func TestRemoteTestIsBlindWithoutAnAllowlist(t *testing.T) {
 				t.Fatalf("report %v, want the node and the result", rep)
 			}
 		}
+		// The check recorded the target's certificate in this node's
+		// cache; the status views must hide it the same way.
+		for _, path := range []string{"/v1/remotes", "/v1/remotes/b"} {
+			res := n.do(t, admin, http.MethodGet, path, "")
+			if res.status != http.StatusOK {
+				t.Fatalf("GET %s: %d %s", path, res.status, res.body)
+			}
+			if got := strings.Contains(string(res.body), "server_cert_not_after"); got == c.blind {
+				t.Fatalf("allowlist %v: GET %s carries server_cert_not_after %v: %s", c.allowlist, path, got, res.body)
+			}
+		}
 	}
 }
 

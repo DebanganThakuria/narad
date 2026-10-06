@@ -2483,7 +2483,7 @@ remote writes a minute, and a cluster holds at most 64 remotes.
 | `nodes[].fingerprint`<br>string | The fingerprint of the password it holds. |
 | `nodes[].last_ok_at`<br>string | When it last reached the remote successfully. |
 | `nodes[].last_error`<br>string | The class of its last failure toward the remote, `none` when there was none. Never text from the remote. |
-| `nodes[].server_cert_not_after`<br>string | When the remote's certificate expires, as the last check saw it. |
+| `nodes[].server_cert_not_after`<br>string | When the remote's certificate expires, as the last check saw it; only with `remotes.allowed_hosts` set. |
 | `nodes[].rtt_ms`<br>integer | Connect time to the remote; only with `remotes.allowed_hosts` set. |
 
 ```sh title="Request"
@@ -2597,7 +2597,7 @@ version and age, absent before the first remote.
 | `remotes[].nodes[].fingerprint`<br>string | The fingerprint of the password it holds. |
 | `remotes[].nodes[].last_ok_at`<br>string | When it last reached the remote successfully. |
 | `remotes[].nodes[].last_error`<br>string | The class of its last failure toward the remote, `none` when there was none. Never text from the remote. |
-| `remotes[].nodes[].server_cert_not_after`<br>string | When the remote's certificate expires, as the last check saw it. |
+| `remotes[].nodes[].server_cert_not_after`<br>string | When the remote's certificate expires, as the last check saw it; only with `remotes.allowed_hosts` set. |
 | `remotes[].nodes[].rtt_ms`<br>integer | Connect time to the remote; only with `remotes.allowed_hosts` set. |
 | `lingering`<br>array of object | Deleted remotes some member still holds, with the members `holding` them and the ones `not_answering`. |
 | `not_answering`<br>array of string | Every member that was asked and did not answer, whether or not an answering member still holds a deleted remote. Such a member may still hold one. |
@@ -2724,7 +2724,7 @@ for it, as [list remotes](#list-remotes) does.
 | `nodes[].fingerprint`<br>string | The fingerprint of the password it holds. |
 | `nodes[].last_ok_at`<br>string | When it last reached the remote successfully. |
 | `nodes[].last_error`<br>string | The class of its last failure toward the remote, `none` when there was none. Never text from the remote. |
-| `nodes[].server_cert_not_after`<br>string | When the remote's certificate expires, as the last check saw it. |
+| `nodes[].server_cert_not_after`<br>string | When the remote's certificate expires, as the last check saw it; only with `remotes.allowed_hosts` set. |
 | `nodes[].rtt_ms`<br>integer | Connect time to the remote; only with `remotes.allowed_hosts` set. |
 
 ```sh title="Request"
@@ -2851,7 +2851,7 @@ change live; a limit named with `0` or `""` is refused.
 | `nodes[].fingerprint`<br>string | The fingerprint of the password it holds. |
 | `nodes[].last_ok_at`<br>string | When it last reached the remote successfully. |
 | `nodes[].last_error`<br>string | The class of its last failure toward the remote, `none` when there was none. Never text from the remote. |
-| `nodes[].server_cert_not_after`<br>string | When the remote's certificate expires, as the last check saw it. |
+| `nodes[].server_cert_not_after`<br>string | When the remote's certificate expires, as the last check saw it; only with `remotes.allowed_hosts` set. |
 | `nodes[].rtt_ms`<br>integer | Connect time to the remote; only with `remotes.allowed_hosts` set. |
 
 ```sh title="Request"
@@ -3030,7 +3030,7 @@ The answer is `200` whether or not the checks pass: read `result`.
 | `checks[].target_serves_ids`<br>boolean | `false` for a target whose children listing serves no `parent_id` and no `remote` objects (v3.1.0): it cannot hold a remote child, so loop detection starts once it is upgraded; recreate detection reads the topic id from its describe answer. |
 | `checks[].rtt_ms`<br>integer | TCP connect time, with `remotes.allowed_hosts` set. |
 | `checks[].lane_capacity_per_s`<br>integer | An estimate of one lane's records per second at that round trip, with `remotes.allowed_hosts` set. |
-| `checks[].server_cert_not_after`<br>string | When the target's certificate expires. |
+| `checks[].server_cert_not_after`<br>string | When the target's certificate expires, with `remotes.allowed_hosts` set. |
 | `checks[].warnings`<br>array of string | Advisories, such as a certificate that expires within 14 days. |
 | `checks[].posture`<br>object | The member's `security_enabled`, `legacy_cluster_auth`, `raft_tls` and `api_hop_encrypted`. |
 

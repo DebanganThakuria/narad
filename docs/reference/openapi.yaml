@@ -3277,7 +3277,7 @@ components:
                 description: The class of its last failure toward the remote, `none` when there was none. Never text from the remote.
               server_cert_not_after:
                 type: string
-                description: When the remote's certificate expires, as the last check saw it.
+                description: When the remote's certificate expires, as the last check saw it; only with `remotes.allowed_hosts` set.
               rtt_ms:
                 type: integer
                 description: Connect time to the remote; only with `remotes.allowed_hosts` set.
@@ -3362,7 +3362,7 @@ components:
                 description: An estimate of one lane's records per second at that round trip, with `remotes.allowed_hosts` set.
               server_cert_not_after:
                 type: string
-                description: When the target's certificate expires.
+                description: When the target's certificate expires, with `remotes.allowed_hosts` set.
               warnings:
                 type: array
                 items:

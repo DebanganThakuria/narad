@@ -177,6 +177,7 @@ The command exits `0` only when `result` is `pass`; otherwise it ends with `nara
 
 - A node's `state` is `ready`, `stale` while it still holds an older `credential_version` than the remote, `credential_unreadable` when it cannot open the password (it lacks the secret it was sealed under), `node_insecure` when its own settings forbid remotes, `missing` before it has built an entry, or `unknown` when it did not answer.
 - `last_error` is a class, never text from the remote.
+- `server_cert_not_after` and `rtt_ms` appear only with `remotes.allowed_hosts` set; without it a node shows nothing the remote answered.
 - `lingering` lists deleted remotes some node still holds, and the nodes that did not answer.
 - `not_answering` lists every node that did not answer, even when no answering node holds a deleted remote, and `narad remote ls` prints a warning naming them (unreleased).
 - `--no-nodes` (`?nodes=false`) skips asking the nodes.
