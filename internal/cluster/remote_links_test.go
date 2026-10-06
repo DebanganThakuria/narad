@@ -560,3 +560,20 @@ func TestRawDeletesOfRemoteLinkedTopicsAreRefused(t *testing.T) {
 		t.Fatal("a refused raw delete removed the stub")
 	}
 }
+
+// An attach a member's check throttle refused answers 429 with the
+// retry hint the ingress turns into Retry-After, blind or not.
+func TestThrottledAttachCheckCarriesARetryHint(t *testing.T) {
+	for _, blind := range []bool{false, true} {
+		s := linksRig(t)
+		s.checks.blind = blind
+		s.checks.fail = topic.RemoteStateThrottled
+		res := s.write(t, nodewire.RemoteSubAttach, map[string]any{"parent": "orders", "child": "orders-to-b", "remote": "b"})
+		if res.Status != http.StatusTooManyRequests {
+			t.Fatalf("blind %v: throttled attach: %d %s, want 429", blind, res.Status, res.Body)
+		}
+		if secs, _ := bodyOf(t, res)["retry_after_seconds"].(float64); secs < 1 {
+			t.Fatalf("blind %v: throttled attach answer %s, want retry_after_seconds", blind, res.Body)
+		}
+	}
+}

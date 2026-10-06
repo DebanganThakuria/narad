@@ -1266,9 +1266,22 @@ func checkErrorAnswer(err error, reports []remote.NodeReport, credentialVersion 
 	if ce.Reports != nil {
 		reports = ce.Reports
 	}
-	return jsonResponse(ce.Status, map[string]any{
+	return jsonResponse(ce.Status, withRetryHint(ce.Status, map[string]any{
 		"error": "remote check failed: " + ce.Class, "class": ce.Class, "members": remote.Failing(reports, credentialVersion),
-	})
+	}))
+}
+
+// checkRetryAfterSeconds is the retry hint of a check a member's
+// throttle refused: one check interval, rounded up.
+var checkRetryAfterSeconds = int((remote.CheckInterval + time.Second - 1) / time.Second)
+
+// withRetryHint adds retry_after_seconds, which the ingress answers as
+// Retry-After, to a throttled (429) check answer.
+func withRetryHint(status int, body map[string]any) map[string]any {
+	if status == http.StatusTooManyRequests {
+		body["retry_after_seconds"] = checkRetryAfterSeconds
+	}
+	return body
 }
 
 // checkErrorResponse answers a failed check with its status and the
@@ -1279,13 +1292,15 @@ func checkErrorResponse(err error, reports []remote.NodeReport) nodewire.Respons
 		if ce.Reports != nil {
 			reports = ce.Reports
 		}
-		return jsonResponse(ce.Status, map[string]any{
+		return jsonResponse(ce.Status, withRetryHint(ce.Status, map[string]any{
 			"error": "remote check failed: " + ce.Class, "class": ce.Class, "checks": reports,
-		})
+		}))
 	}
 	switch {
 	case errors.Is(err, errs.ErrRemoteThrottled):
-		return errorResponse(http.StatusTooManyRequests, "a check for this remote is already running or ran less than 5s ago; retry")
+		return jsonResponse(http.StatusTooManyRequests, withRetryHint(http.StatusTooManyRequests, map[string]any{
+			"error": "a check for this remote is already running or ran less than 5s ago; retry",
+		}))
 	case errors.Is(err, errs.ErrRemoteFeatureGate), errors.Is(err, errs.ErrRemotePosture):
 		return postureResponse(err)
 	}

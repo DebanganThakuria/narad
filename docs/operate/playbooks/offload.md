@@ -50,7 +50,7 @@ The plan: the source keeps taking produces while a [remote child](../../referenc
       --from unconsumed
     ```
 
-    Read the start offsets and any warnings in the dry run. From now on, everything not yet acked on the source, and everything produced to it later, flows to the target.
+    Read the start offsets and any warnings in the dry run, and leave at least 5 seconds between the dry run and the attach: each node checks one remote at most once every 5 seconds, and an attach sent sooner answers `429` (retry after its `Retry-After`). From now on, everything not yet acked on the source, and everything produced to it later, flows to the target.
 
 6. **Start the target's consumers.** Watch the link with `narad --ctx a topic children orders` (`running`, lag near 0) and the target's consumer lag.
 

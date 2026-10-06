@@ -122,6 +122,8 @@ Name the remote in an ordinary attach. Run it with `dry_run` first: the leader r
 
     The CLI prints the same JSON as the curl responses.
 
+    Each node checks one remote at most once every 5 seconds, and a dry run or a `remote test` is a check: an attach sent sooner after one answers `429` with `Retry-After`. Wait that long, then send it again.
+
 These examples ran against a local pair of single-node clusters, the remote behind a TLS proxy on `localhost:8443`; `$NARAD` and `$AUTH` are this cluster's base URL and an admin's credentials ([Connect and authenticate](connect.md)). The answer is the new stub: `partitions` is `0` and `remote` says where its copies go.
 
 | Field | Meaning |

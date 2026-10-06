@@ -441,7 +441,10 @@ func Test(s *handlers.Set) http.HandlerFunc {
 			if errors.As(err, &ce) {
 				ans.Result, ans.Class = remote.ResultFail, ce.Class
 				if ce.Status == http.StatusTooManyRequests {
+					// A member's throttle refused the check: retry after
+					// one check interval, as the single-node branch says.
 					status = http.StatusTooManyRequests
+					c.w.Header().Set("Retry-After", "5")
 				}
 			}
 		}

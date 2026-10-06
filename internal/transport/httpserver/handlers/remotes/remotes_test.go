@@ -762,3 +762,23 @@ func TestRemoteTestIsBlindWithoutAnAllowlist(t *testing.T) {
 		}
 	}
 }
+
+// A test refused by the per-node check throttle answers 429 with a
+// Retry-After, with or without a host allowlist: the documented
+// contract is to retry after it.
+func TestThrottledRemoteTestAnswersRetryAfter(t *testing.T) {
+	for _, allowlist := range []bool{false, true} {
+		n := newAPINode(t, apiOpts{allowlist: allowlist})
+		if res := n.do(t, admin, http.MethodPost, "/v1/remotes", n.createBody("b", canary)); res.status != http.StatusCreated {
+			t.Fatalf("create: %d %s", res.status, res.body)
+		}
+		n.cache.Refresh()
+		if res := n.do(t, admin, http.MethodPost, "/v1/remotes/b/test", `{"topic":"orders"}`); res.status != http.StatusOK {
+			t.Fatalf("allowlist %v: first test: %d %s", allowlist, res.status, res.body)
+		}
+		res := n.do(t, admin, http.MethodPost, "/v1/remotes/b/test", `{"topic":"orders"}`)
+		if res.status != http.StatusTooManyRequests || res.header.Get("Retry-After") == "" {
+			t.Fatalf("allowlist %v: second test: %d Retry-After %q %s, want 429 with Retry-After", allowlist, res.status, res.header.Get("Retry-After"), res.body)
+		}
+	}
+}
