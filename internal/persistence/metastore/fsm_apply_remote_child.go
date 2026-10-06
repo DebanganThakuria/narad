@@ -313,12 +313,7 @@ func (f *fsmState) applySetRemoteChildState(data []byte) error {
 			if op.Skip.Partition < 0 || op.Skip.Offset < 0 {
 				return fmt.Errorf("%w: skip needs a partition and an offset >= 0", errs.ErrInvalidArgument)
 			}
-			skip := make(map[int]int64, len(link.Skip)+1)
-			for p, o := range link.Skip {
-				skip[p] = o
-			}
-			skip[op.Skip.Partition] = op.Skip.Offset
-			link.Skip = skip
+			link.Skip = topic.WithSkip(link.Skip, op.Skip.Partition, op.Skip.Offset)
 		}
 		stub.Remote = &link
 		return putTopicRecord(tx, stub)

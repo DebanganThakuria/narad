@@ -1171,7 +1171,7 @@ Content-Length: 423
     "target_id": "128e63dd156ff568",
     "from": "unconsumed",
     "lanes": 1,
-    "skip": {"0": 2},
+    "skip": {"0": [2]},
     "created_by": "admin"
   }
 }
@@ -1191,8 +1191,10 @@ while it is stuck on exactly that partition and offset in
 nothing, and the record stays in the parent's log for its
 retention. Each dropped record counts on
 `narad_fanout_remote_skipped_records_total` and is logged by the
-node that drops it. The child's `remote.skip` keeps the last offset
-accepted per partition.
+node that drops it. The child's `remote.skip` keeps every skipped
+offset per partition, ascending, the newest 16 of them, so a slab
+read again (after a restart or a partition move) drops each of them
+again.
 
 **Grant needed:** `admin`, with security on.
 
@@ -1266,7 +1268,7 @@ Content-Length: 532
     "pause_reason": "target maintenance, CHG-4211",
     "paused_by": "admin",
     "paused_at_ms": 1791292035849,
-    "skip": {"0": 2},
+    "skip": {"0": [2]},
     "created_by": "admin"
   }
 }

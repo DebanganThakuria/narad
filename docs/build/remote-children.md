@@ -253,7 +253,7 @@ curl -i -u "$AUTH" -X POST \
   -d '{"partition": 0, "offset": 2}'
 ```
 
-With the CLI: `narad topic skip orders orders-to-b --partition 0 --offset 2`. The cursor drops the record only while it is stuck on exactly that partition and offset, so a skip that names any other record changes nothing: the stub records it under `remote.skip`, and the cursor ships the record as usual. The record stays in the parent's log for its retention, and every dropped record is counted in `narad_fanout_remote_skipped_records_total` and logged by the node that drops it (`remote child skipped a record an admin skipped`, warning). The skip request itself is audited.
+With the CLI: `narad topic skip orders orders-to-b --partition 0 --offset 2`. The cursor drops the record only while it is stuck on exactly that partition and offset, so a skip that names any other record changes nothing: the stub records it under `remote.skip` (every skipped offset per partition, the newest 16), and the cursor ships the record as usual. Skips add up: skipping a second record of a partition keeps the first one skipped. The record stays in the parent's log for its retention, and every dropped record is counted in `narad_fanout_remote_skipped_records_total` and logged by the node that drops it (`remote child skipped a record an admin skipped`, warning). The skip request itself is audited.
 
 ## Detach a remote child {#detach}
 

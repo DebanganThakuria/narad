@@ -2,6 +2,7 @@ package topic
 
 import (
 	"errors"
+	"slices"
 	"strconv"
 	"unicode"
 	"unicode/utf8"
@@ -33,11 +34,47 @@ type RemoteLink struct {
 	// PausedBy and CreatedBy are admin usernames, shown to admins only.
 	PausedBy   string `json:"paused_by,omitempty"`
 	PausedAtMs int64  `json:"paused_at_ms,omitempty"`
-	// Skip records, per parent partition, the one offset an admin
-	// accepted to lose. A cursor drops the record only while it is
-	// blocked on exactly that offset, so a stale entry changes nothing.
-	Skip      map[int]int64 `json:"skip,omitempty"`
-	CreatedBy string        `json:"created_by,omitempty"`
+	// Skip records, per parent partition, the offsets an admin accepted
+	// to lose, ascending, at most MaxRemoteSkipsPerPartition of them
+	// (the newest kept). A cursor drops a record only while it is blocked
+	// on exactly one of those offsets, so a stale entry changes nothing.
+	// Each skip is kept, not replaced by the next: a slab read again (a
+	// re-read, a restart, a partition move) meets every skipped record
+	// again and must still drop it.
+	Skip      map[int][]int64 `json:"skip,omitempty"`
+	CreatedBy string          `json:"created_by,omitempty"`
+}
+
+// MaxRemoteSkipsPerPartition bounds the skips a link keeps per parent
+// partition. A slab blocks at most one record per lane (8 at most) at a
+// time, so the newest 16 always cover the records a cursor can still
+// meet; older ones lie behind it and change nothing.
+const MaxRemoteSkipsPerPartition = 16
+
+// Skipped reports whether an admin skipped the record at offset of the
+// parent partition.
+func (l RemoteLink) Skipped(partition int, offset int64) bool {
+	_, found := slices.BinarySearch(l.Skip[partition], offset)
+	return found
+}
+
+// WithSkip returns a copy of skip with offset added to the partition's
+// set: kept ascending, each offset once, the newest
+// MaxRemoteSkipsPerPartition kept.
+func WithSkip(skip map[int][]int64, partition int, offset int64) map[int][]int64 {
+	out := make(map[int][]int64, len(skip)+1)
+	for p, offs := range skip {
+		out[p] = slices.Clone(offs)
+	}
+	offs := out[partition]
+	if i, found := slices.BinarySearch(offs, offset); !found {
+		offs = slices.Insert(offs, i, offset)
+	}
+	if len(offs) > MaxRemoteSkipsPerPartition {
+		offs = offs[len(offs)-MaxRemoteSkipsPerPartition:]
+	}
+	out[partition] = offs
+	return out
 }
 
 // IsRemoteChild reports whether the topic is a remote child's stub.

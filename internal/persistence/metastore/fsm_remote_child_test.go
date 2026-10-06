@@ -130,7 +130,7 @@ func TestRemoteChildAttachCreatesTheStubAndLinksIt(t *testing.T) {
 func TestRemoteChildAttachStartsUnpausedWithNoSkip(t *testing.T) {
 	f := remoteChildFSM(t)
 	op := remoteAttachOp("orders", "orders-to-b", "b", "orders")
-	op.Remote.Paused, op.Remote.PausedBy, op.Remote.Skip = true, "mallory", map[int]int64{0: 5}
+	op.Remote.Paused, op.Remote.PausedBy, op.Remote.Skip = true, "mallory", map[int][]int64{0: {5}}
 	if err := fsmAttachRemote(t, f, op); err != nil {
 		t.Fatal(err)
 	}
@@ -499,7 +499,7 @@ func TestRemoteChildStateOpIsFieldScopedAndEpochChecked(t *testing.T) {
 		t.Fatalf("lanes, target, skip: %v", err)
 	}
 	r = fsmGetTopic(t, f, "orders-to-b").Remote
-	if !r.Paused || r.Lanes != 4 || r.TargetID != "tid-2" || r.Skip[2] != 99 {
+	if !r.Paused || r.Lanes != 4 || r.TargetID != "tid-2" || !r.Skipped(2, 99) {
 		t.Fatalf("after field-scoped change: %+v (the pause must survive)", r)
 	}
 
@@ -612,4 +612,43 @@ func newRemoteChildTestStore(t *testing.T) *Store {
 	}
 	t.Fatal("timed out waiting for leader")
 	return nil
+}
+
+// Two skips on one partition both hold: a second skip must not re-arm
+// the first record, which a re-read, a restart or a partition move
+// would otherwise send and block on again.
+func TestRemoteChildSkipsOnOnePartitionAccumulate(t *testing.T) {
+	f := remoteChildFSM(t)
+	if err := fsmAttachRemote(t, f, remoteAttachOp("orders", "orders-to-b", "b", "orders")); err != nil {
+		t.Fatal(err)
+	}
+	base := RemoteChildStateOp{Parent: "orders", Stub: "orders-to-b", Epoch: "ep-orders-to-b"}
+	for _, off := range []int64{10, 12, 10} {
+		op := base
+		op.Skip = &RemoteSkip{Partition: 3, Offset: off}
+		if err := fsmSetRemoteState(t, f, op); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := fsmGetTopic(t, f, "orders-to-b").Remote
+	if !r.Skipped(3, 10) || !r.Skipped(3, 12) || r.Skipped(3, 11) || r.Skipped(2, 10) {
+		t.Fatalf("skip = %v, want offsets 10 and 12 on partition 3 only", r.Skip)
+	}
+	if n := len(r.Skip[3]); n != 2 {
+		t.Fatalf("skip = %v, want each offset once", r.Skip)
+	}
+	for off := int64(100); off < 100+topic.MaxRemoteSkipsPerPartition+5; off++ {
+		op := base
+		op.Skip = &RemoteSkip{Partition: 3, Offset: off}
+		if err := fsmSetRemoteState(t, f, op); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r = fsmGetTopic(t, f, "orders-to-b").Remote
+	if n := len(r.Skip[3]); n != topic.MaxRemoteSkipsPerPartition {
+		t.Fatalf("partition 3 keeps %d skips, want the cap %d", n, topic.MaxRemoteSkipsPerPartition)
+	}
+	if last := 100 + topic.MaxRemoteSkipsPerPartition + 4; !r.Skipped(3, int64(last)) || r.Skipped(3, 10) {
+		t.Fatalf("skip = %v, want the newest offsets kept and the oldest dropped", r.Skip)
+	}
 }

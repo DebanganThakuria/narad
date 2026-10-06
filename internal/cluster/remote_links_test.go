@@ -274,7 +274,7 @@ func TestRemoteLinksPauseResumeSkip(t *testing.T) {
 		t.Fatalf("skip on a partition the parent lacks: %d", res.Status)
 	}
 	stub, _ = s.store.GetTopic(context.Background(), "orders-to-b")
-	if stub.Remote.Skip[1] != 42 {
+	if !stub.Remote.Skipped(1, 42) {
 		t.Fatalf("skip = %v", stub.Remote.Skip)
 	}
 	for _, ev := range []string{"remote_child.pause", "remote_child.accept_target", "remote_child.skip"} {

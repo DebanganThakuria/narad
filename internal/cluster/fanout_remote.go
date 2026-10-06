@@ -726,7 +726,7 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 			continue
 		}
 		if lane.blocked != nil {
-			if off, ok := link.Skip[sh.key.partition]; ok && off == lane.recs[0].Offset {
+			if link.Skipped(sh.key.partition, lane.recs[0].Offset) {
 				sh.skip(lane)
 				continue
 			}

@@ -973,7 +973,7 @@ paths:
             Date: Tue, 06 Oct 2026 13:07:33 GMT
             Content-Length: 423
 
-            {"name":"orders-to-b","id":"d38a4383503cf4ac","partitions":0,"retention_ms":0,"visibility_timeout_ms":0,"max_in_flight_per_partition":0,"max_acked_ahead_per_partition":0,"created_at":1791292019,"role":"child","parent":"orders","attach_epoch":"341e6b8a37a9688a","attach_offsets":[0,0,0],"remote":{"name":"b","topic":"orders","target_id":"128e63dd156ff568","from":"unconsumed","lanes":1,"skip":{"0":2},"created_by":"admin"}}
+            {"name":"orders-to-b","id":"d38a4383503cf4ac","partitions":0,"retention_ms":0,"visibility_timeout_ms":0,"max_in_flight_per_partition":0,"max_acked_ahead_per_partition":0,"created_at":1791292019,"role":"child","parent":"orders","attach_epoch":"341e6b8a37a9688a","attach_offsets":[0,0,0],"remote":{"name":"b","topic":"orders","target_id":"128e63dd156ff568","from":"unconsumed","lanes":1,"skip":{"0":[2]},"created_by":"admin"}}
   /v1/topics/{parent}/children/{child}/skip:
     parameters:
       - $ref: '#/components/parameters/ParentPath'
@@ -992,8 +992,10 @@ paths:
         nothing, and the record stays in the parent's log for its
         retention. Each dropped record counts on
         `narad_fanout_remote_skipped_records_total` and is logged by the
-        node that drops it. The child's `remote.skip` keeps the last offset
-        accepted per partition.
+        node that drops it. The child's `remote.skip` keeps every skipped
+        offset per partition, ascending, the newest 16 of them, so a slab
+        read again (after a restart or a partition move) drops each of them
+        again.
       x-narad-grant: |
         `admin`, with security on.
       requestBody:
@@ -1046,7 +1048,7 @@ paths:
             Date: Tue, 06 Oct 2026 13:07:33 GMT
             Content-Length: 532
 
-            {"name":"orders-to-b","id":"d38a4383503cf4ac","partitions":0,"retention_ms":0,"visibility_timeout_ms":0,"max_in_flight_per_partition":0,"max_acked_ahead_per_partition":0,"created_at":1791292019,"role":"child","parent":"orders","attach_epoch":"341e6b8a37a9688a","attach_offsets":[0,0,0],"remote":{"name":"b","topic":"orders","target_id":"128e63dd156ff568","from":"unconsumed","lanes":1,"paused":true,"pause_reason":"target maintenance, CHG-4211","paused_by":"admin","paused_at_ms":1791292035849,"skip":{"0":2},"created_by":"admin"}}
+            {"name":"orders-to-b","id":"d38a4383503cf4ac","partitions":0,"retention_ms":0,"visibility_timeout_ms":0,"max_in_flight_per_partition":0,"max_acked_ahead_per_partition":0,"created_at":1791292019,"role":"child","parent":"orders","attach_epoch":"341e6b8a37a9688a","attach_offsets":[0,0,0],"remote":{"name":"b","topic":"orders","target_id":"128e63dd156ff568","from":"unconsumed","lanes":1,"paused":true,"pause_reason":"target maintenance, CHG-4211","paused_by":"admin","paused_at_ms":1791292035849,"skip":{"0":[2]},"created_by":"admin"}}
   /v1/topics/{topic}/produce:
     parameters:
       - $ref: '#/components/parameters/TopicPath'
