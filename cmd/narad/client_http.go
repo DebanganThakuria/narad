@@ -27,8 +27,18 @@ type httpClient struct {
 func newHTTPClient(addr string) *httpClient {
 	return &httpClient{
 		addr: strings.TrimRight(addr, "/"),
-		h:    &http.Client{Timeout: 60 * time.Second, Transport: newCLITransport()},
+		h:    &http.Client{Timeout: 60 * time.Second, Transport: newCLITransport(), CheckRedirect: refuseRedirect},
 	}
+}
+
+// refuseRedirect is the CLI's redirect policy: never follow one. A
+// Narad server never redirects its API, so a redirect comes from
+// something in front of it (an edge that rewrites the scheme or the
+// host), and following it would send the request body, a remote
+// password included, and the caller's Basic credentials to wherever
+// Location points, plain http included.
+func refuseRedirect(req *http.Request, _ []*http.Request) error {
+	return fmt.Errorf("the server answered a redirect to %s; refusing to resend the request and its credentials (set the server URL to the address Narad answers on)", req.URL.Redacted())
 }
 
 // newCLITransport is http.DefaultTransport with a connection pool sized
