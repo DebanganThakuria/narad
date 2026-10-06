@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	domremote "github.com/debanganthakuria/narad/internal/domain/remote"
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/config"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
@@ -132,5 +133,33 @@ func TestStartupAllowlistAndPosture(t *testing.T) {
 	p := nodePosture(cfg)
 	if !p.SecurityEnabled || !p.LegacyClusterAuth || !p.APIHopEncrypted || !p.RaftTLS {
 		t.Fatalf("posture = %+v (a single node counts as Raft TLS)", p)
+	}
+}
+
+// TestGeneratedSecretNeverSealsRemotes runs the startup order runServe
+// uses (secureNodeRPC, then buildRemotes) for a secured single node with
+// no NARAD_CLUSTER_SECRET. The per-process secret secureNodeRPC makes is
+// gone after a restart, so the remotes plane must treat the node as one
+// with no secret: a node holding remotes refuses to start, and a node
+// without them answers every seal with secret_missing.
+func TestGeneratedSecretNeverSealsRemotes(t *testing.T) {
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := remotesConfig(true, "")
+	cfg.Remotes.APIHopEncrypted = true
+	if err := secureNodeRPC(cfg, quiet); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Security.ClusterSecret == "" {
+		t.Fatal("precondition: secureNodeRPC generated no node RPC secret")
+	}
+	if _, err := buildRemotes(cfg, storeWithRemote(t, true), "n0", nil, quiet); !errors.Is(err, remote.ErrStartupNoSecret) {
+		t.Fatalf("a node holding remotes with only a generated secret: err = %v, want ErrStartupNoSecret", err)
+	}
+	rs, err := buildRemotes(cfg, storeWithRemote(t, false), "n0", nil, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rs.service.PrepareCreate(context.Background(), remote.CreateRequest{Name: "b"}); !errors.Is(err, errs.ErrRemoteSecretMissing) {
+		t.Fatalf("seal under a generated secret: err = %v, want ErrRemoteSecretMissing", err)
 	}
 }

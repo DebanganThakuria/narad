@@ -50,6 +50,7 @@ func secureNodeRPC(cfg *config.Config, log *slog.Logger) error {
 		return fmt.Errorf("generate node rpc secret: %w", err)
 	}
 	cfg.Security.ClusterSecret = secret
+	cfg.Security.ClusterSecretGenerated = true
 	log.Info("single node with no cluster secret: generated a per-process secret, so node RPC is closed to other processes; set NARAD_CLUSTER_SECRET on every node before adding peers, and note that a node whose raft first started on a loopback cluster.addr can never take peers",
 		"component", "audit")
 	return nil

@@ -34,6 +34,20 @@ func nodePosture(cfg *config.Config) remote.Posture {
 	}
 }
 
+// remotesSecret is the cluster secret remote passwords are sealed
+// under. A secret secureNodeRPC generated for this process is not one:
+// it is gone after a restart, so every password sealed under it would
+// become unreadable with no previous secret to open it. The remotes
+// plane sees no secret instead, so a node holding remotes refuses to
+// start and every seal answers 412 secret_missing, naming the fix (set
+// NARAD_CLUSTER_SECRET).
+func remotesSecret(cfg *config.Config) string {
+	if cfg.Security.ClusterSecretGenerated {
+		return ""
+	}
+	return cfg.Security.ClusterSecret
+}
+
 // buildRemotes applies the startup rules and builds the outbound plane.
 // A node whose metastore holds any remote refuses to start with
 // security off or without a cluster secret; plaintext Raft (Q23) and a
@@ -48,10 +62,11 @@ func buildRemotes(cfg *config.Config, ms *metastore.Store, nodeID string, m *met
 		return nil, fmt.Errorf("remotes: read registry: %w", err)
 	}
 	holds := len(records) > 0
+	secret := remotesSecret(cfg)
 	rep, err := remote.StartupCheck(remote.StartupInputs{
 		HoldsRemotes:  holds,
 		Posture:       posture,
-		ClusterSecret: cfg.Security.ClusterSecret,
+		ClusterSecret: secret,
 		SecretCheck:   remotecred.CheckSecretStrength,
 	})
 	if err != nil {
@@ -108,7 +123,7 @@ func buildRemotes(cfg *config.Config, ms *metastore.Store, nodeID string, m *met
 		log.Info("remotes.api_hop_encrypted attests that the ingress-to-pod hop is encrypted; remote writes are accepted on this node",
 			"component", "audit")
 	}
-	secrets := remote.Secrets{Current: cfg.Security.ClusterSecret, Previous: cfg.Security.ClusterSecretPrevious}
+	secrets := remote.Secrets{Current: secret, Previous: cfg.Security.ClusterSecretPrevious}
 	cache := remote.NewCache(remote.CacheConfig{
 		Registry: ms,
 		Secrets:  secrets,
