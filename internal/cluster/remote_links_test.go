@@ -267,15 +267,18 @@ func TestRemoteLinksPauseResumeSkip(t *testing.T) {
 		t.Fatalf("after resume: %+v", stub.Remote)
 	}
 
-	if res := s.write(t, nodewire.RemoteSubSkip, map[string]any{"parent": "orders", "child": "orders-to-b", "partition": 1, "offset": 42}); res.Status != 200 {
-		t.Fatalf("skip: %d %s", res.Status, res.Body)
+	// No cursor is blocked on 1/42: the skip is refused and audited
+	// (TestRemoteChildSkipNeedsTheCursorBlockedOnThatRecord covers the
+	// accepted one).
+	if res := s.write(t, nodewire.RemoteSubSkip, map[string]any{"parent": "orders", "child": "orders-to-b", "partition": 1, "offset": 42}); res.Status != http.StatusConflict {
+		t.Fatalf("skip of a record no cursor is blocked on: %d %s", res.Status, res.Body)
 	}
 	if res := s.write(t, nodewire.RemoteSubSkip, map[string]any{"parent": "orders", "child": "orders-to-b", "partition": 2, "offset": 42}); res.Status != 400 {
 		t.Fatalf("skip on a partition the parent lacks: %d", res.Status)
 	}
 	stub, _ = s.store.GetTopic(context.Background(), "orders-to-b")
-	if !stub.Remote.Skipped(1, 42) {
-		t.Fatalf("skip = %v", stub.Remote.Skip)
+	if len(stub.Remote.Skip) != 0 {
+		t.Fatalf("skip = %v, want none stored", stub.Remote.Skip)
 	}
 	for _, ev := range []string{"remote_child.pause", "remote_child.accept_target", "remote_child.skip"} {
 		if lines := audit.lines(`"event":"` + ev + `"`); len(lines) == 0 {

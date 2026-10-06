@@ -59,8 +59,10 @@ func (l RemoteLink) Skipped(partition int, offset int64) bool {
 }
 
 // WithSkip returns a copy of skip with offset added to the partition's
-// set: kept ascending, each offset once, the newest
-// MaxRemoteSkipsPerPartition kept.
+// set: kept ascending, each offset once, at most
+// MaxRemoteSkipsPerPartition kept. The offset just added is always kept:
+// the lowest of the others go first. Trimming the added one would answer
+// the admin's skip and leave the lane blocked on it.
 func WithSkip(skip map[int][]int64, partition int, offset int64) map[int][]int64 {
 	out := make(map[int][]int64, len(skip)+1)
 	for p, offs := range skip {
@@ -70,8 +72,12 @@ func WithSkip(skip map[int][]int64, partition int, offset int64) map[int][]int64
 	if i, found := slices.BinarySearch(offs, offset); !found {
 		offs = slices.Insert(offs, i, offset)
 	}
-	if len(offs) > MaxRemoteSkipsPerPartition {
-		offs = offs[len(offs)-MaxRemoteSkipsPerPartition:]
+	for len(offs) > MaxRemoteSkipsPerPartition {
+		drop := 0
+		if offs[0] == offset {
+			drop = 1
+		}
+		offs = slices.Delete(offs, drop, drop+1)
 	}
 	out[partition] = offs
 	return out

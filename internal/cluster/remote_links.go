@@ -545,6 +545,12 @@ func (l *RemoteLinks) setState(ctx context.Context, req nodewire.RemoteWriteRequ
 			return postureResponse(err)
 		}
 	}
+	if op.Skip != nil {
+		if res, class := l.requireBlockedAt(ctx, b.Parent, b.Child, *op.Skip); res != nil {
+			l.audit(event, req, target, "refused", class, attrs...)
+			return *res
+		}
+	}
 	if err := l.d.Store.SetRemoteChildState(ctx, op); err != nil {
 		status, msg := l.linkError(err, b.Child)
 		l.audit(event, req, target, "refused", classOf(status))
@@ -556,6 +562,59 @@ func (l *RemoteLinks) setState(ctx context.Context, req nodewire.RemoteWriteRequ
 		return l.internalError("read stub", err)
 	}
 	return jsonResponse(http.StatusOK, updated)
+}
+
+// requireBlockedAt refuses a skip unless the partition's owner reports
+// the link's cursor blocked on exactly that record, as rejected_record
+// or record_too_large. A skip is an admin decision about one record the
+// target refused; a stored skip for any other offset would drop a record
+// later with no decision, the first time the target refused it. With
+// several lanes blocked, the owner reports the lowest blocked record, so
+// the admin skips them in order. 409 names what the cursor is blocked
+// on; 503 when the owner could not be asked.
+func (l *RemoteLinks) requireBlockedAt(ctx context.Context, parent, child string, skip metastore.RemoteSkip) (*nodewire.Response, string) {
+	local, err := l.d.Broker.FanoutCursorStats(ctx, parent)
+	if err != nil {
+		res := errorResponse(http.StatusServiceUnavailable, "the partition's cursor could not be read; retry")
+		return &res, topic.RemoteStateUnavailable
+	}
+	var peer peerClient
+	if l.d.Runner != nil {
+		local = l.d.Runner.OverlayRemoteCursorStats(parent, local)
+		peer = l.d.Runner.peer
+	}
+	stats, complete, err := collectOwnerCursorStats(ctx, l.d.Store, peer, l.d.SelfID, parent, local)
+	if err != nil {
+		res := errorResponse(http.StatusServiceUnavailable, "the partition's owner could not be asked; retry")
+		return &res, topic.RemoteStateUnavailable
+	}
+	for _, st := range stats {
+		if st.Child != child || st.Partition != skip.Partition {
+			continue
+		}
+		b := st.BlockedAt
+		if b != nil && b.Partition == skip.Partition && b.Offset == skip.Offset &&
+			(b.State == topic.RemoteStateRejectedRecord || b.State == topic.RemoteStateRecordTooLarge) {
+			return nil, ""
+		}
+		msg := fmt.Sprintf("the link's cursor of partition %d is not blocked on offset %d", skip.Partition, skip.Offset)
+		if b != nil {
+			msg += fmt.Sprintf("; it is blocked on offset %d (%s)", b.Offset, b.State)
+		} else if st.State != "" {
+			msg += " (state " + st.State + ")"
+		}
+		res := jsonResponse(http.StatusConflict, map[string]any{"error": msg, "blocked_at": b})
+		return &res, "not_blocked"
+	}
+	if complete {
+		// Every owner answered and none holds a cursor of the partition
+		// yet: nothing is blocked.
+		res := jsonResponse(http.StatusConflict, map[string]any{"error": fmt.Sprintf(
+			"the link's cursor of partition %d is not blocked on offset %d; it has not started", skip.Partition, skip.Offset), "blocked_at": nil})
+		return &res, "not_blocked"
+	}
+	res := errorResponse(http.StatusServiceUnavailable, "the partition's owner could not be asked; retry")
+	return &res, topic.RemoteStateUnavailable
 }
 
 // topicsSkipEnabled builds the skip route (Q12). False answers 404.

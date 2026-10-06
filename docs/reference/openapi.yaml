@@ -985,17 +985,20 @@ paths:
       x-narad-since: unreleased
       description: |
         Records that one parent record may be dropped from a
-        [remote child](glossary.md#remote-child). A cursor drops it only
-        while it is stuck on exactly that partition and offset in
+        [remote child](glossary.md#remote-child). The leader asks the
+        partition's owner first and accepts the skip only while the
+        link's cursor is stuck on exactly that partition and offset in
         `rejected_record` or `record_too_large` (the listing's
-        `blocked_at`), so an entry that names any other record changes
-        nothing, and the record stays in the parent's log for its
-        retention. Each dropped record counts on
+        `blocked_at`); any other record is refused with `409`, so a
+        mistyped partition or offset is never stored. With several lanes
+        stuck, the owner reports the lowest record: skip them in order.
+        The record stays in the parent's log for its retention. Each
+        dropped record counts on
         `narad_fanout_remote_skipped_records_total` and is logged by the
-        node that drops it. The child's `remote.skip` keeps every skipped
-        offset per partition, ascending, the newest 16 of them, so a slab
-        read again (after a restart or a partition move) drops each of them
-        again.
+        node that drops it. The child's `remote.skip` keeps skipped
+        offsets per partition, ascending, at most 16 of them, always
+        including the one just skipped, so a slab read again (after a
+        restart or a partition move) drops each of them again.
       x-narad-grant: |
         `admin`, with security on.
       requestBody:
@@ -1022,7 +1025,7 @@ paths:
           description: No remote child of that name under that parent, or the parent is gone.
           x-narad-origin: forwarding
         '409':
-          description: The child was detached and attached again under the request; read it and retry.
+          description: The link's cursor of that partition is not stuck on that offset in `rejected_record` or `record_too_large` (the body names the record it is stuck on, as `blocked_at`, if any), or the child was detached and attached again under the request; read it and retry.
           x-narad-origin: forwarding
         '412':
           description: A member does not apply the remote Raft entry types (the body names it), or the leader runs an older release.
@@ -1033,7 +1036,7 @@ paths:
         '501':
           description: The answering node has no remote plane.
         '503':
-          description: The leader could not be reached or could not write the change; retry.
+          description: The leader could not be reached, could not ask the partition's owner, or could not write the change; retry.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST \
@@ -2786,8 +2789,10 @@ components:
         skip:
           type: object
           additionalProperties:
-            type: integer
-          description: Per parent partition, the last offset an admin accepted to lose. A cursor drops a record only while it is stuck on exactly that offset.
+            type: array
+            items:
+              type: integer
+          description: Per parent partition, the offsets an admin accepted to lose, ascending, at most 16. A cursor drops a record only while it is stuck on exactly one of them.
         created_by:
           type: string
           description: The admin who attached it; shown to admins only.

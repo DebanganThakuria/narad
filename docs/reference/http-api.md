@@ -842,7 +842,7 @@ target. The states are listed in
 | `children[].remote.pause_reason`<br>string | The reason given to pause. |
 | `children[].remote.paused_by`<br>string | The admin who paused it; shown to admins only. |
 | `children[].remote.paused_at_ms`<br>integer | When it was paused, Unix milliseconds. |
-| `children[].remote.skip`<br>object | Per parent partition, the last offset an admin accepted to lose. A cursor drops a record only while it is stuck on exactly that offset. |
+| `children[].remote.skip`<br>object | Per parent partition, the offsets an admin accepted to lose, ascending, at most 16. A cursor drops a record only while it is stuck on exactly one of them. |
 | `children[].remote.created_by`<br>string | The admin who attached it; shown to admins only. |
 | `children[].paused` (unreleased)<br>boolean | A remote child only. `true` while it is paused. |
 | `children[].state` (unreleased)<br>string | A remote child only. Its worst partition's [link state](remote-children.md#link-states), `running` or `paused` when healthy; `unknown` when a partition owner did not report. |
@@ -1184,17 +1184,20 @@ Content-Length: 423
 `POST /v1/topics/{parent}/children/{child}/skip`
 
 Records that one parent record may be dropped from a
-[remote child](glossary.md#remote-child). A cursor drops it only
-while it is stuck on exactly that partition and offset in
+[remote child](glossary.md#remote-child). The leader asks the
+partition's owner first and accepts the skip only while the
+link's cursor is stuck on exactly that partition and offset in
 `rejected_record` or `record_too_large` (the listing's
-`blocked_at`), so an entry that names any other record changes
-nothing, and the record stays in the parent's log for its
-retention. Each dropped record counts on
+`blocked_at`); any other record is refused with `409`, so a
+mistyped partition or offset is never stored. With several lanes
+stuck, the owner reports the lowest record: skip them in order.
+The record stays in the parent's log for its retention. Each
+dropped record counts on
 `narad_fanout_remote_skipped_records_total` and is logged by the
-node that drops it. The child's `remote.skip` keeps every skipped
-offset per partition, ascending, the newest 16 of them, so a slab
-read again (after a restart or a partition move) drops each of them
-again.
+node that drops it. The child's `remote.skip` keeps skipped
+offsets per partition, ascending, at most 16 of them, always
+including the one just skipped, so a slab read again (after a
+restart or a partition move) drops each of them again.
 
 **Grant needed:** `admin`, with security on.
 
@@ -1221,12 +1224,12 @@ again.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | Not an `admin`, or security is off (`remotes require security`). |
 | [`404`](status-codes.md#status-404) | No remote child of that name under that parent, or the parent is gone. |
-| [`409`](status-codes.md#status-409) | The child was detached and attached again under the request; read it and retry. |
+| [`409`](status-codes.md#status-409) | The link's cursor of that partition is not stuck on that offset in `rejected_record` or `record_too_large` (the body names the record it is stuck on, as `blocked_at`, if any), or the child was detached and attached again under the request; read it and retry. |
 | [`412`](status-codes.md#status-412) | A member does not apply the remote Raft entry types (the body names it), or the leader runs an older release. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`429`](status-codes.md#status-429) | This node took 60 remote child writes in the last minute; retry after `Retry-After`. |
 | [`501`](status-codes.md#status-501) | The answering node has no remote plane. |
-| [`503`](status-codes.md#status-503) | The leader could not be reached or could not write the change; retry. |
+| [`503`](status-codes.md#status-503) | The leader could not be reached, could not ask the partition's owner, or could not write the change; retry. |
 
 **Response body (`200`)**: a [Topic](#topic-object).
 
@@ -3281,7 +3284,7 @@ Bodies that several endpoints share.
 | `remote.pause_reason`<br>string | The reason given to pause. |
 | `remote.paused_by`<br>string | The admin who paused it; shown to admins only. |
 | `remote.paused_at_ms`<br>integer | When it was paused, Unix milliseconds. |
-| `remote.skip`<br>object | Per parent partition, the last offset an admin accepted to lose. A cursor drops a record only while it is stuck on exactly that offset. |
+| `remote.skip`<br>object | Per parent partition, the offsets an admin accepted to lose, ascending, at most 16. A cursor drops a record only while it is stuck on exactly one of them. |
 | `remote.created_by`<br>string | The admin who attached it; shown to admins only. |
 
 ### Partition statistics object {#partition-stats-object}
