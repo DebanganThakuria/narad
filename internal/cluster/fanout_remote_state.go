@@ -17,9 +17,9 @@ import (
 )
 
 // remoteCursor is one remote cursor's state. Every field is guarded by
-// mu except the check-scheduling fields, which checkMu guards. mu is
-// never held across I/O, so the listing's snapshot never waits on the
-// target; checkMu only makes the target check single-flight.
+// mu. mu is never held across I/O, so the listing's snapshot never
+// waits on the target. The runtime target check is the link's, shared
+// with the link's other cursors on this node (check).
 type remoteCursor struct {
 	key fanoutCursorKey
 
@@ -68,12 +68,6 @@ type remoteCursor struct {
 	// records at the cursor's unadvanced position, kept across re-reads
 	// of that slab; cleared once the cursor advances.
 	progress slabProgress
-	// targetState is what the last successful target check found
-	// (target_replaced, target_has_remote_children or ""), and
-	// verifiedMs when a target check last succeeded. The check writes
-	// them once it has its answer.
-	targetState string
-	verifiedMs  int64
 	// idleLookup and idleCheck are what a quiet cursor's own lookup and
 	// target check found (remoteIdle): a lookup state (remote_missing,
 	// credential_unreadable, ...) and a failed check's class. They show
@@ -82,11 +76,33 @@ type remoteCursor struct {
 	idleLookup string
 	idleCheck  string
 
+	// check is the link's runtime target check on this node: its
+	// schedule and its verdict. A cursor the runner registers shares
+	// it with every other cursor of the link; never nil.
+	check *linkCheck
+}
+
+// linkCheckKey names one link (one attachment of a remote child).
+type linkCheckKey struct {
+	child string
+	epoch string
+}
+
+// linkCheck is one link's runtime target check on this node, shared by
+// the link's cursors: every cursor lists the same target topic, so the
+// target sees one children listing per node per interval (and per gate
+// reopen), not one per partition. mu makes the check single-flight and
+// guards the schedule; vmu guards the verdict and is never held across
+// I/O, so the listing never waits on a check in flight.
+type linkCheck struct {
+	// refs counts the registered cursors sharing it (remoteSender.mu).
+	refs int
+
 	// forceCheck makes the next chunk re-run the target check; atomic so
 	// asking for one never waits on a check in flight.
 	forceCheck atomic.Bool
 
-	checkMu sync.Mutex
+	mu sync.Mutex
 	// checkedEntry, checkedGateEpoch, checkedTargetID and nextCheck
 	// decide when the next check is due: at start, after the remote's
 	// entry changed (a new credential or URL), after its gate reopened,
@@ -95,10 +111,45 @@ type remoteCursor struct {
 	checkedGateEpoch uint64
 	checkedTargetID  string
 	nextCheck        time.Time
+
+	vmu sync.Mutex
+	// targetState is what the last successful check found
+	// (target_replaced, target_has_remote_children or ""), verifiedMs
+	// when a check last succeeded, and failedClass the class of the
+	// last check when it did not verify ("" after one that did).
+	targetState string
+	verifiedMs  int64
+	failedClass string
+}
+
+// verdict is the last successful check's state and time.
+func (lc *linkCheck) verdict() (state string, verifiedMs int64) {
+	lc.vmu.Lock()
+	defer lc.vmu.Unlock()
+	return lc.targetState, lc.verifiedMs
+}
+
+// record publishes a check's answer.
+func (lc *linkCheck) record(res sink.TargetResult, at time.Time) {
+	lc.vmu.Lock()
+	defer lc.vmu.Unlock()
+	if res.Verified {
+		lc.targetState, lc.verifiedMs, lc.failedClass = res.State, at.UnixMilli(), ""
+		return
+	}
+	lc.failedClass = res.Class
+}
+
+// lastFailure is the class of the last check when it did not verify,
+// "" when it did or none ran.
+func (lc *linkCheck) lastFailure() string {
+	lc.vmu.Lock()
+	defer lc.vmu.Unlock()
+	return lc.failedClass
 }
 
 func newRemoteCursor(key fanoutCursorKey) *remoteCursor {
-	return &remoteCursor{key: key, lanes: map[int]string{}, blocked: map[int]topic.RemoteBlock{}}
+	return &remoteCursor{key: key, lanes: map[int]string{}, blocked: map[int]topic.RemoteBlock{}, check: &linkCheck{}}
 }
 
 // setRemote records the link's remote name.
@@ -214,15 +265,6 @@ func (c *remoteCursor) clearLanes() {
 	c.mu.Unlock()
 }
 
-// setTargetVerdict records a successful target check's answer.
-func (c *remoteCursor) setTargetVerdict(state string, at time.Time) {
-	c.mu.Lock()
-	c.targetState = state
-	c.verifiedMs = at.UnixMilli()
-	c.idleCheck = ""
-	c.mu.Unlock()
-}
-
 // setIdleLookup records (or, with "", clears) a quiet cursor's lookup
 // state.
 func (c *remoteCursor) setIdleLookup(state string) {
@@ -245,11 +287,10 @@ func (c *remoteCursor) clearIdle() {
 	c.mu.Unlock()
 }
 
-// targetVerdict is the last successful target check's state.
+// targetVerdict is the link's last successful target check's state.
 func (c *remoteCursor) targetVerdict() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.targetState
+	state, _ := c.check.verdict()
+	return state
 }
 
 // remoteCursorSnapshot is what the listing and the gauges read.
@@ -266,9 +307,10 @@ type remoteCursorSnapshot struct {
 // cursor-wide stall, the target check's verdict, every lane, then
 // paused; running when none applies.
 func (c *remoteCursor) snapshot() remoteCursorSnapshot {
+	targetState, verifiedMs := c.check.verdict()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	state := topic.WorseRemoteState(c.stall, c.targetState)
+	state := topic.WorseRemoteState(c.stall, targetState)
 	state = topic.WorseRemoteState(state, c.idleLookup)
 	state = topic.WorseRemoteState(state, c.idleCheck)
 	for _, s := range c.lanes {
@@ -284,7 +326,7 @@ func (c *remoteCursor) snapshot() remoteCursorSnapshot {
 		state:         state,
 		lastSuccessMs: c.lastSuccessMs,
 		lagSeconds:    c.lagSeconds,
-		verifiedMs:    c.verifiedMs,
+		verifiedMs:    verifiedMs,
 	}
 	if c.headroom != nil {
 		h := *c.headroom

@@ -45,7 +45,7 @@ Per remote, applied on each node, changed live with a `PATCH` ([Change a remote]
 | `request_timeout_ms` | 30000 | 5000 to 120000 | Timeout of one request. A timeout halves the lane's chunk size. |
 | `idle_conn_timeout_ms` | 30000 | 1000 to 300000 | How long an idle connection is kept. |
 | `conn_max_age_ms` | 300000 | 10000 to 3600000 | How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up. |
-| `check_interval_ms` | 60000 | 10000 to 3600000 | How often each cursor checks its target, with records to send or not, with 20% jitter. |
+| `check_interval_ms` | 60000 | 10000 to 3600000 | How often each node checks the target of each link, with records to send or not, with 20% jitter. |
 | `compression` | `none` | `none`, `zstd` | `zstd` compresses a request when that saves at least 10% and the target decodes zstd (it probes). A target that cannot decode one gets it again uncompressed at once. |
 
 ## A remote child {#remote-child}

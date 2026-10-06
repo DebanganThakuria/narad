@@ -3157,7 +3157,7 @@ components:
           minimum: 10000
           maximum: 3600000
           default: 60000
-          description: How often each cursor re-checks its target, with records to send or not (with 20% jitter).
+          description: How often each node re-checks the target of each link, with records to send or not (with 20% jitter).
         compression:
           type: string
           enum: [none, zstd]

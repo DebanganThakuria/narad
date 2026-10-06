@@ -2433,7 +2433,7 @@ remote writes a minute, and a cluster holds at most 64 remotes.
 | `limits.request_timeout_ms`<br>integer, optional, default `30000` | Timeout of one request to the remote. |
 | `limits.idle_conn_timeout_ms`<br>integer, optional, default `30000` | How long an idle connection to the remote is kept. |
 | `limits.conn_max_age_ms`<br>integer, optional, default `300000` | How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up. |
-| `limits.check_interval_ms`<br>integer, optional, default `60000` | How often each cursor re-checks its target, with records to send or not (with 20% jitter). |
+| `limits.check_interval_ms`<br>integer, optional, default `60000` | How often each node re-checks the target of each link, with records to send or not (with 20% jitter). |
 | `limits.compression`<br>string: `none`, `zstd`, optional, default `none` | `zstd` compresses a chunk when that saves at least 10% and the target decodes zstd; otherwise it goes uncompressed. |
 
 **Responses**
@@ -2469,7 +2469,7 @@ remote writes a minute, and a cluster holds at most 64 remotes.
 | `limits.request_timeout_ms`<br>integer | Timeout of one request to the remote. |
 | `limits.idle_conn_timeout_ms`<br>integer | How long an idle connection to the remote is kept. |
 | `limits.conn_max_age_ms`<br>integer | How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up. |
-| `limits.check_interval_ms`<br>integer | How often each cursor re-checks its target, with records to send or not (with 20% jitter). |
+| `limits.check_interval_ms`<br>integer | How often each node re-checks the target of each link, with records to send or not (with 20% jitter). |
 | `limits.compression`<br>string: `none`, `zstd` | `zstd` compresses a chunk when that saves at least 10% and the target decodes zstd; otherwise it goes uncompressed. |
 | `revision`<br>integer | Moves on every change. |
 | `created_at`<br>string | RFC 3339. |
@@ -2583,7 +2583,7 @@ version and age, absent before the first remote.
 | `remotes[].limits.request_timeout_ms`<br>integer | Timeout of one request to the remote. |
 | `remotes[].limits.idle_conn_timeout_ms`<br>integer | How long an idle connection to the remote is kept. |
 | `remotes[].limits.conn_max_age_ms`<br>integer | How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up. |
-| `remotes[].limits.check_interval_ms`<br>integer | How often each cursor re-checks its target, with records to send or not (with 20% jitter). |
+| `remotes[].limits.check_interval_ms`<br>integer | How often each node re-checks the target of each link, with records to send or not (with 20% jitter). |
 | `remotes[].limits.compression`<br>string: `none`, `zstd` | `zstd` compresses a chunk when that saves at least 10% and the target decodes zstd; otherwise it goes uncompressed. |
 | `remotes[].revision`<br>integer | Moves on every change. |
 | `remotes[].created_at`<br>string | RFC 3339. |
@@ -2710,7 +2710,7 @@ for it, as [list remotes](#list-remotes) does.
 | `limits.request_timeout_ms`<br>integer | Timeout of one request to the remote. |
 | `limits.idle_conn_timeout_ms`<br>integer | How long an idle connection to the remote is kept. |
 | `limits.conn_max_age_ms`<br>integer | How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up. |
-| `limits.check_interval_ms`<br>integer | How often each cursor re-checks its target, with records to send or not (with 20% jitter). |
+| `limits.check_interval_ms`<br>integer | How often each node re-checks the target of each link, with records to send or not (with 20% jitter). |
 | `limits.compression`<br>string: `none`, `zstd` | `zstd` compresses a chunk when that saves at least 10% and the target decodes zstd; otherwise it goes uncompressed. |
 | `revision`<br>integer | Moves on every change. |
 | `created_at`<br>string | RFC 3339. |
@@ -2800,7 +2800,7 @@ change live; a limit named with `0` or `""` is refused.
 | `limits.request_timeout_ms`<br>integer, optional, default `30000` | Timeout of one request to the remote. |
 | `limits.idle_conn_timeout_ms`<br>integer, optional, default `30000` | How long an idle connection to the remote is kept. |
 | `limits.conn_max_age_ms`<br>integer, optional, default `300000` | How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up. |
-| `limits.check_interval_ms`<br>integer, optional, default `60000` | How often each cursor re-checks its target, with records to send or not (with 20% jitter). |
+| `limits.check_interval_ms`<br>integer, optional, default `60000` | How often each node re-checks the target of each link, with records to send or not (with 20% jitter). |
 | `limits.compression`<br>string: `none`, `zstd`, optional, default `none` | `zstd` compresses a chunk when that saves at least 10% and the target decodes zstd; otherwise it goes uncompressed. |
 
 **Responses**
@@ -2837,7 +2837,7 @@ change live; a limit named with `0` or `""` is refused.
 | `limits.request_timeout_ms`<br>integer | Timeout of one request to the remote. |
 | `limits.idle_conn_timeout_ms`<br>integer | How long an idle connection to the remote is kept. |
 | `limits.conn_max_age_ms`<br>integer | How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up. |
-| `limits.check_interval_ms`<br>integer | How often each cursor re-checks its target, with records to send or not (with 20% jitter). |
+| `limits.check_interval_ms`<br>integer | How often each node re-checks the target of each link, with records to send or not (with 20% jitter). |
 | `limits.compression`<br>string: `none`, `zstd` | `zstd` compresses a chunk when that saves at least 10% and the target decodes zstd; otherwise it goes uncompressed. |
 | `revision`<br>integer | Moves on every change. |
 | `created_at`<br>string | RFC 3339. |

@@ -196,7 +196,7 @@ narad --ctx a remote set b --max-in-flight 32 --compression zstd
 | `request_timeout_ms` (`--request-timeout`) | 30 s | 5 s to 120 s | Timeout of one request. |
 | `idle_conn_timeout_ms` (`--idle-conn-timeout`) | 30 s | 1 s to 5 min | How long an idle connection is kept. |
 | `conn_max_age_ms` (`--conn-max-age`) | 5 min | 10 s to 1 h | How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up. |
-| `check_interval_ms` (`--check-interval`) | 60 s | 10 s to 1 h | How often each cursor checks its target, with 20% jitter. |
+| `check_interval_ms` (`--check-interval`) | 60 s | 10 s to 1 h | How often each node checks the target of each link, with 20% jitter. |
 | `compression` (`--compression`) | `none` | `none`, `zstd` | `zstd` compresses a request when that saves at least 10% and the target decodes zstd. |
 
 A new `--url`, `--username`, `--ca-file` or `--no-ca` needs the password again in the same request (`--remote-password-stdin`): a stored password is only ever sent to the URL and user it was entered with, verified against the CA it was entered with.

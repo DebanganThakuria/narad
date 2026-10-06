@@ -57,6 +57,8 @@ type remoteSender struct {
 
 	mu      sync.Mutex
 	remotes map[string]*remoteState
+	// checks holds each link's shared runtime target check.
+	checks map[linkCheckKey]*linkCheck
 }
 
 func newRemoteSender(r *FanoutRunner, l remote.Lookup, heldBudget int64) *remoteSender {
@@ -334,6 +336,9 @@ func requestTimeout(e *remote.Entry) time.Duration {
 // now runs; the returned function forgets it.
 func (r *FanoutRunner) registerRemoteCursor(key fanoutCursorKey) (*remoteCursor, func()) {
 	c := newRemoteCursor(key)
+	s := r.sender()
+	var releaseCheck func()
+	c.check, releaseCheck = s.linkCheck(key)
 	r.remoteMu.Lock()
 	if r.remoteCursors == nil {
 		r.remoteCursors = map[fanoutCursorKey]*remoteCursor{}
@@ -346,8 +351,34 @@ func (r *FanoutRunner) registerRemoteCursor(key fanoutCursorKey) (*remoteCursor,
 			delete(r.remoteCursors, key)
 		}
 		r.remoteMu.Unlock()
+		releaseCheck()
 		r.unpublishRemoteState(c)
 	}
+}
+
+// linkCheck returns the runtime target check of key's link on this
+// node, shared by the link's registered cursors, and the function that
+// lets go of it (the last one forgets it).
+func (s *remoteSender) linkCheck(key fanoutCursorKey) (*linkCheck, func()) {
+	k := linkCheckKey{child: key.child, epoch: key.epoch}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.checks == nil {
+		s.checks = map[linkCheckKey]*linkCheck{}
+	}
+	lc := s.checks[k]
+	if lc == nil {
+		lc = &linkCheck{}
+		s.checks[k] = lc
+	}
+	lc.refs++
+	return lc, sync.OnceFunc(func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if lc.refs--; lc.refs == 0 && s.checks[k] == lc {
+			delete(s.checks, k)
+		}
+	})
 }
 
 func (r *FanoutRunner) remoteCursorOf(key fanoutCursorKey) *remoteCursor {
@@ -1029,35 +1060,39 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 	}
 }
 
-// checkTarget runs the runtime target check when it is due and reports
-// whether sending may go on, the check's result and whether it ran. A
-// check that errors never stops sending; one that answers stops it on a
-// loop or a replaced target. checkMu keeps one check in flight per
-// cursor; the verdict is published under mu once the check answered, so
-// the listing never waits on the target.
+// checkTarget runs the link's runtime target check when it is due and
+// reports whether sending may go on, the check's result and whether it
+// ran. A check that errors never stops sending; one that answers stops
+// it on a loop or a replaced target. The schedule and the verdict are
+// the link's, shared by its cursors on this node: lc.mu keeps one check
+// in flight per link, and a cursor that finds a check not due reads the
+// verdict another cursor's check published (under vmu, so the listing
+// never waits on the target).
 func (s *remoteSender) checkTarget(ctx context.Context, c *remoteCursor, e *remote.Entry, rs *remoteState, stub topic.Topic) (ok bool, res sink.TargetResult, ran bool) {
-	c.checkMu.Lock()
-	defer c.checkMu.Unlock()
+	lc := c.check
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
 	now := time.Now()
 	epoch := rs.gate.Epoch()
-	due := c.forceCheck.Load() || c.checkedEntry != e || c.checkedGateEpoch != epoch ||
-		c.checkedTargetID != stub.Remote.TargetID || !now.Before(c.nextCheck)
+	due := lc.forceCheck.Load() || lc.checkedEntry != e || lc.checkedGateEpoch != epoch ||
+		lc.checkedTargetID != stub.Remote.TargetID || !now.Before(lc.nextCheck)
 	if !due {
 		return c.targetVerdict() == "", res, false
 	}
-	c.forceCheck.Store(false)
+	lc.forceCheck.Store(false)
 	cctx, cancel := context.WithTimeout(ctx, requestTimeout(e))
 	res = sink.CheckTarget(cctx, e, stub.Remote.Topic, stub.Remote.TargetID, s.classify)
 	cancel()
 	if ctx.Err() != nil {
-		c.forceCheck.Store(true)
+		lc.forceCheck.Store(true)
 		return false, res, false
 	}
-	c.checkedEntry, c.checkedGateEpoch, c.checkedTargetID = e, epoch, stub.Remote.TargetID
-	c.nextCheck = now.Add(sink.CheckInterval(e.Limits().CheckIntervalMs))
+	lc.checkedEntry, lc.checkedGateEpoch, lc.checkedTargetID = e, epoch, stub.Remote.TargetID
+	lc.nextCheck = now.Add(sink.CheckInterval(e.Limits().CheckIntervalMs))
+	lc.record(res, now)
 	key := c.key
 	if res.Verified {
-		c.setTargetVerdict(res.State, now)
+		c.setIdleCheck("")
 	} else if rl := s.r.remoteMetrics(); rl != nil {
 		rl.CheckFailuresTotal.WithLabelValues(key.parent, key.child).Inc()
 		rl.ErrorsTotal.WithLabelValues(rs.name, res.Class).Inc()
@@ -1103,12 +1138,27 @@ func (r *FanoutRunner) remoteIdle(ctx context.Context, key fanoutCursorKey, cur 
 		if probe {
 			rs.gate.Released()
 		}
+		// Not due: another cursor of the link checked; show what the
+		// gate or that check found.
+		switch closed, class := rs.closedState(), cur.check.lastFailure(); {
+		case closed != "":
+			cur.setIdleCheck(idleCheckState(closed))
+		case class != "":
+			cur.setIdleCheck(idleCheckState(class))
+		default:
+			cur.setIdleCheck("")
+		}
 		return
 	}
 	switch v, outcome := res.GateVerdict(); {
 	case outcome == sink.CheckReached:
 		rs.gate.Succeeded(probe)
-	case outcome == sink.CheckFailed && !rs.superseded(e):
+	case outcome == sink.CheckFailed && (probe || v.Action == sink.ActGate) && !rs.superseded(e):
+		// A remote-wide refusal (a wrong password, a throttle) closes
+		// the gate whoever asked. A transient failure (unavailable, an
+		// edge) counts only as the gate's probe: a check that went out
+		// beside an open gate never trips it, so a local timeout on a
+		// busy side pool cannot close it.
 		rs.gateFailed(v, probe)
 	case probe:
 		// Nothing went out, or the answer is to a credential since
@@ -1133,7 +1183,7 @@ func idleCheckState(class string) string {
 // forceTargetCheck makes the next chunk re-run the target check. It
 // never waits on a check in flight.
 func (c *remoteCursor) forceTargetCheck() {
-	c.forceCheck.Store(true)
+	c.check.forceCheck.Store(true)
 }
 
 // chunkCap is lane i's adaptive chunk cap, kept across slabs.
