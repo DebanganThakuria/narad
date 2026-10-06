@@ -220,18 +220,18 @@ func ListChildren(s *handlers.Set) http.HandlerFunc {
 		}
 
 		type lagAgg struct {
-			lag     int64
-			cursors int
-			stats   []topic.FanoutCursorStat
+			lag        int64
+			partitions map[int]int
+			stats      []topic.FanoutCursorStat
 		}
 		byChild := map[string]*lagAgg{}
 		for _, stat := range stats {
 			agg := byChild[stat.Child]
 			if agg == nil {
-				agg = &lagAgg{}
+				agg = &lagAgg{partitions: map[int]int{}}
 				byChild[stat.Child] = agg
 			}
-			agg.cursors++
+			agg.partitions[stat.Partition]++
 			agg.lag += max(0, stat.HighWatermark-stat.NextOffset)
 			agg.stats = append(agg.stats, stat)
 		}
@@ -247,7 +247,11 @@ func ListChildren(s *handlers.Set) http.HandlerFunc {
 			agg := byChild[child]
 			if agg != nil {
 				status.LagMessages = agg.lag
-				status.LagComplete = remoteComplete && agg.cursors == t.Partitions
+				// Whole only when every partition reported exactly once.
+				status.LagComplete = remoteComplete && len(agg.partitions) == t.Partitions
+				for _, n := range agg.partitions {
+					status.LagComplete = status.LagComplete && n == 1
+				}
 			}
 			if childErr == nil && childRecord.IsRemoteChild() {
 				var childStats []topic.FanoutCursorStat

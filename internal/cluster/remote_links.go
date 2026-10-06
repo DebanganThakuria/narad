@@ -899,13 +899,28 @@ func (l *RemoteLinks) unshippedNow(ctx context.Context, parent topic.Topic) (uns
 	if err != nil {
 		return r, err
 	}
-	cursors := map[string]int{}
+	// Each partition counts once: the lag is whole only when every
+	// partition 0..Partitions-1 has exactly one stat, from its owner. A
+	// partition reported twice is not counted, so it can never stand in
+	// for one nobody reported.
+	seen := map[string]map[int]int{}
 	for _, st := range stats {
-		r.lag[st.Child] += max(0, st.HighWatermark-st.NextOffset)
-		cursors[st.Child]++
+		if seen[st.Child] == nil {
+			seen[st.Child] = map[int]int{}
+		}
+		seen[st.Child][st.Partition]++
+	}
+	for _, st := range stats {
+		if seen[st.Child][st.Partition] == 1 {
+			r.lag[st.Child] += max(0, st.HighWatermark-st.NextOffset)
+		}
 	}
 	for _, child := range parent.Children {
-		r.lagComplete[child] = complete && cursors[child] == parent.Partitions
+		whole := complete
+		for p := 0; whole && p < parent.Partitions; p++ {
+			whole = seen[child][p] == 1
+		}
+		r.lagComplete[child] = whole
 	}
 	return r, nil
 }
