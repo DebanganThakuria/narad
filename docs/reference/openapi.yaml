@@ -13,7 +13,8 @@
 # Extensions:
 #   x-narad-lead      first paragraph of the generated page
 #   x-narad-grant     the grant or role an operation needs
-#   x-narad-since     "unreleased" for anything not in v3.0.1
+#   x-narad-since     the release that added it ("v3.1.0"), or "unreleased"
+#                     for anything merged since the latest release
 #   x-narad-examples  curl requests and their real responses
 #   x-narad-origin    "forwarding" on a status the cluster router writes
 #                     for a request it forwarded to another node
@@ -123,16 +124,16 @@ info:
     | Limit | Value | Over it |
     |---|---|---|
     | Request body | 1 MiB (1,048,576 bytes) | [`413`](status-codes.md#status-413); `400` on the user and attach-child routes |
-    | Batch ack body (unreleased) | 64 KiB | [`413`](status-codes.md#status-413) |
+    | Batch ack body (v3.1.0) | 64 KiB | [`413`](status-codes.md#status-413) |
     | Request headers | 64 KiB by default | [`431`](status-codes.md#status-431) |
-    | Messages per batch produce, records per batch consume, handles per batch ack (unreleased) | 100 | [`400`](status-codes.md#status-400) |
+    | Messages per batch produce, records per batch consume, handles per batch ack (v3.1.0) | 100 | [`400`](status-codes.md#status-400) |
     | Consume `wait` | 10 s by default | clamped, with an `X-Narad-Wait-Clamped` response header |
     | Concurrent consumes per user (or per client IP with security off), per node | 1024 by default | [`429`](status-codes.md#status-429) |
-    | Concurrent produces per user, per node (unreleased) | off by default | [`429`](status-codes.md#status-429) |
+    | Concurrent produces per user, per node (v3.1.0) | off by default | [`429`](status-codes.md#status-429) |
 
     The limits marked "by default" are settings: `http.max_header_bytes`,
     `http.max_consume_wait`, `http.max_consume_in_flight_per_identity` and
-    `http.max_produce_in_flight_per_identity` (unreleased), in that order,
+    `http.max_produce_in_flight_per_identity` (from v3.1.0), in that order,
     all in the [Configuration reference](configuration.md#http).
 
     ### Errors
@@ -175,11 +176,12 @@ info:
     or none, while `next_page_token` is still set, because topics you
     cannot read are removed after the page is cut.
 
-    ### Unreleased features
+    ### Release markers
 
-    This page describes `master`. Anything not in the latest release,
-    v3.0.1, is marked **Unreleased**, and its entry says how a v3.0.1 node
-    answers a request that uses it. See
+    This page describes `master`. Anything the latest release, v3.1.0,
+    added is marked **New in v3.1.0**, and its entry says how a v3.0.1
+    node answers a request that uses it. Anything merged since v3.1.0 is
+    marked **Unreleased** until it ships. See
     [Which release these docs describe](api-stability.md#docs-version).
 servers:
   - url: http://127.0.0.1:7942
@@ -248,7 +250,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Topic'
         '400':
-          description: A field is invalid, the name is not allowed, or the schema cannot be registered (unreleased, that includes a schema whose validation would cost too much).
+          description: A field is invalid, the name is not allowed, or the schema cannot be registered (from v3.1.0, that includes a schema whose validation would cost too much).
         '401':
           description: Missing or wrong credentials.
         '403':
@@ -256,13 +258,13 @@ paths:
         '404':
           description: '`parent` does not exist, also after the answering node caught up with the leader.'
         '409':
-          description: The topic exists, a topic exists whose name differs only in letter case (the error names it), `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold), or (unreleased) the schema, or the parent's schema history a child adopts, would pass a schema byte budget, or `parent` was recreated under the request twice in a row (`topic changed since it was read`).
+          description: The topic exists, a topic exists whose name differs only in letter case (the error names it), `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold), or (from v3.1.0) the schema, or the parent's schema history a child adopts, would pass a schema byte budget, or `parent` was recreated under the request twice in a row (`topic changed since it was read`).
         '413':
           description: The body is over 1 MiB.
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '503':
-          description: The cluster has no leader to write the topic, the answering node could not reach the leader to confirm `parent`, or (unreleased) every live node is being decommissioned, so no node can take the new partitions; nothing was written.
+          description: The cluster has no leader to write the topic, the answering node could not reach the leader to confirm `parent`, or (from v3.1.0) every live node is being decommissioned, so no node can take the new partitions; nothing was written.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST "$NARAD/v1/topics" \
@@ -334,7 +336,7 @@ paths:
         partition. The node that answers asks every partition's owner for
         its statistics.
 
-        **Unreleased:** when some partitions' owners are down, the answer
+        **New in v3.1.0:** when some partitions' owners are down, the answer
         is still `200`. The partitions that could be read carry their
         statistics and `status` `ok`; each other one is a placeholder with
         zero statistics, `status` `owner_unavailable` and the owner's
@@ -418,13 +420,13 @@ paths:
         '404':
           description: The topic does not exist, also after the answering node caught up with the leader.
         '409':
-          description: '`schema_base_version` is not the current version, the history holds 1000 versions or (unreleased) the new version would take it past 4 MiB or the cluster''s schemas past 256 MiB, the topic is a child whose schema its parent manages, the new retention is too short for a delay child, or (unreleased) the topic was deleted and recreated, or grew, under the request twice in a row (`topic changed since it was read`).'
+          description: '`schema_base_version` is not the current version, the history holds 1000 versions or (from v3.1.0) the new version would take it past 4 MiB or the cluster''s schemas past 256 MiB, the topic is a child whose schema its parent manages, the new retention is too short for a delay child, or (from v3.1.0) the topic was deleted and recreated, or grew, under the request twice in a row (`topic changed since it was read`).'
         '413':
           description: The body is over 1 MiB.
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '503':
-          description: The cluster has no leader to write the change, the answering node could not reach the leader to confirm a topic it does not have, or (unreleased) a partition increase found every live node being decommissioned, so no node can take the new partitions; nothing was changed.
+          description: The cluster has no leader to write the change, the answering node could not reach the leader to confirm a topic it does not have, or (from v3.1.0) a partition increase found every live node being decommissioned, so no node can take the new partitions; nothing was changed.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X PATCH "$NARAD/v1/topics/orders" \
@@ -459,7 +461,7 @@ paths:
         '404':
           description: The topic does not exist, also after the answering node caught up with the leader.
         '409':
-          description: (Unreleased) The topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was deleted. Read the topic again before deleting it.
+          description: New in v3.1.0. The topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was deleted. Read the topic again before deleting it.
         '503':
           description: The cluster has no leader to write the delete, or the answering node could not reach the leader to confirm a topic it does not have.
       x-narad-examples:
@@ -546,7 +548,7 @@ paths:
         '404':
           description: The parent or the child does not exist, also after the answering node caught up with the leader.
         '409':
-          description: The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, the delay is longer than the parent's retention can hold, or (unreleased) the copy of the parent's schema history the child adopts would pass the cluster's schema byte budget, or either topic was recreated under the request twice in a row (`topic changed since it was read`).
+          description: The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, the delay is longer than the parent's retention can hold, or (from v3.1.0) the copy of the parent's schema history the child adopts would pass the cluster's schema byte budget, or either topic was recreated under the request twice in a row (`topic changed since it was read`).
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '503':
@@ -623,7 +625,7 @@ paths:
         '404':
           description: Neither topic exists after the answering node caught up with the leader, or the two are not linked.
         '409':
-          description: (Unreleased) Either topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was changed.
+          description: New in v3.1.0. Either topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was changed.
         '503':
           description: The cluster has no leader to write the change, or the answering node could not reach the leader to confirm the topics.
       x-narad-examples:
@@ -685,7 +687,7 @@ paths:
         '202':
           description: Accepted and synced to disk. The body is empty.
         '400':
-          description: Empty body, `partition` out of range, `key` or `partition` given twice, or the body fails the topic's schema (unreleased, that includes a body nested deeper than 256 levels).
+          description: Empty body, `partition` out of range, `key` or `partition` given twice, or the body fails the topic's schema (from v3.1.0, that includes a body nested deeper than 256 levels).
         '401':
           description: Missing or wrong credentials.
         '403':
@@ -703,7 +705,7 @@ paths:
         '500':
           description: The node could not write to its ingress WAL. It answers every produce this way until it restarts.
         '503':
-          description: 'Unreleased. Nothing was checked or stored; retry through another node. Either this node is being decommissioned and takes no new produce (with `Retry-After: 1`), or the topic has a schema and every schema validation slot on the node stayed busy for 5 seconds.'
+          description: 'New in v3.1.0. Nothing was checked or stored; retry through another node. Either this node is being decommissioned and takes no new produce (with `Retry-After: 1`), or the topic has a schema and every schema validation slot on the node stayed busy for 5 seconds.'
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST \
@@ -721,7 +723,7 @@ paths:
       operationId: produceBatch
       tags: [Messages]
       summary: Produce a batch
-      x-narad-since: unreleased
+      x-narad-since: v3.1.0
       description: |
         Stores 1 to 100 messages in one request, all or none. Every message
         is checked as a single produce would check it before any is stored.
@@ -769,7 +771,7 @@ paths:
         '500':
           description: The node could not write to its ingress WAL.
         '503':
-          description: 'Unreleased. Nothing was checked or stored; retry through another node. Either this node is being decommissioned and takes no new produce (with `Retry-After: 1`), or the topic has a schema and every schema validation slot on the node stayed busy for 5 seconds.'
+          description: 'Nothing was checked or stored; retry through another node. Either this node is being decommissioned and takes no new produce (with `Retry-After: 1`), or the topic has a schema and every schema validation slot on the node stayed busy for 5 seconds.'
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/produce/batch" \
@@ -836,7 +838,7 @@ paths:
             minimum: 0
         - name: max
           in: query
-          x-narad-since: unreleased
+          x-narad-since: v3.1.0
           description: |
             Take up to this many messages in one answer,
             `{"messages": [...]}`, each with its own lease. The request does
@@ -895,7 +897,7 @@ paths:
             Date: Mon, 28 Sep 2026 19:31:43 GMT
 
             {"topic":"orders","partition":1,"offset":0,"key":"customer-42","payload":{"order_id": "ord_123", "amount": 1250},"timestamp":1790623903,"receipt_handle":"1:0:181499699661178901"}
-        - title: a batch, unreleased
+        - title: a batch (v3.1.0)
           request: |
             curl -i -u "$AUTH" -H 'X-Narad-Client: curl' \
               "$NARAD/v1/topics/orders/consume?max=10&wait=5s"
@@ -924,7 +926,7 @@ paths:
 
         Without a `receipt_handle` parameter, a JSON body
         `{"receipt_handles": [...]}` settles 1 to 100 handles in one
-        request (**Unreleased**). Each handle is settled on its own with the
+        request (**v3.1.0**). Each handle is settled on its own with the
         mode `extend` selects, and the answer is `200` with one result per
         handle, in request order. A v3.0.1 node answers such a request `400`.
 
@@ -992,7 +994,7 @@ paths:
           response: |
             HTTP/1.1 204 No Content
             Date: Mon, 28 Sep 2026 19:31:43 GMT
-        - title: a batch, unreleased
+        - title: a batch (v3.1.0)
           request: |
             curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/ack" \
               -H "Content-Type: application/json" \
@@ -1260,7 +1262,7 @@ paths:
       parameters:
         - name: detail
           in: query
-          x-narad-since: unreleased
+          x-narad-since: v3.1.0
           description: |
             `true` also asks every member for its own status (dispatch
             backlog, quarantined copies, move workers), all at once and
@@ -1307,7 +1309,7 @@ paths:
       parameters:
         - name: detail
           in: query
-          x-narad-since: unreleased
+          x-narad-since: v3.1.0
           description: |
             `true` also asks each move's destination for its move worker's
             own report: phase, copy attempts, copied bytes, last error and
@@ -1370,7 +1372,7 @@ paths:
       parameters:
         - name: dry_run
           in: query
-          x-narad-since: unreleased
+          x-narad-since: v3.1.0
           description: |
             `true` answers `200` with what a decommission would do and
             changes nothing. Answered by the receiving node, never
@@ -1380,7 +1382,7 @@ paths:
             default: false
       responses:
         '200':
-          x-narad-since: unreleased
+          x-narad-since: v3.1.0
           description: '`dry_run=true`: the verdict. Nothing changed.'
           content:
             application/json:
@@ -1397,7 +1399,7 @@ paths:
         '404':
           description: No member has this ID.
         '409':
-          x-narad-since: unreleased
+          x-narad-since: v3.1.0
           description: The decommission could never complete safely. The body names every reason; nothing changed.
           content:
             application/json:
@@ -1458,7 +1460,7 @@ paths:
       operationId: abortMove
       tags: [Cluster]
       summary: Abort a partition move
-      x-narad-since: unreleased
+      x-narad-since: v3.1.0
       description: |
         Clears the move's target, so the partition stays with its owner
         and keeps serving there. The destination discards its copy. The
@@ -1529,7 +1531,7 @@ paths:
       operationId: forgetServer
       tags: [Cluster]
       summary: Forget a Raft server with no member record
-      x-narad-since: unreleased
+      x-narad-since: v3.1.0
       description: |
         Removes a Raft voter or non-voter that has no member record, such as
         a joiner a 3.0.x leader admitted that never registered. Such a
@@ -1628,7 +1630,7 @@ paths:
         started. Otherwise it answers `503` with the reason in `error`.
         The check runs on every request. It never needs credentials.
 
-        A `200` can list conditions under `degraded` (unreleased): an
+        A `200` can list conditions under `degraded` (from v3.1.0): an
         expired Raft TLS certificate or CA bundle. They do not make the
         node unready, because one certificate usually serves every node
         and expires on all of them at once, and failing readiness would
@@ -1876,7 +1878,8 @@ components:
                 $ref: '#/components/schemas/PartitionStats'
             partial:
               type: boolean
-              description: '**Unreleased.** `true` when some entries are placeholders whose owner could not report (`status` `owner_unavailable`). Absent otherwise.'
+              x-narad-since: v3.1.0
+              description: '`true` when some entries are placeholders whose owner could not report (`status` `owner_unavailable`). Absent otherwise.'
     PartitionStats:
       type: object
       properties:
@@ -1907,11 +1910,13 @@ components:
         status:
           type: string
           enum: [ok, owner_unavailable]
-          description: '**Unreleased.** `ok` when the statistics are the owner''s; `owner_unavailable` for a placeholder with zero statistics, because the owner could not report them. Never add a placeholder''s numbers to a total.'
+          x-narad-since: v3.1.0
+          description: '`ok` when the statistics are the owner''s; `owner_unavailable` for a placeholder with zero statistics, because the owner could not report them. Never add a placeholder''s numbers to a total.'
         owner_liveness:
           type: string
           enum: [dead, unreachable, unknown, unassigned]
-          description: '**Unreleased.** Why an `owner_unavailable` partition''s owner could not report: `dead` (marked dead), `unreachable` (alive, but its statistics did not come back within 2 seconds), `unknown` (no member with an address), `unassigned` (no owner yet). Absent for `ok`.'
+          x-narad-since: v3.1.0
+          description: 'Why an `owner_unavailable` partition''s owner could not report: `dead` (marked dead), `unreachable` (alive, but its statistics did not come back within 2 seconds), `unknown` (no member with an address), `unassigned` (no owner yet). Absent for `ok`.'
     TopicPage:
       type: object
       properties:
@@ -1996,7 +2001,7 @@ components:
         key_encoding:
           type: string
           enum: [base64]
-          x-narad-since: unreleased
+          x-narad-since: v3.1.0
           description: '`base64` when the key is not valid UTF-8 and `key` holds it in base64.'
         payload:
           description: |
@@ -2059,7 +2064,7 @@ components:
       properties:
         receipt_handles:
           type: array
-          x-narad-since: unreleased
+          x-narad-since: v3.1.0
           description: 1 to 100 receipt handles of this topic.
           items:
             type: string
@@ -2177,19 +2182,19 @@ components:
                 description: Partitions moving off the node.
               voter:
                 type: boolean
-                x-narad-since: unreleased
+                x-narad-since: v3.1.0
                 description: '`true` when the node is a Raft voter.'
               leader:
                 type: boolean
-                x-narad-since: unreleased
+                x-narad-since: v3.1.0
                 description: '`true` for the Raft leader.'
               heartbeat_age_seconds:
                 type: integer
-                x-narad-since: unreleased
+                x-narad-since: v3.1.0
                 description: Seconds since the leader last stamped the node's heartbeat, by the answering node's clock.
               decommission_blocked:
                 type: array
-                x-narad-since: unreleased
+                x-narad-since: v3.1.0
                 description: For a draining node, every reason its decommission cannot progress that the cluster metadata shows. Absent when none. The leader also logs each reason and exports `narad_decommission_blocked`.
                 items:
                   $ref: '#/components/schemas/DecommissionReason'
@@ -2197,11 +2202,11 @@ components:
                 $ref: '#/components/schemas/NodeStatus'
               status_error:
                 type: string
-                x-narad-since: unreleased
+                x-narad-since: v3.1.0
                 description: With `detail=true`, why the node's own status could not be read.
     NodeStatus:
       type: object
-      x-narad-since: unreleased
+      x-narad-since: v3.1.0
       description: With `detail=true`, the node's own report about itself.
       properties:
         node:
@@ -2257,7 +2262,7 @@ components:
             $ref: '#/components/schemas/MoveWorker'
     MoveWorker:
       type: object
-      x-narad-since: unreleased
+      x-narad-since: v3.1.0
       description: A destination's own report of one move.
       properties:
         topic:
@@ -2294,7 +2299,7 @@ components:
           description: Why the move cannot finish on its own. Absent while it can.
     DecommissionReason:
       type: object
-      x-narad-since: unreleased
+      x-narad-since: v3.1.0
       properties:
         code:
           type: string
@@ -2305,7 +2310,7 @@ components:
           description: What it means here and what to do.
     DecommissionRefusal:
       type: object
-      x-narad-since: unreleased
+      x-narad-since: v3.1.0
       properties:
         error:
           type: string
@@ -2316,7 +2321,7 @@ components:
             $ref: '#/components/schemas/DecommissionReason'
     DecommissionDryRun:
       type: object
-      x-narad-since: unreleased
+      x-narad-since: v3.1.0
       properties:
         member:
           type: string
@@ -2363,27 +2368,27 @@ components:
         from_status:
           type: string
           enum: [alive, dead, draining, not_a_member]
-          x-narad-since: unreleased
+          x-narad-since: v3.1.0
           description: The owner's liveness.
         to_status:
           type: string
           enum: [alive, dead, draining, not_a_member]
-          x-narad-since: unreleased
+          x-narad-since: v3.1.0
           description: The destination's liveness.
         blocked:
           type: string
           enum: [source_dead, target_dead, target_not_member]
-          x-narad-since: unreleased
+          x-narad-since: v3.1.0
           description: Why the move cannot progress as things stand. Absent while it can. A dead source finishes only if the destination can force-promote a complete copy; the leader clears a move to a dead destination after two minutes.
         worker:
           $ref: '#/components/schemas/MoveWorker'
         worker_error:
           type: string
-          x-narad-since: unreleased
+          x-narad-since: v3.1.0
           description: With `detail=true`, why the destination's report could not be read.
     MoveAbort:
       type: object
-      x-narad-since: unreleased
+      x-narad-since: v3.1.0
       properties:
         move:
           $ref: '#/components/schemas/Move'
@@ -2413,7 +2418,7 @@ components:
           description: Always `ready`.
         degraded:
           type: array
-          x-narad-since: unreleased
+          x-narad-since: v3.1.0
           items:
             type: string
             enum: [raft_tls_certificate_expired, raft_tls_ca_expired]

@@ -108,16 +108,16 @@ with an operator's cached credentials.
 | Limit | Value | Over it |
 |---|---|---|
 | Request body | 1 MiB (1,048,576 bytes) | [`413`](status-codes.md#status-413); `400` on the user and attach-child routes |
-| Batch ack body (unreleased) | 64 KiB | [`413`](status-codes.md#status-413) |
+| Batch ack body (v3.1.0) | 64 KiB | [`413`](status-codes.md#status-413) |
 | Request headers | 64 KiB by default | [`431`](status-codes.md#status-431) |
-| Messages per batch produce, records per batch consume, handles per batch ack (unreleased) | 100 | [`400`](status-codes.md#status-400) |
+| Messages per batch produce, records per batch consume, handles per batch ack (v3.1.0) | 100 | [`400`](status-codes.md#status-400) |
 | Consume `wait` | 10 s by default | clamped, with an `X-Narad-Wait-Clamped` response header |
 | Concurrent consumes per user (or per client IP with security off), per node | 1024 by default | [`429`](status-codes.md#status-429) |
-| Concurrent produces per user, per node (unreleased) | off by default | [`429`](status-codes.md#status-429) |
+| Concurrent produces per user, per node (v3.1.0) | off by default | [`429`](status-codes.md#status-429) |
 
 The limits marked "by default" are settings: `http.max_header_bytes`,
 `http.max_consume_wait`, `http.max_consume_in_flight_per_identity` and
-`http.max_produce_in_flight_per_identity` (unreleased), in that order,
+`http.max_produce_in_flight_per_identity` (from v3.1.0), in that order,
 all in the [Configuration reference](configuration.md#http).
 
 ### Errors
@@ -160,11 +160,12 @@ most 1000) and the `page_token` from the previous answer, and stop when
 or none, while `next_page_token` is still set, because topics you
 cannot read are removed after the page is cut.
 
-### Unreleased features
+### Release markers
 
-This page describes `master`. Anything not in the latest release,
-v3.0.1, is marked **Unreleased**, and its entry says how a v3.0.1 node
-answers a request that uses it. See
+This page describes `master`. Anything the latest release, v3.1.0,
+added is marked **New in v3.1.0**, and its entry says how a v3.0.1
+node answers a request that uses it. Anything merged since v3.1.0 is
+marked **Unreleased** until it ships. See
 [Which release these docs describe](api-stability.md#docs-version).
 
 ## Topics {#topics}
@@ -206,14 +207,14 @@ forever and only leaving it out takes the default.
 | Status | Meaning |
 |---|---|
 | [`201`](status-codes.md#status-201) | Created. The body is the new topic. |
-| [`400`](status-codes.md#status-400) | A field is invalid, the name is not allowed, or the schema cannot be registered (unreleased, that includes a schema whose validation would cost too much). |
+| [`400`](status-codes.md#status-400) | A field is invalid, the name is not allowed, or the schema cannot be registered (from v3.1.0, that includes a schema whose validation would cost too much). |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No `create` grant on the name, or no right to manage `parent`, as the node that answers or the cluster leader sees it. |
 | [`404`](status-codes.md#status-404) | `parent` does not exist, also after the answering node caught up with the leader. |
-| [`409`](status-codes.md#status-409) | The topic exists, a topic exists whose name differs only in letter case (the error names it), `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold), or (unreleased) the schema, or the parent's schema history a child adopts, would pass a schema byte budget, or `parent` was recreated under the request twice in a row (`topic changed since it was read`). |
+| [`409`](status-codes.md#status-409) | The topic exists, a topic exists whose name differs only in letter case (the error names it), `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold), or (from v3.1.0) the schema, or the parent's schema history a child adopts, would pass a schema byte budget, or `parent` was recreated under the request twice in a row (`topic changed since it was read`). |
 | [`413`](status-codes.md#status-413) | The body is over 1 MiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
-| [`503`](status-codes.md#status-503) | The cluster has no leader to write the topic, the answering node could not reach the leader to confirm `parent`, or (unreleased) every live node is being decommissioned, so no node can take the new partitions; nothing was written. |
+| [`503`](status-codes.md#status-503) | The cluster has no leader to write the topic, the answering node could not reach the leader to confirm `parent`, or (from v3.1.0) every live node is being decommissioned, so no node can take the new partitions; nothing was written. |
 
 **Response body (`201`)**: a [Topic](#topic-object).
 
@@ -323,7 +324,7 @@ Returns the topic, its current schema and statistics for each
 partition. The node that answers asks every partition's owner for
 its statistics.
 
-**Unreleased:** when some partitions' owners are down, the answer
+**New in v3.1.0:** when some partitions' owners are down, the answer
 is still `200`. The partitions that could be read carry their
 statistics and `status` `ok`; each other one is a placeholder with
 zero statistics, `status` `owner_unavailable` and the owner's
@@ -360,7 +361,7 @@ instead.
 | `schema_version`<br>integer | Current schema version, `0` without a schema. |
 | `schema`<br>JSON | The current schema document. Absent without a schema. |
 | `partition_stats`<br>array of [Partition statistics](#partition-stats-object) | One entry per partition, or only the one `partition` asked for. |
-| `partial`<br>boolean | **Unreleased.** `true` when some entries are placeholders whose owner could not report (`status` `owner_unavailable`). Absent otherwise. |
+| `partial` (v3.1.0)<br>boolean | `true` when some entries are placeholders whose owner could not report (`status` `owner_unavailable`). Absent otherwise. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" "$NARAD/v1/topics/orders?partition=1"
@@ -443,10 +444,10 @@ you need all or nothing.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist, also after the answering node caught up with the leader. |
-| [`409`](status-codes.md#status-409) | `schema_base_version` is not the current version, the history holds 1000 versions or (unreleased) the new version would take it past 4 MiB or the cluster's schemas past 256 MiB, the topic is a child whose schema its parent manages, the new retention is too short for a delay child, or (unreleased) the topic was deleted and recreated, or grew, under the request twice in a row (`topic changed since it was read`). |
+| [`409`](status-codes.md#status-409) | `schema_base_version` is not the current version, the history holds 1000 versions or (from v3.1.0) the new version would take it past 4 MiB or the cluster's schemas past 256 MiB, the topic is a child whose schema its parent manages, the new retention is too short for a delay child, or (from v3.1.0) the topic was deleted and recreated, or grew, under the request twice in a row (`topic changed since it was read`). |
 | [`413`](status-codes.md#status-413) | The body is over 1 MiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
-| [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, the answering node could not reach the leader to confirm a topic it does not have, or (unreleased) a partition increase found every live node being decommissioned, so no node can take the new partitions; nothing was changed. |
+| [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, the answering node could not reach the leader to confirm a topic it does not have, or (from v3.1.0) a partition increase found every live node being decommissioned, so no node can take the new partitions; nothing was changed. |
 
 **Response body (`200`)**: a [Topic](#topic-object).
 
@@ -502,7 +503,7 @@ it next starts.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist, also after the answering node caught up with the leader. |
-| [`409`](status-codes.md#status-409) | (Unreleased) The topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was deleted. Read the topic again before deleting it. |
+| [`409`](status-codes.md#status-409) | New in v3.1.0. The topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was deleted. Read the topic again before deleting it. |
 | [`503`](status-codes.md#status-503) | The cluster has no leader to write the delete, or the answering node could not reach the leader to confirm a topic it does not have. |
 
 ```sh title="Request"
@@ -613,7 +614,7 @@ instead.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | The caller does not manage both topics, as the node that answers or the cluster leader sees them. |
 | [`404`](status-codes.md#status-404) | The parent or the child does not exist, also after the answering node caught up with the leader. |
-| [`409`](status-codes.md#status-409) | The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, the delay is longer than the parent's retention can hold, or (unreleased) the copy of the parent's schema history the child adopts would pass the cluster's schema byte budget, or either topic was recreated under the request twice in a row (`topic changed since it was read`). |
+| [`409`](status-codes.md#status-409) | The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, the delay is longer than the parent's retention can hold, or (from v3.1.0) the copy of the parent's schema history the child adopts would pass the cluster's schema byte budget, or either topic was recreated under the request twice in a row (`topic changed since it was read`). |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`503`](status-codes.md#status-503) | No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry. |
 
@@ -728,7 +729,7 @@ history it already has and becomes a standalone topic again.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | The caller manages neither topic, as the node that answers or the cluster leader sees them. |
 | [`404`](status-codes.md#status-404) | Neither topic exists after the answering node caught up with the leader, or the two are not linked. |
-| [`409`](status-codes.md#status-409) | (Unreleased) Either topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was changed. |
+| [`409`](status-codes.md#status-409) | New in v3.1.0. Either topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was changed. |
 | [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, or the answering node could not reach the leader to confirm the topics. |
 
 ```sh title="Request"
@@ -784,7 +785,7 @@ The message, 1 byte to 1 MiB. Content types: `application/json`, `application/oc
 | Status | Meaning |
 |---|---|
 | [`202`](status-codes.md#status-202) | Accepted and synced to disk. The body is empty. |
-| [`400`](status-codes.md#status-400) | Empty body, `partition` out of range, `key` or `partition` given twice, or the body fails the topic's schema (unreleased, that includes a body nested deeper than 256 levels). |
+| [`400`](status-codes.md#status-400) | Empty body, `partition` out of range, `key` or `partition` given twice, or the body fails the topic's schema (from v3.1.0, that includes a body nested deeper than 256 levels). |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No `produce` grant on the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist. |
@@ -793,7 +794,7 @@ The message, 1 byte to 1 MiB. Content types: `application/json`, `application/oc
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`429`](status-codes.md#status-429) | Too many produces in flight for this user on this node, only when the operator set a produce cap ([Configuration reference](configuration.md#http)). |
 | [`500`](status-codes.md#status-500) | The node could not write to its ingress WAL. It answers every produce this way until it restarts. |
-| [`503`](status-codes.md#status-503) | Unreleased. Nothing was checked or stored; retry through another node. Either this node is being decommissioned and takes no new produce (with `Retry-After: 1`), or the topic has a schema and every schema validation slot on the node stayed busy for 5 seconds. |
+| [`503`](status-codes.md#status-503) | New in v3.1.0. Nothing was checked or stored; retry through another node. Either this node is being decommissioned and takes no new produce (with `Retry-After: 1`), or the topic has a schema and every schema validation slot on the node stayed busy for 5 seconds. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" -X POST \
@@ -810,7 +811,7 @@ Content-Length: 0
 
 ### Produce a batch {#produce-batch}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 `POST /v1/topics/{topic}/produce/batch`
 
@@ -861,7 +862,7 @@ At most 1 MiB in total.
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`429`](status-codes.md#status-429) | The batch does not fit this user's produce cap on this node (only when the cap is set). A batch counts as its message count, clamped to the cap. |
 | [`500`](status-codes.md#status-500) | The node could not write to its ingress WAL. |
-| [`503`](status-codes.md#status-503) | Unreleased. Nothing was checked or stored; retry through another node. Either this node is being decommissioned and takes no new produce (with `Retry-After: 1`), or the topic has a schema and every schema validation slot on the node stayed busy for 5 seconds. |
+| [`503`](status-codes.md#status-503) | Nothing was checked or stored; retry through another node. Either this node is being decommissioned and takes no new produce (with `Retry-After: 1`), or the topic has a schema and every schema validation slot on the node stayed busy for 5 seconds. |
 
 **Response body (`202`)**
 
@@ -913,7 +914,7 @@ has no `receipt_handle` and nothing needs acking.
 | `wait`<br>query, string, optional, default `0s` | How long to wait for a message before answering `204`, as a Go duration such as `500ms` or `10s`. Without it the answer is immediate. Values above the server's maximum (10 s by default, [Configuration reference](configuration.md#http)) are cut to it, and the response then carries `X-Narad-Wait-Clamped` with the value used. |
 | `partition`<br>query, integer, optional | Take messages from this partition only. Required with `offset`. |
 | `offset`<br>query, integer, optional | Replay the record at this offset of `partition`. An offset past the end of the partition answers `204`; one that aged out of retention answers `410`. |
-| `max` (unreleased)<br>query, integer, optional | Take up to this many messages in one answer, `{"messages": [...]}`, each with its own lease. The request does not wait to fill `max`. Requires an `X-Narad-Client` header ([Required headers](#required-headers)). It counts as `max`, clamped to the cap, against the per-user consume cap. Cannot be combined with `offset`. A v3.0.1 node ignores it and answers with one message in the single-message shape. |
+| `max` (v3.1.0)<br>query, integer, optional | Take up to this many messages in one answer, `{"messages": [...]}`, each with its own lease. The request does not wait to fill `max`. Requires an `X-Narad-Client` header ([Required headers](#required-headers)). It counts as `max`, clamped to the cap, against the per-user consume cap. Cannot be combined with `offset`. A v3.0.1 node ignores it and answers with one message in the single-message shape. |
 
 **Responses**
 
@@ -955,12 +956,12 @@ Date: Mon, 28 Sep 2026 19:31:43 GMT
 }
 ```
 
-```sh title="Request: a batch, unreleased"
+```sh title="Request: a batch (v3.1.0)"
 curl -i -u "$AUTH" -H 'X-Narad-Client: curl' \
   "$NARAD/v1/topics/orders/consume?max=10&wait=5s"
 ```
 
-```http title="Response: a batch, unreleased"
+```http title="Response: a batch (v3.1.0)"
 HTTP/1.1 200 OK
 Content-Length: 326
 Content-Type: application/json
@@ -1004,7 +1005,7 @@ or that was already settled, gets `410`.
 
 Without a `receipt_handle` parameter, a JSON body
 `{"receipt_handles": [...]}` settles 1 to 100 handles in one
-request (**Unreleased**). Each handle is settled on its own with the
+request (**v3.1.0**). Each handle is settled on its own with the
 mode `extend` selects, and the answer is `200` with one result per
 handle, in request order. A v3.0.1 node answers such a request `400`.
 
@@ -1027,7 +1028,7 @@ Only for a batch ack, at most 64 KiB.
 
 | Field | Description |
 |---|---|
-| `receipt_handles` (unreleased)<br>array of string, required | 1 to 100 receipt handles of this topic. |
+| `receipt_handles` (v3.1.0)<br>array of string, required | 1 to 100 receipt handles of this topic. |
 
 **Responses**
 
@@ -1065,7 +1066,7 @@ HTTP/1.1 204 No Content
 Date: Mon, 28 Sep 2026 19:31:43 GMT
 ```
 
-```sh title="Request: a batch, unreleased"
+```sh title="Request: a batch (v3.1.0)"
 curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/ack" \
   -H "Content-Type: application/json" \
   -d '{"receipt_handles": [
@@ -1075,7 +1076,7 @@ curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/ack" \
       ]}'
 ```
 
-```http title="Response: a batch, unreleased"
+```http title="Response: a batch (v3.1.0)"
 HTTP/1.1 200 OK
 Content-Length: 124
 Content-Type: application/json
@@ -1413,7 +1414,7 @@ unless `detail` is set.
 
 | Name | Description |
 |---|---|
-| `detail` (unreleased)<br>query, boolean, optional, default `False` | `true` also asks every member for its own status (dispatch backlog, quarantined copies, move workers), all at once and within 2 seconds in total. A member that cannot answer gets a `status_error` instead; a v3.0.1 node is reported as an older release that cannot report its status. |
+| `detail` (v3.1.0)<br>query, boolean, optional, default `False` | `true` also asks every member for its own status (dispatch backlog, quarantined copies, move workers), all at once and within 2 seconds in total. A member that cannot answer gets a `status_error` instead; a v3.0.1 node is reported as an older release that cannot report its status. |
 
 **Responses**
 
@@ -1435,13 +1436,13 @@ unless `detail` is set.
 | `members[].draining`<br>boolean | `true` while the node is being decommissioned. |
 | `members[].owned_partitions`<br>integer | Partitions the node owns. |
 | `members[].outbound_moves`<br>integer | Partitions moving off the node. |
-| `members[].voter` (unreleased)<br>boolean | `true` when the node is a Raft voter. |
-| `members[].leader` (unreleased)<br>boolean | `true` for the Raft leader. |
-| `members[].heartbeat_age_seconds` (unreleased)<br>integer | Seconds since the leader last stamped the node's heartbeat, by the answering node's clock. |
-| `members[].decommission_blocked` (unreleased)<br>array of object | For a draining node, every reason its decommission cannot progress that the cluster metadata shows. Absent when none. The leader also logs each reason and exports `narad_decommission_blocked`. |
+| `members[].voter` (v3.1.0)<br>boolean | `true` when the node is a Raft voter. |
+| `members[].leader` (v3.1.0)<br>boolean | `true` for the Raft leader. |
+| `members[].heartbeat_age_seconds` (v3.1.0)<br>integer | Seconds since the leader last stamped the node's heartbeat, by the answering node's clock. |
+| `members[].decommission_blocked` (v3.1.0)<br>array of object | For a draining node, every reason its decommission cannot progress that the cluster metadata shows. Absent when none. The leader also logs each reason and exports `narad_decommission_blocked`. |
 | `members[].decommission_blocked[].code`<br>string: `below_min_voters`, `no_healthy_majority`, `move_target`, `dispatch_backlog`, `node_status_unavailable`, `no_receivers`, `owner_dead`, `move_budget_full`, `leader_transfer` | The reason, as `narad_decommission_blocked` labels it ([Troubleshooting](../operate/troubleshooting.md#decommission-blocked)). |
 | `members[].decommission_blocked[].message`<br>string | What it means here and what to do. |
-| `members[].node_status` (unreleased)<br>object | With `detail=true`, the node's own report about itself. |
+| `members[].node_status` (v3.1.0)<br>object | With `detail=true`, the node's own report about itself. |
 | `members[].node_status.node`<br>string | Node ID. |
 | `members[].node_status.draining`<br>boolean | The node's own view of its draining mark. |
 | `members[].node_status.produce_in_flight`<br>integer | Client produce requests the node admitted and has not answered yet. Once it is draining it admits none, and a decommission waits for 0. |
@@ -1467,7 +1468,7 @@ unless `detail` is set.
 | `members[].node_status.moves[].last_error`<br>string | The last thing that failed. |
 | `members[].node_status.moves[].copied_bytes`<br>integer | Bytes the current copy fetched. |
 | `members[].node_status.moves[].blocked`<br>string: `copy_unverifiable`, `source_dead_copy_behind` | Why the move cannot finish on its own. Absent while it can. |
-| `members[].status_error` (unreleased)<br>string | With `detail=true`, why the node's own status could not be read. |
+| `members[].status_error` (v3.1.0)<br>string | With `detail=true`, why the node's own status could not be read. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" "$NARAD/v1/cluster/members"
@@ -1510,7 +1511,7 @@ each side's liveness and why a move is blocked. Abort one with
 
 | Name | Description |
 |---|---|
-| `detail` (unreleased)<br>query, boolean, optional, default `False` | `true` also asks each move's destination for its move worker's own report: phase, copy attempts, copied bytes, last error and why it is blocked. Within 2 seconds in total. |
+| `detail` (v3.1.0)<br>query, boolean, optional, default `False` | `true` also asks each move's destination for its move worker's own report: phase, copy attempts, copied bytes, last error and why it is blocked. Within 2 seconds in total. |
 
 **Responses**
 
@@ -1530,10 +1531,10 @@ each side's liveness and why a move is blocked. Abort one with
 | `moves[].partition`<br>integer | Partition number. |
 | `moves[].from`<br>string | Node that owns the partition now. |
 | `moves[].to`<br>string | Node the partition is moving to. |
-| `moves[].from_status` (unreleased)<br>string: `alive`, `dead`, `draining`, `not_a_member` | The owner's liveness. |
-| `moves[].to_status` (unreleased)<br>string: `alive`, `dead`, `draining`, `not_a_member` | The destination's liveness. |
-| `moves[].blocked` (unreleased)<br>string: `source_dead`, `target_dead`, `target_not_member` | Why the move cannot progress as things stand. Absent while it can. A dead source finishes only if the destination can force-promote a complete copy; the leader clears a move to a dead destination after two minutes. |
-| `moves[].worker` (unreleased)<br>object | A destination's own report of one move. |
+| `moves[].from_status` (v3.1.0)<br>string: `alive`, `dead`, `draining`, `not_a_member` | The owner's liveness. |
+| `moves[].to_status` (v3.1.0)<br>string: `alive`, `dead`, `draining`, `not_a_member` | The destination's liveness. |
+| `moves[].blocked` (v3.1.0)<br>string: `source_dead`, `target_dead`, `target_not_member` | Why the move cannot progress as things stand. Absent while it can. A dead source finishes only if the destination can force-promote a complete copy; the leader clears a move to a dead destination after two minutes. |
+| `moves[].worker` (v3.1.0)<br>object | A destination's own report of one move. |
 | `moves[].worker.topic`<br>string | Topic name. |
 | `moves[].worker.partition`<br>integer | Partition number. |
 | `moves[].worker.source`<br>string | The node the copy comes from. |
@@ -1544,7 +1545,7 @@ each side's liveness and why a move is blocked. Abort one with
 | `moves[].worker.last_error`<br>string | The last thing that failed. |
 | `moves[].worker.copied_bytes`<br>integer | Bytes the current copy fetched. |
 | `moves[].worker.blocked`<br>string: `copy_unverifiable`, `source_dead_copy_behind` | Why the move cannot finish on its own. Absent while it can. |
-| `moves[].worker_error` (unreleased)<br>string | With `detail=true`, why the destination's report could not be read. |
+| `moves[].worker_error` (v3.1.0)<br>string | With `detail=true`, why the destination's report could not be read. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" "$NARAD/v1/cluster/moves"
@@ -1596,7 +1597,7 @@ partitions) or `owner_dead` (the node is dead and owns partitions).
 | Name | Description |
 |---|---|
 | `id`<br>path, string, required | The node ID, as `GET /v1/cluster/members` lists it (the pod name under the Helm chart). |
-| `dry_run` (unreleased)<br>query, boolean, optional, default `False` | `true` answers `200` with what a decommission would do and changes nothing. Answered by the receiving node, never forwarded. |
+| `dry_run` (v3.1.0)<br>query, boolean, optional, default `False` | `true` answers `200` with what a decommission would do and changes nothing. Answered by the receiving node, never forwarded. |
 
 **Responses**
 
@@ -1674,7 +1675,7 @@ Date: Mon, 28 Sep 2026 19:31:44 GMT
 
 ### Abort a partition move {#abort-move}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 `POST /v1/cluster/moves/{topic}/{partition}/abort`
 
@@ -1721,10 +1722,10 @@ read back is audited with `outcome unknown`.
 | `move.partition`<br>integer | Partition number. |
 | `move.from`<br>string | Node that owns the partition now. |
 | `move.to`<br>string | Node the partition is moving to. |
-| `move.from_status` (unreleased)<br>string: `alive`, `dead`, `draining`, `not_a_member` | The owner's liveness. |
-| `move.to_status` (unreleased)<br>string: `alive`, `dead`, `draining`, `not_a_member` | The destination's liveness. |
-| `move.blocked` (unreleased)<br>string: `source_dead`, `target_dead`, `target_not_member` | Why the move cannot progress as things stand. Absent while it can. A dead source finishes only if the destination can force-promote a complete copy; the leader clears a move to a dead destination after two minutes. |
-| `move.worker` (unreleased)<br>object | A destination's own report of one move. |
+| `move.from_status` (v3.1.0)<br>string: `alive`, `dead`, `draining`, `not_a_member` | The owner's liveness. |
+| `move.to_status` (v3.1.0)<br>string: `alive`, `dead`, `draining`, `not_a_member` | The destination's liveness. |
+| `move.blocked` (v3.1.0)<br>string: `source_dead`, `target_dead`, `target_not_member` | Why the move cannot progress as things stand. Absent while it can. A dead source finishes only if the destination can force-promote a complete copy; the leader clears a move to a dead destination after two minutes. |
+| `move.worker` (v3.1.0)<br>object | A destination's own report of one move. |
 | `move.worker.topic`<br>string | Topic name. |
 | `move.worker.partition`<br>integer | Partition number. |
 | `move.worker.source`<br>string | The node the copy comes from. |
@@ -1735,7 +1736,7 @@ read back is audited with `outcome unknown`.
 | `move.worker.last_error`<br>string | The last thing that failed. |
 | `move.worker.copied_bytes`<br>integer | Bytes the current copy fetched. |
 | `move.worker.blocked`<br>string: `copy_unverifiable`, `source_dead_copy_behind` | Why the move cannot finish on its own. Absent while it can. |
-| `move.worker_error` (unreleased)<br>string | With `detail=true`, why the destination's report could not be read. |
+| `move.worker_error` (v3.1.0)<br>string | With `detail=true`, why the destination's report could not be read. |
 | `note`<br>string | What happens next. |
 
 ```sh title="Request"
@@ -1765,7 +1766,7 @@ Date: Mon, 05 Oct 2026 19:15:09 GMT
 
 ### Forget a Raft server with no member record {#forget-server}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 `POST /v1/cluster/members/{id}/forget`
 
@@ -1881,7 +1882,7 @@ of the cluster metadata has caught up with the leader since it
 started. Otherwise it answers `503` with the reason in `error`.
 The check runs on every request. It never needs credentials.
 
-A `200` can list conditions under `degraded` (unreleased): an
+A `200` can list conditions under `degraded` (from v3.1.0): an
 expired Raft TLS certificate or CA bundle. They do not make the
 node unready, because one certificate usually serves every node
 and expires on all of them at once, and failing readiness would
@@ -1902,7 +1903,7 @@ take every pod out of its Services. See
 | Field | Description |
 |---|---|
 | `status`<br>string | Always `ready`. |
-| `degraded` (unreleased)<br>array of string: `raft_tls_certificate_expired`, `raft_tls_ca_expired` | Present only when something is wrong that does not make the node unready: `raft_tls_certificate_expired` when the node's Raft TLS certificate has expired, `raft_tls_ca_expired` when every CA in its Raft CA bundle has. Peers refuse new Raft connections until the node restarts with renewed files. |
+| `degraded` (v3.1.0)<br>array of string: `raft_tls_certificate_expired`, `raft_tls_ca_expired` | Present only when something is wrong that does not make the node unready: `raft_tls_certificate_expired` when the node's Raft TLS certificate has expired, `raft_tls_ca_expired` when every CA in its Raft CA bundle has. Peers refuse new Raft connections until the node restarts with renewed files. |
 
 ```sh title="Request"
 curl -i "$NARAD/readyz"
@@ -1985,8 +1986,8 @@ Bodies that several endpoints share.
 | `size_bytes`<br>integer | Bytes on disk. |
 | `oldest_segment_at`<br>integer | Time of the oldest segment, Unix seconds. Absent when unknown. |
 | `owner_node`<br>string | ID of the node that owns the partition. |
-| `status`<br>string: `ok`, `owner_unavailable` | **Unreleased.** `ok` when the statistics are the owner's; `owner_unavailable` for a placeholder with zero statistics, because the owner could not report them. Never add a placeholder's numbers to a total. |
-| `owner_liveness`<br>string: `dead`, `unreachable`, `unknown`, `unassigned` | **Unreleased.** Why an `owner_unavailable` partition's owner could not report: `dead` (marked dead), `unreachable` (alive, but its statistics did not come back within 2 seconds), `unknown` (no member with an address), `unassigned` (no owner yet). Absent for `ok`. |
+| `status` (v3.1.0)<br>string: `ok`, `owner_unavailable` | `ok` when the statistics are the owner's; `owner_unavailable` for a placeholder with zero statistics, because the owner could not report them. Never add a placeholder's numbers to a total. |
+| `owner_liveness` (v3.1.0)<br>string: `dead`, `unreachable`, `unknown`, `unassigned` | Why an `owner_unavailable` partition's owner could not report: `dead` (marked dead), `unreachable` (alive, but its statistics did not come back within 2 seconds), `unknown` (no member with an address), `unassigned` (no owner yet). Absent for `ok`. |
 
 ### Message object {#message-object}
 
@@ -1998,7 +1999,7 @@ One message. A batch consume answers `{"messages": [...]}` with one of these per
 | `partition`<br>integer | Partition the message is stored in. |
 | `offset`<br>integer | Position in the partition. |
 | `key`<br>string | The produce key. Absent for a message produced without one. |
-| `key_encoding` (unreleased)<br>string: `base64` | `base64` when the key is not valid UTF-8 and `key` holds it in base64. |
+| `key_encoding` (v3.1.0)<br>string: `base64` | `base64` when the key is not valid UTF-8 and `key` holds it in base64. |
 | `payload`<br>JSON | The message as it was produced. Valid JSON comes back as JSON, other UTF-8 text as a JSON string, and anything else as a base64 string with `payload_encoding`. |
 | `payload_encoding`<br>string: `base64` | `base64` when `payload` holds binary data in base64. |
 | `timestamp`<br>integer | When the message was committed to its partition, Unix seconds. |
