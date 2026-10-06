@@ -5,13 +5,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 )
 
 // gatedStatsBroker holds every cursor-stats read until release closes.
 type gatedStatsBroker struct {
-	broker.Broker
+	rigBroker
 	release chan struct{}
 }
 
@@ -21,7 +20,7 @@ func (b gatedStatsBroker) FanoutCursorStats(ctx context.Context, parent string) 
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	return b.Broker.FanoutCursorStats(ctx, parent)
+	return b.rigBroker.FanoutCursorStats(ctx, parent)
 }
 
 // The unshipped check a delete starts answers for every delete that
@@ -31,7 +30,7 @@ func (b gatedStatsBroker) FanoutCursorStats(ctx context.Context, parent string) 
 func TestUnshippedCheckOutlivesTheDeleteThatStartedIt(t *testing.T) {
 	s := linksRig(t)
 	release := make(chan struct{})
-	s.links.d.Broker = gatedStatsBroker{Broker: s.broker, release: release}
+	s.links.d.Broker = gatedStatsBroker{rigBroker: s.broker.(rigBroker), release: release}
 	parent, err := s.store.GetTopic(context.Background(), "orders")
 	if err != nil {
 		t.Fatal(err)

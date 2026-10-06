@@ -190,6 +190,19 @@ type RemoteChildAttacher interface {
 
 var _ RemoteChildAttacher = (*impl)(nil)
 
+// RemoteLinkedDeleter is the optional remote-aware delete of a Broker:
+// a topic delete and a remote child's detach that go ahead only when
+// the stubs they would remove are still exactly the ones the caller's
+// unshipped check covered, judged under the topic manager's name locks
+// after the leader barrier. See topics.Manager.DeleteRemoteLinkedTopicID
+// and topics.Manager.DetachRemoteChild.
+type RemoteLinkedDeleter interface {
+	DeleteRemoteLinkedTopicID(ctx context.Context, name string, expect map[string]string) (string, error)
+	DetachRemoteChild(ctx context.Context, parent, child, stubID string) error
+}
+
+var _ RemoteLinkedDeleter = (*impl)(nil)
+
 // Compile-time check: the incarnation-reporting delete stays reachable
 // through the facade via the embedded topics.Manager.
 var _ TopicIDDeleter = (*impl)(nil)

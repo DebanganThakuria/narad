@@ -9,12 +9,7 @@ package cluster
 // actorContext). The cluster port is peer-only and authenticated.
 
 import (
-	"context"
 	"net/http"
-	"strconv"
-
-	"github.com/debanganthakuria/narad/internal/domain/topic"
-	"github.com/debanganthakuria/narad/internal/errs"
 
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
@@ -48,11 +43,9 @@ func (s *RPCServer) handleDetachChild(payload []byte) nodewire.Response {
 		return errorResponse(http.StatusBadRequest, "invalid detach child request: "+err.Error())
 	}
 	// A remote child's delete must run the unshipped check, which only
-	// the remote-aware delete (OpRemoteWrite child.delete) does; no
-	// forwarding path may skip it.
-	if child, err := s.broker.GetTopic(rpcRequestContext(), req.Child); err == nil && child.IsRemoteChild() {
-		return s.brokerError("detach child", remoteAwareDeleteRequired(req.Child))
-	}
+	// the remote-aware delete (OpRemoteWrite child.delete) does; the
+	// topic manager refuses a stub's plain detach under the topics'
+	// locks, after the leader barrier.
 	ctx, refusal := s.actorContext(req.Actor)
 	if refusal != nil {
 		return *refusal
@@ -74,28 +67,4 @@ func (s *RPCServer) handleFanoutCursors(payload []byte) nodewire.Response {
 	}
 	stats = s.fanout.OverlayRemoteCursorStats(req.Topic, stats)
 	return jsonResponse(http.StatusOK, stats)
-}
-
-// remoteAwareDeleteRequired is the 409 a leader answers a raw delete or
-// detach of a stub, or of a parent with remote children, with.
-func remoteAwareDeleteRequired(name string) error {
-	return errs.RemoteChildError(errs.ErrRemoteAwareDeleteRequired,
-		"use the remote-aware delete: "+strconv.Quote(name)+" is, or has, a remote child whose records may not be shipped yet")
-}
-
-// remoteLinked reports whether t is a stub or a parent with remote
-// children, reading the children from b.
-func remoteLinked(b interface {
-	GetTopic(context.Context, string) (topic.Topic, error)
-}, t topic.Topic,
-) bool {
-	if t.IsRemoteChild() {
-		return true
-	}
-	for _, name := range t.Children {
-		if c, err := b.GetTopic(rpcRequestContext(), name); err == nil && c.IsRemoteChild() {
-			return true
-		}
-	}
-	return false
 }

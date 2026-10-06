@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -687,7 +689,14 @@ func (l *RemoteLinks) deleteChild(ctx context.Context, req nodewire.RemoteWriteR
 	} else if r, err := l.unshippedNow(ctx, parent); err == nil {
 		report = r
 	}
-	if err := l.d.Broker.DetachChild(ctx, b.Parent, b.Child); err != nil {
+	deleter, ok := l.d.Broker.(broker.RemoteLinkedDeleter)
+	if !ok {
+		l.audit("remote_child.delete", req, target, "refused", topic.RemoteStateUnavailable)
+		return l.internalError("delete a remote child", errNoRemoteLinkedDeleter)
+	}
+	// Only the stub the check covered: one deleted and attached again in
+	// between is refused and the caller retries.
+	if err := deleter.DetachRemoteChild(ctx, b.Parent, b.Child, child.ID); err != nil {
 		status, msg := l.linkError(err, b.Child)
 		l.audit("remote_child.delete", req, target, "refused", classOf(status))
 		return errorResponse(status, msg)
@@ -715,10 +724,15 @@ func (l *RemoteLinks) deleteTopic(ctx context.Context, req nodewire.RemoteWriteR
 	if err != nil {
 		return l.internalError("read topic", err)
 	}
-	parentName, stubs := b.Topic, l.remoteChildNames(ctx, t)
-	if t.IsRemoteChild() {
-		parentName, stubs = t.Parent, []string{t.Name}
+	deleter, ok := l.d.Broker.(broker.RemoteLinkedDeleter)
+	if !ok {
+		return l.internalError("delete a topic", errNoRemoteLinkedDeleter)
 	}
+	parentName, links := b.Topic, l.remoteChildLinks(ctx, t)
+	if t.IsRemoteChild() {
+		parentName, links = t.Parent, map[string]string{t.Name: t.ID}
+	}
+	stubs := slices.Sorted(maps.Keys(links))
 	remoteLinked := len(stubs) > 0
 	if remoteLinked && !b.ExpectRemote {
 		return errorResponse(http.StatusConflict, "topic changed since this node checked the request; retry")
@@ -741,7 +755,10 @@ func (l *RemoteLinks) deleteTopic(ctx context.Context, req nodewire.RemoteWriteR
 			report = r
 		}
 	}
-	id, err := deleteTopicReportingID(ctx, l.d.Broker, b.Topic)
+	// Only the stubs the check covered: the delete is refused, and the
+	// caller retries, when an attach, a delete or a re-attach applied
+	// since they were read.
+	id, err := deleter.DeleteRemoteLinkedTopicID(ctx, b.Topic, links)
 	if err != nil {
 		if _, ok := errors.AsType[brokertopics.PurgeError](err); !ok {
 			status, msg := l.linkError(err, b.Topic)
@@ -763,16 +780,22 @@ func (l *RemoteLinks) deleteTopic(ctx context.Context, req nodewire.RemoteWriteR
 	return nodewire.Response{Status: http.StatusNoContent}
 }
 
-// remoteChildNames lists t's children that are stubs.
-func (l *RemoteLinks) remoteChildNames(ctx context.Context, t topic.Topic) []string {
-	var out []string
+// remoteChildLinks maps t's children that are stubs to their
+// incarnations. A child that cannot be read is left out; the delete
+// re-reads the set under the topic's lock and refuses a mismatch.
+func (l *RemoteLinks) remoteChildLinks(ctx context.Context, t topic.Topic) map[string]string {
+	out := map[string]string{}
 	for _, name := range t.Children {
 		if c, err := l.d.Store.GetTopic(ctx, name); err == nil && c.IsRemoteChild() {
-			out = append(out, name)
+			out[name] = c.ID
 		}
 	}
 	return out
 }
+
+// errNoRemoteLinkedDeleter reports a broker without the remote-aware
+// delete; every broker New builds has it.
+var errNoRemoteLinkedDeleter = errors.New("the broker has no remote-aware delete")
 
 // unshippedReport is one unshipped check's result for a parent: the
 // cursor lag of each of its remote children, and each member's ingress

@@ -50,7 +50,19 @@ func (m *Manager) DeleteTopic(ctx context.Context, name string) error {
 // with a PurgeError (the local purge failed, but the topic is gone and
 // the other nodes still have to purge it). It is empty for a record that
 // predates incarnation IDs.
+//
+// A stub, or a parent with remote children, as the topic stands under
+// the name lock, is refused (errs.ErrRemoteAwareDeleteRequired): only
+// DeleteRemoteLinkedTopicID, after the unshipped check, deletes one.
 func (m *Manager) DeleteTopicID(ctx context.Context, name string) (string, error) {
+	return m.deleteTopicID(ctx, name, refuseRemoteLinked)
+}
+
+// deleteTopicID is DeleteTopicID with the remote-linked check: under
+// the name lock and after the leader barrier, checkLinks is given the
+// topic's remote-linked set as it stands and refuses the delete with an
+// error.
+func (m *Manager) deleteTopicID(ctx context.Context, name string, checkLinks func(string, map[string]string) error) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("%w: name required", ErrInvalid)
 	}
@@ -68,6 +80,13 @@ func (m *Manager) DeleteTopicID(ctx context.Context, name string) (string, error
 			return "", err
 		}
 		if err := m.authorizeManageTopic(ctx, t); err != nil {
+			return "", err
+		}
+		links, err := m.remoteLinks(ctx, t)
+		if err != nil {
+			return "", err
+		}
+		if err := checkLinks(name, links); err != nil {
 			return "", err
 		}
 		err = m.deleteTopicMetadata(ctx, name, t.ID)

@@ -200,10 +200,11 @@ func (s *RPCServer) handleDeleteTopic(payload []byte) nodewire.Response {
 		return errorResponse(http.StatusBadRequest, "invalid delete topic request: "+err.Error())
 	}
 	// A stub, or a parent with remote children, is deleted only through
-	// the remote-aware delete, which runs the unshipped check first.
-	if t, err := s.broker.GetTopic(rpcRequestContext(), req.Topic); err == nil && remoteLinked(s.broker, t) {
-		return s.brokerError("delete topic", remoteAwareDeleteRequired(req.Topic))
-	}
+	// the remote-aware delete, which runs the unshipped check first: the
+	// topic manager refuses one under the topic's lock, after the leader
+	// barrier, so an attach this replica has not applied yet cannot slip
+	// past a check made here.
+	//
 	// The purge fan-out below names the incarnation the delete removed,
 	// so a member that has already applied a recreate of the same name
 	// purges the old directory and not the new one (see

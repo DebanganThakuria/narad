@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
@@ -25,13 +24,13 @@ import (
 // hookedStatsBroker is the broker as the leader's unshipped check sees
 // it, with a hook that runs once, right after the cursor stats are read.
 type hookedStatsBroker struct {
-	broker.Broker
+	rigBroker
 	once  sync.Once
 	after func()
 }
 
 func (b *hookedStatsBroker) FanoutCursorStats(ctx context.Context, parent string) ([]topic.FanoutCursorStat, error) {
-	stats, err := b.Broker.FanoutCursorStats(ctx, parent)
+	stats, err := b.rigBroker.FanoutCursorStats(ctx, parent)
 	b.once.Do(b.after)
 	return stats, err
 }
@@ -64,7 +63,7 @@ func TestRemoteLinksDeleteCountsARecordDispatchedMidCheck(t *testing.T) {
 	s := rg.src
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s.links.d.Broker = &hookedStatsBroker{Broker: s.links.d.Broker, after: func() {
+	s.links.d.Broker = &hookedStatsBroker{rigBroker: s.links.d.Broker.(rigBroker), after: func() {
 		disp := NewProduceDispatcher(s.ingress, s.store, "node-self", s.broker, nil, rigLogger(), ProduceDispatcherConfig{PollInterval: 5 * time.Millisecond})
 		go disp.Run(ctx)
 		rigWait(t, "the late record dispatched", 10*time.Second, func() bool {
@@ -179,7 +178,7 @@ func TestRemoteLinksDeleteNeverSharesACheckThatStartedBeforeIt(t *testing.T) {
 		err error
 	}
 	bDone := make(chan result, 1)
-	s.links.d.Broker = &hookedStatsBroker{Broker: s.links.d.Broker, after: func() {
+	s.links.d.Broker = &hookedStatsBroker{rigBroker: s.links.d.Broker.(rigBroker), after: func() {
 		if _, err := s.broker.AcceptProduce(ctx, "orders", "k", []byte(`{"late":1}`)); err != nil {
 			t.Error(err)
 		}

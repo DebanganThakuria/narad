@@ -10,6 +10,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"strconv"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -99,4 +101,81 @@ func (m *Manager) authorizeManageTopic(ctx context.Context, t topic.Topic) error
 		return authorizeManage(ctx, p)
 	}
 	return authorizeManage(ctx, t)
+}
+
+// remoteLinks is t's remote-linked set as it stands, each stub's name
+// to its incarnation: t itself when it is a stub, otherwise t's
+// children that are stubs. A child that cannot be read for any reason
+// but its absence fails the read: a set read short could let a delete
+// pass that must be refused.
+func (m *Manager) remoteLinks(ctx context.Context, t topic.Topic) (map[string]string, error) {
+	if t.IsRemoteChild() {
+		return map[string]string{t.Name: t.ID}, nil
+	}
+	links := map[string]string{}
+	for _, name := range t.Children {
+		c, err := m.GetTopic(ctx, name)
+		if errors.Is(err, ErrNotFound) || errors.Is(err, errs.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if c.IsRemoteChild() {
+			links[name] = c.ID
+		}
+	}
+	return links, nil
+}
+
+// refuseRemoteLinked is the raw delete's and detach's guard: a stub,
+// or a parent with remote children, goes only through the remote-aware
+// delete, which runs the unshipped check first. It runs under the name
+// lock after the leader barrier, so an attach that committed before the
+// delete took the lock is seen.
+func refuseRemoteLinked(name string, links map[string]string) error {
+	if len(links) == 0 {
+		return nil
+	}
+	return errs.RemoteChildError(errs.ErrRemoteAwareDeleteRequired,
+		"use the remote-aware delete: "+strconv.Quote(name)+" is, or has, a remote child whose records may not be shipped yet")
+}
+
+// expectRemoteLinks returns a check that passes only when a topic's
+// remote-linked set is exactly the one the caller's unshipped check
+// covered: an attach, a delete or a re-attach that applied between the
+// check and the delete's lock would otherwise let the delete abandon a
+// stub nobody checked.
+func expectRemoteLinks(expect map[string]string) func(string, map[string]string) error {
+	return func(name string, links map[string]string) error {
+		if maps.Equal(links, expect) {
+			return nil
+		}
+		return fmt.Errorf("%w: the remote children of %q changed since the unshipped check; retry", errs.ErrTopicChanged, name)
+	}
+}
+
+// DeleteRemoteLinkedTopicID is DeleteTopicID for the remote-aware
+// delete. expect is the remote-linked set (stub name to incarnation)
+// the caller's unshipped check covered, empty for a topic that had
+// none; under the name lock, after the leader barrier, the topic's set
+// must still be exactly that (errs.ErrTopicChanged otherwise). Holding
+// the parent's name lock keeps any attach from landing until the
+// delete's entry is proposed.
+func (m *Manager) DeleteRemoteLinkedTopicID(ctx context.Context, name string, expect map[string]string) (string, error) {
+	return m.deleteTopicID(ctx, name, expectRemoteLinks(expect))
+}
+
+// DetachRemoteChild is DetachChild for the remote-aware delete of a
+// remote child: under both names' locks, after the leader barrier,
+// child must still be a stub of parent with incarnation stubID, the one
+// the caller's unshipped check covered (errs.ErrTopicChanged
+// otherwise).
+func (m *Manager) DetachRemoteChild(ctx context.Context, parent, child, stubID string) error {
+	return m.detachChild(ctx, parent, child, func(p, c topic.Topic) error {
+		if !c.IsRemoteChild() || c.Parent != parent || c.ID != stubID {
+			return fmt.Errorf("%w: remote child %q changed since the unshipped check; retry", errs.ErrTopicChanged, child)
+		}
+		return nil
+	})
 }
