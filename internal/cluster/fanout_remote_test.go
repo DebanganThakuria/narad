@@ -584,3 +584,31 @@ func TestRemoteChildRecordRefusalClearsAStaleStall(t *testing.T) {
 		t.Fatalf("blocked at %+v, want offset 0", snap.blocked)
 	}
 }
+
+// A pause applied between the read of the stub and the slab's version
+// read must still stop the slab: the slab pairs the stub with the
+// version read before it, so the first lane pass sees the change.
+func TestRemoteChildSlabSeesAChangeAppliedAfterItsStubWasRead(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{stallRetry: 5 * time.Second}})
+	rg.src.start()
+	defer rg.src.stop()
+	var cur *remoteCursor
+	rigWait(t, "the remote cursor", 10*time.Second, func() bool {
+		cur = rg.src.runner.remoteCursorFor("orders", 0, "orders-to-b")
+		return cur != nil
+	})
+	version := rg.src.store.TopicVersion("orders-to-b")
+	stub, err := rg.src.store.GetTopic(context.Background(), "orders-to-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rg.setState(t, metastore.RemoteChildStateOp{Pause: &metastore.RemotePauseState{Paused: true, Reason: "maintenance"}})
+	recs := []topic.KeyedRecord{{Offset: 1000, Payload: []byte(`{"seq":1000}`), CommittedAtUnixMs: time.Now().UnixMilli()}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	rg.src.runner.sender().commit(ctx, cur.key, stub, version, recs)
+	rg.target.awaitDispatched(t, 5*time.Second)
+	if got := rg.target.records(t, "orders"); len(got) != 0 {
+		t.Fatalf("the slab sent %d records on a paused link", len(got))
+	}
+}

@@ -404,6 +404,10 @@ func (r *FanoutRunner) commitSlab(ctx context.Context, key fanoutCursorKey, batc
 // commit, in slab order (nil when all did). A remote child's records go
 // to its target; reread reports a slab that must be read again.
 func (r *FanoutRunner) commitBatchOnce(ctx context.Context, key fanoutCursorKey, records []topic.KeyedRecord) (pending []topic.KeyedRecord, reread bool) {
+	// The version is read before the record, so a change applied between
+	// the two reads leaves the record older than its version, never the
+	// other way round: a remote slab then re-reads its stub at once.
+	version := r.store.TopicVersion(key.child)
 	child, err := r.store.GetTopic(ctx, key.child)
 	if err != nil || !child.IsChild() || child.Parent != key.parent || child.AttachEpoch != key.epoch {
 		// The link dissolved (or the child is gone) mid-batch: commit
@@ -411,7 +415,7 @@ func (r *FanoutRunner) commitBatchOnce(ctx context.Context, key fanoutCursorKey,
 		return records, false
 	}
 	if child.Remote != nil {
-		return r.sender().commit(ctx, key, child, records)
+		return r.sender().commit(ctx, key, child, version, records)
 	}
 	keepIndex, ok := r.keylessKeepsIndex(ctx, key, records, child.Partitions)
 	if !ok {

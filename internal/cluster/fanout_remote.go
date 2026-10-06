@@ -301,6 +301,9 @@ func (r *FanoutRunner) sender() *remoteSender {
 func (r *FanoutRunner) remoteBeforeRead(ctx context.Context, key fanoutCursorKey, cur *remoteCursor, next int64) (maxRecords int, maxBytes int64, ok bool) {
 	s := r.sender()
 	for {
+		// The version before the record: a resume applied between the two
+		// reads wakes the wait below at once instead of after stallRetry.
+		version := r.store.TopicVersion(key.child)
 		stub, err := r.store.GetTopic(ctx, key.child)
 		if err != nil || !stub.IsRemoteChild() || stub.Parent != key.parent || stub.AttachEpoch != key.epoch {
 			// Dissolved or replaced: the commit's link check refuses too,
@@ -311,7 +314,6 @@ func (r *FanoutRunner) remoteBeforeRead(ctx context.Context, key fanoutCursorKey
 			cur.setPaused(true)
 			r.refreshRemoteLag(ctx, key, cur, next, nil)
 			r.publishRemoteState(cur)
-			version := r.store.TopicVersion(key.child)
 			if !s.waitChange(ctx, key.child, version, s.stallRetry, nil) {
 				return 0, 0, false
 			}
@@ -457,7 +459,10 @@ func (r *FanoutRunner) unpublishRemoteState(cur *remoteCursor) {
 // budget could not keep the records of a lane that had to wait, after
 // waiting out what that lane was waiting for, so the cursor re-reads
 // the slab from its unadvanced position.
-func (s *remoteSender) commit(ctx context.Context, key fanoutCursorKey, child topic.Topic, records []topic.KeyedRecord) ([]topic.KeyedRecord, bool) {
+//
+// childVersion is the stub's version read before child was read, so a
+// change applied in between makes the first lane pass re-read the stub.
+func (s *remoteSender) commit(ctx context.Context, key fanoutCursorKey, child topic.Topic, childVersion uint64, records []topic.KeyedRecord) ([]topic.KeyedRecord, bool) {
 	cur := s.r.remoteCursorOf(key)
 	if cur == nil {
 		// Only a cursor registered by runCursor ships; anything else is a
@@ -478,7 +483,7 @@ func (s *remoteSender) commit(ctx context.Context, key fanoutCursorKey, child to
 	}
 	shipCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	sh := &slabShip{s: s, cur: cur, key: key, cancel: cancel, link: child, linkVersion: s.r.store.TopicVersion(key.child), slabStart: slabStart}
+	sh := &slabShip{s: s, cur: cur, key: key, cancel: cancel, link: child, linkVersion: childVersion, slabStart: slabStart}
 	if parent, err := s.r.store.GetTopic(ctx, key.parent); err == nil {
 		sh.retentionMs = parent.RetentionMs
 	}
