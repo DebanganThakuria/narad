@@ -169,6 +169,12 @@ type LinkLeader interface {
 type CheckRunner interface {
 	// CheckEverywhere runs the ch. 4.7 checks on every member within 15 s.
 	CheckEverywhere(ctx context.Context, req remote.CheckRequest) ([]remote.NodeReport, error)
+	// CheckHere runs the checks on this node alone: a dry run without a
+	// host allowlist, which must not probe from every member.
+	CheckHere(ctx context.Context, req remote.CheckRequest) ([]remote.NodeReport, error)
+	// AllowlistConfigured reports whether remotes.allowed_hosts is set
+	// on this node; without it answers are blind (ch. 5.8).
+	AllowlistConfigured() bool
 	// RequirePosture runs the release gate, then fails with
 	// errs.ErrRemoteFeatureGate (a member did not answer) or
 	// errs.ErrRemotePosture (a member has security off or legacy cluster

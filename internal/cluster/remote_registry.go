@@ -476,6 +476,21 @@ func (r *RemoteRegistry) CheckEverywhere(ctx context.Context, req remote.CheckRe
 	return reports, nil
 }
 
+// CheckHere implements CheckRunner: the checks on this node alone. A
+// check of the same remote that ran here less than 5 s ago answers 429.
+func (r *RemoteRegistry) CheckHere(ctx context.Context, req remote.CheckRequest) ([]remote.NodeReport, error) {
+	rep, throttled := r.d.Service.RunCheck(ctx, req)
+	if throttled {
+		return nil, &remote.CheckError{Status: http.StatusTooManyRequests, Class: topic.RemoteStateThrottled}
+	}
+	return []remote.NodeReport{rep}, nil
+}
+
+// AllowlistConfigured implements CheckRunner.
+func (r *RemoteRegistry) AllowlistConfigured() bool {
+	return r.d.Service != nil && r.d.Service.AllowlistConfigured()
+}
+
 // StatusEverywhere implements remote.ClusterChecks: every member's
 // status report, or why there is none.
 func (r *RemoteRegistry) StatusEverywhere(ctx context.Context) []remote.MemberStatus {

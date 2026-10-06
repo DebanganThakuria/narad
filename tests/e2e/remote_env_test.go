@@ -339,6 +339,14 @@ func (c *targetIDChecks) CheckEverywhere(ctx context.Context, req remote.CheckRe
 	return []remote.NodeReport{r}, nil
 }
 
+func (c *targetIDChecks) CheckHere(ctx context.Context, req remote.CheckRequest) ([]remote.NodeReport, error) {
+	return c.CheckEverywhere(ctx, req)
+}
+
+// AllowlistConfigured: the e2e pair runs as with remotes.allowed_hosts
+// set, so answers carry every report.
+func (c *targetIDChecks) AllowlistConfigured() bool { return true }
+
 func (c *targetIDChecks) RequirePosture(context.Context) error { return nil }
 
 func (c *targetIDChecks) RequireReleases(context.Context) error { return nil }

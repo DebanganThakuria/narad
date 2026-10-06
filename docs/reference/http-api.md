@@ -629,7 +629,12 @@ leader runs the attach checks from every member against the target
 delay child or stub and has no remote children, the schemas match,
 it takes batch produce, the credential is not an admin there),
 resolves the start offsets, and writes one Raft entry. With
-`dry_run` it stops before the entry and answers what it found. The
+`dry_run` it stops before the entry and answers what it found.
+Without `remotes.allowed_hosts` on the leader (unreleased), a dry
+run checks from the leader alone, its reports carry only `node`,
+`result` and `class`, and a failed attach or resume answers the
+`class` and the failing `members` instead of each member's report.
+The
 fields `remote_topic`, `from`, `lanes` and `dry_run` without
 `remote` get `400`. Task guide:
 [Replicate a topic to another cluster](../build/remote-children.md).
@@ -2972,7 +2977,9 @@ answered as a target that takes batch produce answers it, and the
 credential is not an admin there. With `remotes.allowed_hosts` set,
 every member runs the checks and reports the connect time
 (`rtt_ms`) and an estimate of one lane's capacity; without it only
-this node runs them, and no time is reported.
+this node runs them, and its report carries only `node`, `result`,
+`class` and this cluster's own fields: no time, no target ID, no
+certificate expiry, no warnings drawn from the target's answers.
 
 The answer is `200` whether or not the checks pass: read `result`.
 `narad remote test` exits non-zero unless it is `pass`.

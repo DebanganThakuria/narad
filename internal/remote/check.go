@@ -40,6 +40,30 @@ type NodeReport struct {
 	Posture           Posture  `json:"posture"`
 }
 
+// Blind returns reports as an admin may see them without a host
+// allowlist (blind by design): each member's node, result and class,
+// with this cluster's own credential version and posture, and nothing
+// the target answered (its ID, its certificate's expiry, warnings drawn
+// from its answers, timings).
+func Blind(reports []NodeReport) []NodeReport {
+	out := make([]NodeReport, len(reports))
+	for i, r := range reports {
+		out[i] = NodeReport{Node: r.Node, Result: r.Result, Class: r.Class, CredentialVersion: r.CredentialVersion, Warnings: []string{}, Posture: r.Posture}
+	}
+	return out
+}
+
+// Failing names the members whose report failed.
+func Failing(reports []NodeReport, credentialVersion uint64) []string {
+	out := []string{}
+	for _, r := range reports {
+		if r.Result != ResultPass || r.CredentialVersion != credentialVersion {
+			out = append(out, r.Node)
+		}
+	}
+	return out
+}
+
 // Check classes beyond the link states.
 const (
 	ClassTargetSecurityOff  = "target_security_off"

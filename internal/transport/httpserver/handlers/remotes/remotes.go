@@ -428,7 +428,13 @@ func Test(s *handlers.Set) http.HandlerFunc {
 			}
 			reports = []remote.NodeReport{rep}
 		}
-		ans := testAnswer{Remote: rec.Name, Result: remote.ResultPass, Checks: reports}
+		shown := reports
+		if !svc.AllowlistConfigured() {
+			// Blind by design (ch. 5.8): pass or fail and the class, and
+			// nothing the target answered.
+			shown = remote.Blind(reports)
+		}
+		ans := testAnswer{Remote: rec.Name, Result: remote.ResultPass, Checks: shown}
 		status := http.StatusOK
 		if _, err := remote.Verdict(reports, rec.CredentialVersion); err != nil {
 			var ce *remote.CheckError

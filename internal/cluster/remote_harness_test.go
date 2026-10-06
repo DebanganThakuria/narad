@@ -492,6 +492,23 @@ type fakeCheckRunner struct {
 	calls    int
 	// last is the most recent check request.
 	last remote.CheckRequest
+	// blind: no host allowlist on the node; hereCalls counts CheckHere.
+	blind     bool
+	hereCalls int
+}
+
+func (f *fakeCheckRunner) AllowlistConfigured() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.blind
+}
+
+func (f *fakeCheckRunner) CheckHere(ctx context.Context, req remote.CheckRequest) ([]remote.NodeReport, error) {
+	f.mu.Lock()
+	f.hereCalls++
+	f.calls--
+	f.mu.Unlock()
+	return f.CheckEverywhere(ctx, req)
 }
 
 func (f *fakeCheckRunner) CheckEverywhere(_ context.Context, req remote.CheckRequest) ([]remote.NodeReport, error) {

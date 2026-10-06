@@ -312,16 +312,25 @@ func (l *RemoteLinks) attach(ctx context.Context, req nodewire.RemoteWriteReques
 			fmt.Sprintf("this cluster already links to that remote topic through %q", linked)), topic.RemoteStateTargetHasRemoteChildren)
 	}
 
-	reports, err := l.d.Plane.Checks.CheckEverywhere(ctx, l.checkRequest(ctx, b.Remote, b.RemoteTopic, parent, rec.CredentialVersion))
+	// Without a host allowlist answers are blind (ch. 5.8): a dry run
+	// checks from the leader alone, and no answer carries what the
+	// target said, only results and classes. A real attach still needs
+	// every member's verdict.
+	blind := !l.d.Plane.Checks.AllowlistConfigured()
+	checks := l.d.Plane.Checks.CheckEverywhere
+	if blind && b.DryRun {
+		checks = l.d.Plane.Checks.CheckHere
+	}
+	reports, err := checks(ctx, l.checkRequest(ctx, b.Remote, b.RemoteTopic, parent, rec.CredentialVersion))
 	if err != nil {
-		return refuse(checkErrorResponse(err, reports), "check")
+		return refuse(checkErrorAnswer(err, reports, rec.CredentialVersion, blind), "check")
 	}
 	targetID, err := remote.Verdict(reports, rec.CredentialVersion)
 	if err != nil {
-		return refuse(checkErrorResponse(err, reports), "check")
+		return refuse(checkErrorAnswer(err, reports, rec.CredentialVersion, blind), "check")
 	}
 
-	warnings := attachWarnings(parent, reports)
+	warnings := attachWarnings(parent, reports, blind)
 	offsets, err := l.d.Runner.AttachOffsetsMode(ctx, b.Parent, b.From)
 	if err != nil {
 		return refuse(errorResponse(http.StatusServiceUnavailable, "a parent partition owner could not be asked for its start offset; retry"), topic.RemoteStateUnavailable)
@@ -331,13 +340,17 @@ func (l *RemoteLinks) attach(ctx context.Context, req nodewire.RemoteWriteReques
 		warnings = append(warnings, olderTargetBodyWarning)
 	}
 	if b.DryRun {
+		shown := reports
+		if blind {
+			shown = remote.Blind(reports)
+		}
 		out := map[string]any{
 			"dry_run":        true,
 			"attach_offsets": offsets,
-			"checks":         reports,
+			"checks":         shown,
 			"warnings":       warnings,
 		}
-		if capsOK {
+		if capsOK && !blind {
 			out["capabilities"] = map[string]any{"max_messages": caps.MaxMessages, "zstd": caps.Zstd}
 		}
 		return jsonResponse(http.StatusOK, out)
@@ -392,9 +405,10 @@ type stubWithWarnings struct {
 }
 
 // attachWarnings are the attach's advisories: a parent retention below
-// what a regional outage needs (Q15), and a target too old to report
-// remote children (loop detection waits for its upgrade).
-func attachWarnings(parent topic.Topic, reports []remote.NodeReport) []string {
+// what a regional outage needs (Q15), a target too old to report remote
+// children (loop detection waits for its upgrade), and the warnings the
+// checks drew from the target's answers, left out when blind.
+func attachWarnings(parent topic.Topic, reports []remote.NodeReport, blind bool) []string {
 	warnings := []string{}
 	if parent.RetentionMs > 0 && parent.RetentionMs < sink.RetentionWarnMs {
 		warnings = append(warnings, fmt.Sprintf(
@@ -406,6 +420,9 @@ func attachWarnings(parent topic.Topic, reports []remote.NodeReport) []string {
 			warnings = append(warnings, "the target does not report remote children (an older release, which cannot hold one): loop detection starts once it is upgraded")
 			break
 		}
+	}
+	if blind {
+		return warnings
 	}
 	for _, r := range reports {
 		warnings = append(warnings, r.Warnings...)
@@ -532,7 +549,7 @@ func (l *RemoteLinks) setState(ctx context.Context, req nodewire.RemoteWriteRequ
 		}
 		if err != nil {
 			l.audit(event, req, target, "refused", "check")
-			return checkErrorResponse(err, reports)
+			return checkErrorAnswer(err, reports, rec.CredentialVersion, !l.d.Plane.Checks.AllowlistConfigured())
 		}
 		op.Pause = &metastore.RemotePauseState{Paused: false}
 	case nodewire.RemoteSubSkip:
@@ -1131,6 +1148,22 @@ func postureResponse(err error) nodewire.Response {
 		return errorResponse(http.StatusPreconditionFailed, "a member runs an older release or is unreachable: "+err.Error())
 	}
 	return errorResponse(http.StatusServiceUnavailable, "the upgrade gate could not be checked; retry")
+}
+
+// checkErrorAnswer is checkErrorResponse, blind without a host
+// allowlist (ch. 5.8): the class and the members that failed, not each
+// member's report.
+func checkErrorAnswer(err error, reports []remote.NodeReport, credentialVersion uint64, blind bool) nodewire.Response {
+	var ce *remote.CheckError
+	if !blind || !errors.As(err, &ce) {
+		return checkErrorResponse(err, reports)
+	}
+	if ce.Reports != nil {
+		reports = ce.Reports
+	}
+	return jsonResponse(ce.Status, map[string]any{
+		"error": "remote check failed: " + ce.Class, "class": ce.Class, "members": remote.Failing(reports, credentialVersion),
+	})
 }
 
 // checkErrorResponse answers a failed check with its status and the

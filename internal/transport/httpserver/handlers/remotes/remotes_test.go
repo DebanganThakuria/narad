@@ -723,3 +723,42 @@ func TestReleaseGateNamesTheMemberInMembers(t *testing.T) {
 		}
 	}
 }
+
+// Without a host allowlist the test answers pass or fail and the class
+// per node, and nothing the target answered (ch. 5.8): no certificate
+// expiry, no target ID, no check-written warnings. With one it reports
+// them.
+func TestRemoteTestIsBlindWithoutAnAllowlist(t *testing.T) {
+	for _, c := range []struct {
+		allowlist bool
+		blind     bool
+	}{{false, true}, {true, false}} {
+		n := newAPINode(t, apiOpts{allowlist: c.allowlist})
+		if res := n.do(t, admin, http.MethodPost, "/v1/remotes", n.createBody("b", canary)); res.status != http.StatusCreated {
+			t.Fatalf("create: %d %s", res.status, res.body)
+		}
+		n.cache.Refresh()
+		res := n.do(t, admin, http.MethodPost, "/v1/remotes/b/test", `{"topic":"orders"}`)
+		if res.status != http.StatusOK || res.json(t)["result"] != "pass" {
+			t.Fatalf("allowlist %v: test: %d %s", c.allowlist, res.status, res.body)
+		}
+		checks, _ := res.json(t)["checks"].([]any)
+		if len(checks) == 0 {
+			t.Fatalf("allowlist %v: no checks in %s", c.allowlist, res.body)
+		}
+		for _, raw := range checks {
+			rep := raw.(map[string]any)
+			_, cert := rep["server_cert_not_after"]
+			_, id := rep["target_id"]
+			if c.blind && (cert || id) {
+				t.Fatalf("no allowlist: a report carries what the target answered: %v", rep)
+			}
+			if !c.blind && (!cert || !id) {
+				t.Fatalf("allowlist set: report %v, want the certificate expiry and the target ID", rep)
+			}
+			if rep["node"] == nil || rep["result"] != "pass" {
+				t.Fatalf("report %v, want the node and the result", rep)
+			}
+		}
+	}
+}
