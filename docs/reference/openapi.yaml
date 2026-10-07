@@ -511,7 +511,7 @@ paths:
         '401':
           description: Missing or wrong credentials.
         '403':
-          description: Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic. For a remote child's stub (unreleased), the caller is neither an `admin` nor the parent's owner, or security is off.
+          description: Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic. For a remote child's stub (unreleased), the caller is neither an `admin` nor the parent's owner, or security is off. For a parent with remote children (unreleased), security is off (`remotes require security`).
         '404':
           description: The topic does not exist, also after the answering node caught up with the leader.
         '409':
