@@ -376,7 +376,7 @@ To scale out, raise `replicaCount`. The new pod joins the cluster and the leader
 ```sh
 helm install narad ./charts/narad \
   -n narad --set replicaCount=3 \
-  --set image.tag=v3.2.0
+  --set image.tag=v3.2.1
 ```
 
 The chart's NetworkPolicy fences the Raft port to the Narad pods by default; [Raft TLS](operate/raft-tls.md) is the production choice.
@@ -552,7 +552,7 @@ The `narad` binary is both the broker and the CLI. `narad server start --dev` ru
       -v narad-data:/var/lib/narad \
       -e NARAD_SECURITY_ENABLED=false \
       -e NARAD_CLUSTER_ADDR=127.0.0.1:7943 \
-      ghcr.io/debanganthakuria/narad:v3.2.0
+      ghcr.io/debanganthakuria/narad:v3.2.1
     ```
 
 === "Homebrew"

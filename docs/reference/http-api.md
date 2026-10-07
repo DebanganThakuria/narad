@@ -167,11 +167,11 @@ cannot read are removed after the page is cut.
 
 ### Release markers
 
-This page describes `master`. Anything the latest release, v3.2.0,
-added is marked **New in v3.2.0**, and what v3.1.0 added is marked
+This page describes `master`. Anything v3.2.0 added is marked
+**New in v3.2.0**, and what v3.1.0 added is marked
 **New in v3.1.0**. Where an older node answers a request that uses
-it differently, its entry says how. Anything merged since v3.2.0 is
-marked **Unreleased** until it ships. See
+it differently, its entry says how. Anything merged since the latest
+release, v3.2.1, is marked **Unreleased** until it ships. See
 [Which release these docs describe](api-stability.md#docs-version).
 
 ## Topics {#topics}
