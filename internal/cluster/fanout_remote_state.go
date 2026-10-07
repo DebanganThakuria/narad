@@ -123,8 +123,10 @@ type linkCheck struct {
 	// the last check that errored, ending at erredAt) and retryAt only
 	// spare the callers that waited for it, and beside an open gate the
 	// link's other sends until retryAt, a new check for the same key.
-	// While the gate is closed they spare no later send, so the probe
-	// that reopens it is always checked first.
+	// While the gate is closed they spare no later send and retryAt
+	// stays zero, so the first send after the gate reopens (a probe,
+	// or a chunk sent before the close that was accepted) is always
+	// checked first.
 	checked   checkKey
 	nextCheck time.Time
 	erred     checkKey

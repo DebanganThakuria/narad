@@ -85,7 +85,8 @@ type rigFaults struct {
 	// "nobatch" (the batch route answers Go's 404), "v310" (the
 	// children listing as v3.1.0 answers it: no parent_id, no remote),
 	// "otherID" (the listing names another topic ID, as a different
-	// cluster behind the same name would; chunks still land),
+	// cluster behind the same name would, after slowDelay; chunks
+	// still land),
 	// "nolisting" (the children listing answers 503 HTML; chunks
 	// still land), "throttled" (429 with retryAfter as Retry-After).
 	mode atomic.Value
@@ -189,6 +190,7 @@ func (f *rigFaults) wrap(next http.Handler) http.Handler {
 			}
 		case "otherID":
 			if strings.HasSuffix(r.URL.Path, "/children") && r.Method == http.MethodGet {
+				time.Sleep(f.slowDelay)
 				serveListingEdited(w, r, next, func(listing map[string]any) { listing["parent_id"] = "another-clusters-id" })
 				return
 			}

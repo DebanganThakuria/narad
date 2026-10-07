@@ -7,6 +7,7 @@ import (
 
 	domremote "github.com/debanganthakuria/narad/internal/domain/remote"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/remote/sink"
 )
 
 // A link's target check is single-flight, but a cursor that needs no
@@ -127,7 +128,7 @@ func TestRemoteLinkLanesDoNotWaitOnTheRetryOfAnErroredCheck(t *testing.T) {
 
 	// Its retry is due and in flight.
 	cur.check.mu.Lock()
-	cur.check.retryAt = time.Time{}
+	cur.check.retryAt = time.Now().Add(-time.Millisecond)
 	cur.check.mu.Unlock()
 	before := rg.target.faults.listings.Load()
 	inflight := make(chan struct{})
@@ -146,6 +147,69 @@ func TestRemoteLinkLanesDoNotWaitOnTheRetryOfAnErroredCheck(t *testing.T) {
 	}
 	if !ok || ran {
 		t.Fatalf("checkTarget = (ok %v, ran %v), want the published verdict (true, false)", ok, ran)
+	}
+	<-inflight
+}
+
+// A check that errored while the remote's gate was closed is no retry:
+// the reopen check is still owed. When a chunk sent before the close
+// reopens the gate and one lane runs that check, another lane that
+// finds it in flight waits for its verdict instead of sending on the
+// old one, so nothing goes to another cluster behind the remote's name.
+func TestRemoteLinkLanesWaitOnTheReopenCheckOwedAfterAnErroredProbeCheck(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{partitions: 1}})
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitDelivered(t, rg.src.produce(t, 0, 5, 2, 0), 15*time.Second)
+	rg.waitState(t, 0, topic.RemoteStateRunning, 10*time.Second)
+
+	ctx := context.Background()
+	cur := rg.src.runner.remoteCursorFor("orders", 0, "orders-to-b")
+	if cur == nil {
+		t.Fatal("no remote cursor")
+	}
+	s := rg.src.runner.sender()
+	e, rs, state := s.entry("b")
+	if state != "" {
+		t.Fatalf("lookup state %q", state)
+	}
+	stub, err := rg.src.store.GetTopic(ctx, "orders-to-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur.forceTargetCheck()
+	if ok, _, _ := s.checkTarget(ctx, ctx, cur, e, rs, stub); !ok {
+		t.Fatal("the first check stopped sending")
+	}
+
+	// The gate closes, and the check its new epoch owes errors while it
+	// is closed.
+	defer rg.target.faults.set("")
+	rs.gate.Failed(sink.Verdict{Action: sink.ActRetry, State: topic.RemoteStateUnavailable}, true)
+	rg.target.faults.set("reset")
+	if _, _, ran := s.checkTarget(ctx, ctx, cur, e, rs, stub); !ran {
+		t.Fatal("the check owed by the closed gate did not run")
+	}
+	// A chunk sent before the close is accepted: the gate opens at the
+	// same epoch, its check still owed.
+	rs.gate.Succeeded(false)
+
+	// Another cluster now answers the name, slowly. One lane runs the
+	// owed check.
+	rg.target.faults.slowDelay = 1500 * time.Millisecond
+	rg.target.faults.set("otherID")
+	before := rg.target.faults.listings.Load()
+	inflight := make(chan struct{})
+	go func() {
+		defer close(inflight)
+		s.checkTarget(ctx, ctx, cur, e, rs, stub)
+	}()
+	rigWait(t, "the reopen check to reach the target", 10*time.Second, func() bool {
+		return rg.target.faults.listings.Load() > before
+	})
+
+	if ok, _, _ := s.checkTarget(ctx, ctx, cur, e, rs, stub); ok {
+		t.Fatal("a lane went on sending before the reopen check answered from another cluster")
 	}
 	<-inflight
 }

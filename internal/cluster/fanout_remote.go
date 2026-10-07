@@ -1211,12 +1211,15 @@ func (s *remoteSender) checkTarget(ctx, wait context.Context, c *remoteCursor, e
 		}
 		if done := lc.inflight; done != nil {
 			// Beside an open gate, a check in flight for a key that
-			// already erred is the link's retry: a lane that finds it
-			// sends on the last verdict, as it did before the retry
-			// fell due, instead of waiting out a target that keeps
-			// failing its listing. While the gate is closed the probe
-			// that reopens it is still checked first.
-			retry := !force && lc.erred == key && !rs.gate.Closed()
+			// already erred beside an open gate (retryAt is set only
+			// then) is the link's retry: a lane that finds it sends on
+			// the last verdict, as it did before the retry fell due,
+			// instead of waiting out a target that keeps failing its
+			// listing. A key that erred while the gate was closed is
+			// still owed its reopen check, however the gate reopened
+			// (a probe, or a chunk sent before the close): a lane
+			// waits for it.
+			retry := !force && lc.erred == key && !lc.retryAt.IsZero() && !rs.gate.Closed()
 			lc.mu.Unlock()
 			if !fresh || retry {
 				return c.targetVerdict() == "", res, false
