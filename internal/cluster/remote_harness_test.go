@@ -85,7 +85,9 @@ type rigFaults struct {
 	// "nobatch" (the batch route answers Go's 404), "v310" (the
 	// children listing as v3.1.0 answers it: no parent_id, no remote),
 	// "otherID" (the listing names another topic ID, as a different
-	// cluster behind the same name would; chunks still land).
+	// cluster behind the same name would; chunks still land),
+	// "nolisting" (the children listing answers 503 HTML; chunks
+	// still land), "throttled" (429 with retryAfter as Retry-After).
 	mode atomic.Value
 	// onReset, when set, is told of each request mode "reset" is about
 	// to hang up on, and whether it is a batch.
@@ -103,6 +105,8 @@ type rigFaults struct {
 	tooMany   atomic.Int64
 	onAccept  atomic.Pointer[func()]
 	slowDelay time.Duration
+	// retryAfter is mode "throttled"'s Retry-After header.
+	retryAfter string
 }
 
 func (f *rigFaults) set(mode string) { f.mode.Store(mode) }
@@ -127,6 +131,19 @@ func (f *rigFaults) wrap(next http.Handler) http.Handler {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = io.WriteString(w, "<html>down</html>")
 			return
+		case "throttled":
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", f.retryAfter)
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":"rate limited"}`)
+			return
+		case "nolisting":
+			if strings.HasSuffix(r.URL.Path, "/children") {
+				w.Header().Set("Content-Type", "text/html")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, "<html>listing down</html>")
+				return
+			}
 		case "edge403":
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusForbidden)

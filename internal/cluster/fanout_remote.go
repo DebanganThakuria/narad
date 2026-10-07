@@ -1117,13 +1117,19 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 		// a sibling's re-read never cuts it off before the target
 		// answers and its answer is always recorded.
 		ok, res, ran := s.checkTarget(sh.sendCtx, ctx, sh.cur, entry, rs, stub)
-		if v, outcome := res.GateVerdict(); ran && probe && outcome == sink.CheckFailed {
+		if v, outcome := res.GateVerdict(); ran && probe && outcome == sink.CheckFailed && v.Action == sink.ActGate {
 			// The check went out as the gate's probe and the remote
-			// failed it: that is the probe's answer, as for a quiet
-			// cursor. Sending the chunk behind it would cost a wrong
-			// password two failed logins per backoff, and a dead
-			// target two requests. The lane holds its records and
-			// waits for the next probe, which checks again first.
+			// refused it as a whole (a wrong password, a throttle, a
+			// TLS failure): that is the probe's answer, as for a
+			// quiet cursor. Sending the chunk behind it would cost a
+			// wrong password two failed logins per backoff. The lane
+			// holds its records and waits for the next probe, which
+			// checks again first. A transient failure (unavailable,
+			// an edge) says nothing about produce: the chunk goes
+			// out behind it, so a target that takes chunks while its
+			// listing fails is not held for as long as the listing
+			// fails. Its key is still owed a check, so once the
+			// chunk reopens the gate the next lane checks first.
 			if rs.superseded(entry) {
 				// The answer is to a credential since replaced: the
 				// lane checks again with the new one.
