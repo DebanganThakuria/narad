@@ -21,7 +21,7 @@ Each option below runs one Narad node on your machine, serving its API on port 7
       -v narad-data:/var/lib/narad \
       -e NARAD_SECURITY_ENABLED=false \
       -e NARAD_CLUSTER_ADDR=127.0.0.1:7943 \
-      ghcr.io/debanganthakuria/narad:v3.1.0
+      ghcr.io/debanganthakuria/narad:v3.2.0
     ```
 
     The container logs one JSON line per event. Narad is serving once a line contains `"msg":"http listening"`.
@@ -58,7 +58,7 @@ Each option below runs one Narad node on your machine, serving its API on port 7
 === "From source"
 
     ```bash
-    git clone --branch v3.1.0 --depth 1 https://github.com/DebanganThakuria/narad
+    git clone --branch v3.2.0 --depth 1 https://github.com/DebanganThakuria/narad
     cd narad
     make build
     ./bin/narad server start --dev

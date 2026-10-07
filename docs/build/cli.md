@@ -18,12 +18,12 @@ Everything the CLI does is also plain HTTP, so you never need it in production c
     brew install debanganthakuria/narad/narad
     ```
 
-    The formula builds v3.1.0 from source, which takes a minute or more, and installs shell completions for bash, zsh and fish.
+    The formula builds v3.2.0 from source, which takes a minute or more, and installs shell completions for bash, zsh and fish.
 
 === "From source"
 
     ```sh
-    git clone --branch v3.1.0 --depth 1 https://github.com/DebanganThakuria/narad
+    git clone --branch v3.2.0 --depth 1 https://github.com/DebanganThakuria/narad
     cd narad
     make build
     ./bin/narad version

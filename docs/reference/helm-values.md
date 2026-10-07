@@ -81,7 +81,7 @@ The three sizes are separate on purpose. A fresh install with `replicaCount: 7` 
 | Value | What it does |
 |---|---|
 | `image.repository`<br>default `ghcr.io/debanganthakuria/narad` | The image. |
-| `image.tag`<br>default `latest` | The image tag. Pin a release, such as `v3.1.0`, so every pod runs the same build. |
+| `image.tag`<br>default `latest` | The image tag. Pin a release, such as `v3.2.0`, so every pod runs the same build. |
 | `image.pullPolicy`<br>default `IfNotPresent` |  |
 | `imagePullSecrets`<br>default `[]` | Pull secrets for a private registry. |
 
@@ -106,7 +106,7 @@ A values file that turns compression on:
 
 ```yaml title="values-prod.yaml"
 image:
-  tag: v3.1.0
+  tag: v3.2.0
 narad:
   config:
     storage:
