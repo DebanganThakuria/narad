@@ -376,3 +376,68 @@ func TestRemoteLinkProbeThatWaitedOnARefusedCheckGetsTheRefusal(t *testing.T) {
 		t.Fatalf("the probe got verdict %+v (outcome %v), want the throttle it waited on", v, outcome)
 	}
 }
+
+// A quiet cursor's probe that finds a lane's reopen check in flight
+// waits for it, and when the remote refuses it as a whole the probe
+// records that refusal as its own answer: the gate stays closed for the
+// throttle's Retry-After, so no second refused request follows it in
+// the same backoff window.
+func TestRemoteLinkIdleProbeThatWaitedOnARefusedCheckHoldsTheGate(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{partitions: 1}})
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitDelivered(t, rg.src.produce(t, 0, 5, 2, 0), 15*time.Second)
+	rg.waitState(t, 0, topic.RemoteStateRunning, 10*time.Second)
+
+	ctx := context.Background()
+	cur := rg.src.runner.remoteCursorFor("orders", 0, "orders-to-b")
+	if cur == nil {
+		t.Fatal("no remote cursor")
+	}
+	s := rg.src.runner.sender()
+	e, rs, state := s.entry("b")
+	if state != "" {
+		t.Fatalf("lookup state %q", state)
+	}
+	stub, err := rg.src.store.GetTopic(ctx, "orders-to-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur.forceTargetCheck()
+	if ok, _, _ := s.checkTarget(ctx, ctx, cur, e, rs, stub); !ok {
+		t.Fatal("the first check stopped sending")
+	}
+
+	// The gate closes, and a lane that passed it just before runs the
+	// check its new epoch owes; the target throttles it, slowly.
+	defer rg.target.faults.set("")
+	rg.target.faults.slowDelay = 2 * time.Second
+	rg.target.faults.retryAfter = "5"
+	rg.target.faults.set("throttled")
+	rs.gate.Failed(sink.Verdict{Action: sink.ActRetry, State: topic.RemoteStateUnavailable}, true)
+	before := rg.target.faults.listings.Load()
+	inflight := make(chan struct{})
+	go func() {
+		defer close(inflight)
+		s.checkTarget(ctx, ctx, cur, e, rs, stub)
+	}()
+	rigWait(t, "the lane's check to reach the target", 10*time.Second, func() bool {
+		return rg.target.faults.listings.Load() > before
+	})
+
+	// The gate's backoff runs out while the check is still in flight: a
+	// quiet cursor takes the probe and waits for that check.
+	rigWait(t, "the gate's probe to fall due", 5*time.Second, func() bool {
+		return !rs.gate.WouldWait()
+	})
+	rg.src.runner.remoteIdle(ctx, cur.key, cur)
+	<-inflight
+
+	if !rs.gate.WouldWait() {
+		t.Fatal("the gate hands out a probe at once after the idle probe inherited a throttle")
+	}
+	rg.src.runner.remoteIdle(ctx, cur.key, cur)
+	if got := rg.target.faults.listings.Load() - before; got != 1 {
+		t.Fatalf("%d listings reached the throttled target, want 1", got)
+	}
+}

@@ -1328,7 +1328,12 @@ func (r *FanoutRunner) remoteIdle(ctx context.Context, key fanoutCursorKey, cur 
 		return
 	}
 	_, res, ran := s.checkTarget(ctx, ctx, cur, e, rs, stub)
-	if !ran {
+	v, outcome := res.GateVerdict()
+	// A probe that waited for another cursor's check that the remote
+	// refused as a whole takes that refusal as its own answer, as a
+	// lane's probe does: giving the probe back would let the next one
+	// ask again at once.
+	if !ran && !(probe && outcome == sink.CheckFailed && v.Action == sink.ActGate) {
 		if probe {
 			rs.gate.Released()
 		}
@@ -1344,7 +1349,7 @@ func (r *FanoutRunner) remoteIdle(ctx context.Context, key fanoutCursorKey, cur 
 		}
 		return
 	}
-	switch v, outcome := res.GateVerdict(); {
+	switch {
 	case outcome == sink.CheckReached:
 		rs.gate.Succeeded(probe)
 	case outcome == sink.CheckFailed && (probe || v.Action == sink.ActGate) && !rs.superseded(e):
