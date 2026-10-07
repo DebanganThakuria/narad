@@ -1072,6 +1072,7 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 		if err != nil {
 			return
 		}
+		gateEpoch := rs.gate.Epoch()
 		release := func() {
 			if probe {
 				rs.gate.Released()
@@ -1135,7 +1136,7 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 			lane.retryStall = true
 			continue
 		}
-		sh.sendChunk(ctx, lane, entry, rs, link, probe)
+		sh.sendChunk(ctx, lane, entry, rs, link, probe, gateEpoch)
 	}
 	sh.cur.setLane(lane.idx, "")
 	// Every record is on the target or skipped: give the held bytes back
@@ -1346,8 +1347,9 @@ func (c *remoteCursor) chunkCap(i int) *sink.ChunkCap {
 	return cc
 }
 
-// sendChunk sends the lane's next chunk and acts on the answer.
-func (sh *slabShip) sendChunk(ctx context.Context, lane *laneShip, e *remote.Entry, rs *remoteState, link *topic.RemoteLink, probe bool) {
+// sendChunk sends the lane's next chunk and acts on the answer. gateEpoch
+// is the remote's gate epoch the lane passed the gate under.
+func (sh *slabShip) sendChunk(ctx context.Context, lane *laneShip, e *remote.Entry, rs *remoteState, link *topic.RemoteLink, probe bool, gateEpoch uint64) {
 	s := sh.s
 	rl := s.r.remoteMetrics()
 	waited, err := rs.sem.Acquire(ctx)
@@ -1369,6 +1371,14 @@ func (sh *slabShip) sendChunk(ctx context.Context, lane *laneShip, e *remote.Ent
 		if probe {
 			rs.gate.Released()
 		}
+		return
+	}
+	if !probe && (rs.gate.Closed() || rs.gate.Epoch() != gateEpoch) {
+		// The gate closed while the lane waited for a slot: while it is
+		// closed only its probe goes out, and once it reopens the target
+		// is checked again before anything is sent. Send nothing; the
+		// lane loop waits on the gate with its records held.
+		rs.sem.Release()
 		return
 	}
 	if stub, ok := sh.currentLink(ctx); !ok || stub.Remote.Paused {

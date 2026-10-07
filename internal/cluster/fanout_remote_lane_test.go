@@ -206,3 +206,42 @@ func TestRemoteChildLaneQueuedForASlotSendsNothingAfterTheRemoteIsDeleted(t *tes
 	cancel()
 	<-done
 }
+
+// Lanes queued for an in-flight slot when the remote's gate closes send
+// nothing once slots free: while the gate is closed only its probe goes
+// out, however many lanes passed the gate before it closed.
+func TestRemoteChildLanesQueuedForASlotSendNothingOnceTheGateCloses(t *testing.T) {
+	rg, running := laneRig(t, remoteRigOpts{lanes: 4, rigSourceOpts: rigSourceOpts{stallRetry: 30 * time.Second}})
+	rg.src.stop()
+	cur, forget := rg.src.runner.registerRemoteCursor(running.key)
+	defer forget()
+	s := rg.src.runner.sender()
+	_, rs, state := s.entry("b")
+	if state != "" {
+		t.Fatalf("lookup state %q", state)
+	}
+	slots := rs.sem.Limit()
+	for range slots {
+		if _, err := rs.sem.Acquire(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	listings := rg.target.faults.listings.Load()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	done := rg.commitAsync(ctx, cur, laneRecords(1000, 40))
+	rigWait(t, "the lanes' target check", 10*time.Second, func() bool { return rg.target.faults.listings.Load() > listings })
+	time.Sleep(300 * time.Millisecond) // the lanes now wait for slots
+	batches := rg.target.faults.batches.Load()
+	// Closed for the 30 s auth ceiling: no probe is due during the test.
+	rs.gate.Failed(sink.Verdict{Action: sink.ActGate, State: topic.RemoteStateAuthFailed, Class: topic.RemoteStateAuthFailed}, false)
+	for range slots {
+		rs.sem.Release()
+	}
+	time.Sleep(time.Second)
+	if n := rg.target.faults.batches.Load() - batches; n != 0 {
+		t.Fatalf("%d chunks went out past a closed gate", n)
+	}
+	cancel()
+	<-done
+}

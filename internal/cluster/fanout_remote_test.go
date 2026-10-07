@@ -689,7 +689,7 @@ func TestRemoteChildLaneNeverSendsWithASupersededCredential(t *testing.T) {
 	sh := &slabShip{s: s, cur: cur, key: key, cancel: func() {}, stopWaits: func() {}, sendCtx: context.Background(), link: rg.stub}
 	recs := []topic.KeyedRecord{{Offset: 0, Payload: []byte(`{"seq":0}`), CommittedAtUnixMs: time.Now().UnixMilli()}}
 	lane := &laneShip{recs: recs, done: -1, cap: cur.chunkCap(0), backoff: sink.LaneBackoff(), b64: map[int64]bool{}}
-	sh.sendChunk(context.Background(), lane, stale, rs, rg.stub.Remote, false)
+	sh.sendChunk(context.Background(), lane, stale, rs, rg.stub.Remote, false, rs.gate.Epoch())
 	if rs.gate.Closed() {
 		t.Fatal("a send with the superseded credential closed the remote's gate")
 	}
