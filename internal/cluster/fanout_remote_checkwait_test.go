@@ -377,6 +377,91 @@ func TestRemoteLinkProbeThatWaitedOnARefusedCheckGetsTheRefusal(t *testing.T) {
 	}
 }
 
+// The same race on the lane path: a lane that takes the gate's probe
+// while another lane's reopen check is in flight waits for that check,
+// and when the remote refuses it as a whole the lane records the refusal
+// as the probe's answer and holds its records. No produce request
+// reaches the target behind it.
+func TestRemoteLinkLaneProbeSendsNoChunkBehindARefusedCheckItWaitedOn(t *testing.T) {
+	// The runner stays stopped, so no cursor of its own takes the probe.
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{partitions: 1}})
+	ctx := context.Background()
+	s := rg.src.runner.sender()
+	e, rs, state := s.entry("b")
+	if state != "" {
+		t.Fatalf("lookup state %q", state)
+	}
+	version := rg.src.store.TopicVersion("orders-to-b")
+	stub, err := rg.src.store.GetTopic(ctx, "orders-to-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := fanoutCursorKey{parent: "orders", partition: 0, child: "orders-to-b", epoch: stub.AttachEpoch, remote: true}
+	cur := newRemoteCursor(key)
+	cur.forceTargetCheck()
+	if ok, _, _ := s.checkTarget(ctx, ctx, cur, e, rs, stub); !ok {
+		t.Fatal("the first check stopped sending")
+	}
+
+	// The gate closes, and a lane that passed it just before runs the
+	// check its new epoch owes; the target throttles it, slowly.
+	defer rg.target.faults.set("")
+	rg.target.faults.slowDelay = 3 * time.Second
+	rg.target.faults.retryAfter = "5"
+	rg.target.faults.set("throttled")
+	rs.gate.Failed(sink.Verdict{Action: sink.ActRetry, State: topic.RemoteStateUnavailable}, true)
+	listings, posted := rg.target.faults.listings.Load(), rg.target.faults.posted.Load()
+	inflight := make(chan struct{})
+	go func() {
+		defer close(inflight)
+		s.checkTarget(ctx, ctx, cur, e, rs, stub)
+	}()
+	rigWait(t, "the lane's check to reach the target", 10*time.Second, func() bool {
+		return rg.target.faults.listings.Load() > listings
+	})
+
+	// The gate's backoff runs out while that check is in flight, and a
+	// lane with a record to send takes the probe.
+	rigWait(t, "the gate's probe to fall due", 5*time.Second, func() bool {
+		return !rs.gate.WouldWait()
+	})
+	sendCtx, cancelSend := context.WithCancel(ctx)
+	defer cancelSend()
+	laneCtx, stopLane := context.WithCancel(sendCtx)
+	defer stopLane()
+	sh := &slabShip{s: s, cur: cur, key: key, cancel: cancelSend, stopWaits: stopLane, sendCtx: sendCtx, link: stub, linkVersion: version}
+	recs := []topic.KeyedRecord{{Offset: 0, Payload: []byte(`{"seq":0}`), CommittedAtUnixMs: time.Now().UnixMilli()}}
+	lane := &laneShip{recs: recs, done: -1, cap: cur.chunkCap(0), backoff: sink.LaneBackoff(), b64: map[int64]bool{}}
+	sh.lanes = []*laneShip{lane}
+	laneDone := make(chan struct{})
+	go func() {
+		defer close(laneDone)
+		sh.runLane(laneCtx, lane)
+	}()
+	rigWait(t, "the lane to take the probe", 5*time.Second, func() bool {
+		_, mine := rs.gate.WouldWaitFor(sh)
+		return mine
+	})
+	<-inflight
+
+	// The throttle the probe waited on is its answer: the gate holds for
+	// the target's Retry-After, and the lane sends nothing behind it.
+	rigWait(t, "the probe's answer", 15*time.Second, func() bool {
+		return rs.gate.Backoff() >= 5*time.Second || rg.target.faults.posted.Load() > posted
+	})
+	stopLane()
+	<-laneDone
+	if n := rg.target.faults.posted.Load() - posted; n != 0 {
+		t.Fatalf("%d produce requests reached the target behind the refused check the probe waited on", n)
+	}
+	if n := rg.target.faults.listings.Load() - listings; n != 1 {
+		t.Fatalf("%d listings reached the target, want 1: the probe did not wait on the check in flight", n)
+	}
+	if len(lane.recs) != 1 {
+		t.Fatalf("the lane holds %d records, want its 1", len(lane.recs))
+	}
+}
+
 // A quiet cursor's probe that finds a lane's reopen check in flight
 // waits for it, and when the remote refuses it as a whole the probe
 // records that refusal as its own answer: the gate stays closed for the
