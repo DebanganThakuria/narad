@@ -324,8 +324,15 @@ func TestRemoteChildOffloadAcrossClusters(t *testing.T) {
 		t.Fatalf("unforced delete: %d %s, want 409 with the unshipped counts", status, body)
 	}
 	ca.apiWant(2, http.MethodDelete, "/v1/topics/orders/children/orders-to-b?force=true", nil, 60*time.Second, http.StatusNoContent)
-	if _, ok := listRemoteChild(t, ca, 0); ok {
-		t.Fatal("the remote child is still listed after the forced delete")
+	// Reads are local: node 0 lists from its own replica, which applies the
+	// delete a moment after the leader answered it through node 2.
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		if _, ok := listRemoteChild(t, ca, 0); !ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the remote child is still listed 30 s after the forced delete")
+		}
 	}
 	ca.apiWant(0, http.MethodGet, "/v1/topics/orders-to-b", nil, 30*time.Second, http.StatusNotFound)
 	front.down.Store(false)
