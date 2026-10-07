@@ -6,6 +6,7 @@ package metastore_test
 // Manager over real Raft stores whose members report this release.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/broker/topics"
 	"github.com/debanganthakuria/narad/internal/consumer"
+	domremote "github.com/debanganthakuria/narad/internal/domain/remote"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -267,6 +269,50 @@ func TestCreateAsChildIsNeverColocatedBySweep(t *testing.T) {
 	}
 }
 
+// remoteWrites makes one write of each remote entry type. Until every
+// member applies them (usable false) each is refused with
+// ErrEntryTypeNotYetUsable and proposes nothing: there is no older entry
+// to fall back to.
+func remoteWrites(t *testing.T, s *metastore.Store, suffix string, usable bool) {
+	t.Helper()
+	ctx := context.Background()
+	check := func(what string, err error) {
+		t.Helper()
+		switch {
+		case usable && err != nil:
+			t.Fatalf("%s: %v", what, err)
+		case !usable && !errors.Is(err, metastore.ErrEntryTypeNotYetUsable):
+			t.Fatalf("%s while a member holds the remote entry types back = %v, want ErrEntryTypeNotYetUsable", what, err)
+		}
+	}
+	name, parent, stub := "b"+strings.ReplaceAll(suffix, "-", ""), "src"+suffix, "src-to-b"+suffix
+	if err := s.CreateTopic(ctx, topic.Topic{Name: parent, ID: "id-" + parent, Partitions: 1, RetentionMs: topic.MinRemoteSourceRetentionMs}); err != nil {
+		t.Fatal(err)
+	}
+	check("put remote", s.PutRemote(ctx, metastore.PutRemoteOp{Record: domremote.Record{
+		Name: name, ID: "id-" + name, URL: "https://" + name + ".example", Username: "repl",
+		Credential: domremote.Envelope{V: domremote.EnvelopeVersion, KV: "0123456789abcdef", CT: bytes.Repeat([]byte{1}, 40)},
+	}, Salt: bytes.Repeat([]byte{7}, 32), SealedAtMs: 1}))
+	inFlight := 4
+	check("update remote", s.UpdateRemote(ctx, metastore.UpdateRemoteOp{Name: name, Fields: metastore.RemoteFields{Limits: &domremote.LimitsPatch{MaxInFlight: &inFlight}}, ReadRevision: 1}))
+	check("attach remote child", s.AttachRemoteChild(ctx, metastore.AttachRemoteChildOp{
+		Parent: parent, ParentID: "id-" + parent, Stub: stub, Remote: topic.RemoteLink{Name: name, Topic: "orders"},
+	}))
+	var epoch string
+	if got, err := s.GetTopic(ctx, stub); err == nil {
+		epoch = got.AttachEpoch
+	}
+	check("pause remote child", s.SetRemoteChildState(ctx, metastore.RemoteChildStateOp{
+		Parent: parent, Stub: stub, Epoch: epoch, Pause: &metastore.RemotePauseState{Paused: true},
+	}))
+	if usable {
+		if err := s.DeleteTopic(ctx, stub); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check("delete remote", s.DeleteRemote(ctx, metastore.DeleteRemoteOp{Name: name}))
+}
+
 // The leader proposes the new entry types only once every member
 // reports a release that applies them: until then every topic write and
 // placement goes through the entries every release applies, and the
@@ -317,6 +363,7 @@ func TestNewEntryTypesWaitForEveryMember(t *testing.T) {
 		if err := s.DeleteUser(ctx, "bob"+suffix); err != nil {
 			t.Fatal(err)
 		}
+		remoteWrites(t, s, suffix, suffix != "")
 	}
 
 	writes("")

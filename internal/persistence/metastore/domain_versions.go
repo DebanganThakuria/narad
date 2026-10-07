@@ -43,6 +43,7 @@ type metadataDomainVersions struct {
 	schemas        keyedVersions
 	routingMembers atomic.Uint64
 	users          atomic.Uint64
+	remotes        atomic.Uint64
 }
 
 // maxRetiredKeys is how many deleted names a domain keeps as tombstones
@@ -182,6 +183,15 @@ func (v *metadataDomainVersions) bumpUsers() {
 	v.mu.Unlock()
 }
 
+// bumpRemotes advances the whole remotes domain. The credential cache
+// rebuilds only when it moves, so every successful remote write bumps
+// it and nothing else does.
+func (v *metadataDomainVersions) bumpRemotes() {
+	v.mu.Lock()
+	v.remotes.Store(v.next.Add(1))
+	v.mu.Unlock()
+}
+
 // bumpAll advances every domain at once and drops the per-key tables;
 // used after a snapshot restore, when any cached read may be stale.
 func (v *metadataDomainVersions) bumpAll() {
@@ -193,6 +203,7 @@ func (v *metadataDomainVersions) bumpAll() {
 	v.schemas.reset(version)
 	v.routingMembers.Store(version)
 	v.users.Store(version)
+	v.remotes.Store(version)
 }
 
 func (v *metadataDomainVersions) topicVersion(name string) uint64 {
@@ -213,6 +224,10 @@ func (v *metadataDomainVersions) routingMembersVersion() uint64 {
 
 func (v *metadataDomainVersions) usersVersion() uint64 {
 	return v.users.Load()
+}
+
+func (v *metadataDomainVersions) remotesVersion() uint64 {
+	return v.remotes.Load()
 }
 
 // latest returns the newest version handed out to any domain. Every

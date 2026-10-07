@@ -33,6 +33,11 @@ var entryTypeNames = map[opCode]string{
 	opPruneAssignment:         "orphan assignment prune",
 	opMarkMemberDeadIf:        "dead mark from an observed heartbeat",
 	opDeleteUserReleaseTopics: "user delete that releases its topics",
+	opAttachRemoteChild:       "remote child attach",
+	opSetRemoteChildState:     "remote child state change",
+	opPutRemote:               "remote create",
+	opUpdateRemote:            "remote change",
+	opDeleteRemote:            "remote delete",
 }
 
 // heldBackLogInterval spaces the info lines that say why an entry type

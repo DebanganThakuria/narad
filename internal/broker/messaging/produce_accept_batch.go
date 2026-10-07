@@ -37,6 +37,10 @@ func (e *Engine) AcceptProduceBatch(ctx context.Context, topicName string, msgs 
 	if err != nil {
 		return nil, err
 	}
+	if err := remoteChildGuard(t); err != nil {
+		e.recordRemoteChildRejection(topicName)
+		return nil, err
+	}
 	// A delayed child only receives records through fan-out, as for a
 	// single produce.
 	if t.IsChild() && t.FanoutDelayMs > 0 {

@@ -70,18 +70,9 @@ func (f *fsmState) applyUpdateTopicIf(data []byte) error {
 		next.AttachEpoch = current.AttachEpoch
 		next.FanoutDelayMs = current.FanoutDelayMs
 		next.AttachOffsets = current.AttachOffsets
-		// A parent's retained log is the delay buffer for its delay
-		// children (see applyUpdateTopic).
-		if next.IsParent() {
-			for _, childName := range next.Children {
-				child, err := getTopicRecord(tx, childName)
-				if err != nil {
-					continue
-				}
-				if err := checkDelayAgainstRetention(child.FanoutDelayMs, next.RetentionMs, next.Name); err != nil {
-					return err
-				}
-			}
+		next.Remote = current.Remote
+		if err := checkConfigUpdate(tx, current, next); err != nil {
+			return err
 		}
 		return putTopicRecord(tx, next)
 	})
@@ -98,7 +89,7 @@ func (f *fsmState) applyDeleteTopicIf(data []byte) error {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return err
 	}
-	var linkedTopics []string
+	var linkedTopics, deletedStubs []string
 	err := f.update(func(tx *bolt.Tx) error {
 		current, err := getTopicRecord(tx, p.Name)
 		if err != nil {
@@ -107,11 +98,11 @@ func (f *fsmState) applyDeleteTopicIf(data []byte) error {
 		if err := expectIncarnation(current, p.ExpectID); err != nil {
 			return err
 		}
-		linkedTopics, err = deleteTopicTx(tx, p.Name)
+		linkedTopics, deletedStubs, err = deleteTopicTx(tx, p.Name)
 		return err
 	})
 	if err == nil {
-		f.retireDeletedTopic(p.Name, linkedTopics)
+		f.retireDeletedTopic(p.Name, linkedTopics, deletedStubs)
 	}
 	return err
 }
@@ -141,8 +132,13 @@ func (f *fsmState) applyPutSchemaIf(data []byte) error {
 		if err := checkNextSchemaVersion(tx, p.Topic, p.Version); err != nil {
 			return err
 		}
+		// A remote child's stub holds no schema (see applyPutSchema).
+		children, err := localChildren(tx, t.Children)
+		if err != nil {
+			return err
+		}
 		added := map[string]int64{p.Topic: int64(len(p.Schema))}
-		for _, child := range t.Children {
+		for _, child := range children {
 			if err := checkNextSchemaVersion(tx, child, p.Version); err != nil {
 				return err
 			}
@@ -155,12 +151,12 @@ func (f *fsmState) applyPutSchemaIf(data []byte) error {
 		if err := b.Put(schemaKey(p.Topic, p.Version), p.Schema); err != nil {
 			return err
 		}
-		for _, child := range t.Children {
+		for _, child := range children {
 			if err := b.Put(schemaKey(child, p.Version), p.Schema); err != nil {
 				return err
 			}
 		}
-		childTopics = t.Children
+		childTopics = children
 		return nil
 	})
 	if err == nil {
@@ -206,6 +202,7 @@ func (f *fsmState) applyDetachChildIf(data []byte) error {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return err
 	}
+	stubDeleted := false
 	err := f.update(func(tx *bolt.Tx) error {
 		if err := expectIncarnations(tx, p.Parent, p.ParentID, p.Child, p.ChildID); err != nil {
 			return err
@@ -218,11 +215,11 @@ func (f *fsmState) applyDetachChildIf(data []byte) error {
 		if err != nil {
 			return err
 		}
-		return detachChildTx(tx, p.Parent, p.Child, parent, child)
+		stubDeleted, err = detachChildTx(tx, p.Parent, p.Child, parent, child)
+		return err
 	})
 	if err == nil {
-		f.versions.bumpTopic(p.Parent)
-		f.versions.bumpTopic(p.Child)
+		f.bumpDetached(p.Parent, p.Child, stubDeleted)
 	}
 	return err
 }

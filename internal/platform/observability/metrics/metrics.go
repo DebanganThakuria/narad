@@ -127,6 +127,10 @@ type Metrics struct {
 	// RecordMemberHeartbeat.
 	MemberHeartbeatFailures    prometheus.Gauge
 	MemberHeartbeatLastSuccess prometheus.Gauge
+	// Remote replication: the remotes registry and outbound plane
+	// (remote.go), and remote children (remote_link.go).
+	Remote     *RemoteMetrics
+	RemoteLink *RemoteLinkMetrics
 
 	// httpSeries caches resolved HTTP children per {route, method,
 	// status} so the middleware does one map lookup per request. The
@@ -556,6 +560,10 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.PollerLastSuccess,
 		m.MemberHeartbeatFailures, m.MemberHeartbeatLastSuccess,
 	)
+	m.Remote = newRemoteMetrics()
+	reg.MustRegister(m.Remote.collectors()...)
+	m.RemoteLink = newRemoteLinkMetrics()
+	reg.MustRegister(m.RemoteLink.collectors()...)
 
 	return m
 }

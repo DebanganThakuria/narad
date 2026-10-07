@@ -163,12 +163,15 @@ func attachChildTx(tx *bolt.Tx, p childLinkPayload, rules attachRules) (adopted 
 
 // applyDetachChild unlinks child from parent. The child keeps whatever
 // records and schema it already has and becomes standalone; a parent
-// whose last child detaches reverts to standalone.
+// whose last child detaches reverts to standalone. A remote child's
+// stub is deleted instead: standalone it would be a topic with no
+// partitions and no purpose, and its cursor files go with the link.
 func (f *fsmState) applyDetachChild(data []byte) error {
 	var p childLinkPayload
 	if err := json.Unmarshal(data, &p); err != nil {
 		return err
 	}
+	stubDeleted := false
 	err := f.update(func(tx *bolt.Tx) error {
 		parent, err := getTopicRecord(tx, p.Parent)
 		if err != nil {
@@ -178,35 +181,46 @@ func (f *fsmState) applyDetachChild(data []byte) error {
 		if err != nil {
 			return err
 		}
-		return detachChildTx(tx, p.Parent, p.Child, parent, child)
+		stubDeleted, err = detachChildTx(tx, p.Parent, p.Child, parent, child)
+		return err
 	})
 	if err == nil {
-		f.versions.bumpTopic(p.Parent)
-		f.versions.bumpTopic(p.Child)
+		f.bumpDetached(p.Parent, p.Child, stubDeleted)
 	}
 	return err
 }
 
-// detachChildTx unlinks childName from parentName, whose records
-// parent and child were read inside tx.
-func detachChildTx(tx *bolt.Tx, parentName, childName string, parent, child topic.Topic) error {
-	if !child.IsChild() || child.Parent != parentName {
-		return fmt.Errorf("%w: %q is not attached to %q", ErrNotFound, childName, parentName)
+// bumpDetached advances the versions a detach changed: a remote child's
+// stub went with its link and is retired.
+func (f *fsmState) bumpDetached(parent, child string, stubDeleted bool) {
+	f.versions.bumpTopic(parent)
+	if stubDeleted {
+		f.versions.retireTopic(child)
+	} else {
+		f.versions.bumpTopic(child)
 	}
-	parent.Children = slices.DeleteFunc(parent.Children, func(c string) bool { return c == childName })
-	if len(parent.Children) == 0 {
-		parent.Children = nil
-		parent.Role = topic.RoleStandalone
+}
+
+// detachChildTx unlinks childName from parentName, whose records
+// parent and child were read inside tx, and reports whether the child
+// was a remote child's stub, which is deleted with its link.
+func detachChildTx(tx *bolt.Tx, parentName, childName string, parent, child topic.Topic) (stubDeleted bool, err error) {
+	if !child.IsChild() || child.Parent != parentName {
+		return false, fmt.Errorf("%w: %q is not attached to %q", ErrNotFound, childName, parentName)
+	}
+	unlinkChild(&parent, childName)
+	if err := putTopicRecord(tx, parent); err != nil {
+		return false, err
+	}
+	if child.IsRemoteChild() {
+		return true, deleteTopicRecords(tx, childName)
 	}
 	child.Role = topic.RoleStandalone
 	child.Parent = ""
 	child.AttachEpoch = ""
 	child.FanoutDelayMs = 0
 	child.AttachOffsets = nil
-	if err := putTopicRecord(tx, parent); err != nil {
-		return err
-	}
-	return putTopicRecord(tx, child)
+	return false, putTopicRecord(tx, child)
 }
 
 // reconcileSchemasForAttach enforces the attach-time schema gate: the

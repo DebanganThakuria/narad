@@ -9,4 +9,5 @@ type Config struct {
 	Fanout   FanoutConfig   `json:"fanout"`
 	Log      LogConfig      `json:"log"`
 	Security SecurityConfig `json:"security"`
+	Remotes  RemotesConfig  `json:"remotes"`
 }

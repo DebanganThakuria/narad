@@ -28,6 +28,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/platform/partition"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
+	"github.com/debanganthakuria/narad/internal/remote"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
@@ -177,7 +178,11 @@ func runServe(args []string) error {
 			"member_addr", memberAddr, "node", nodeID)
 	}
 	member := localMember(nodeID, memberAddr, clusterAdvertiseAddr(cfg, nodeID))
-	cs := buildClusterStack(cfg, nodeID, ms, bc, reg, log)
+	remotes, err := buildRemotes(cfg, ms, nodeID, m, log)
+	if err != nil {
+		return err
+	}
+	cs := buildClusterStack(cfg, nodeID, ms, bc, remotes, reg, log)
 	// Registered before the goroutine drain below, so it runs after every
 	// peer-RPC user has stopped (defers are LIFO).
 	defer closeWithLog(log, "peer rpc client", cs.peerRPC.Close)
@@ -232,6 +237,7 @@ func runServe(args []string) error {
 	wg.Go(func() { bc.offsets.RunPurger(ctx, time.Second) })
 	wg.Go(func() { cs.dispatcher.Run(ctx) })
 	wg.Go(func() { cs.fanout.Run(ctx) })
+	wg.Go(func() { remotes.cache.Run(ctx) })
 	wg.Go(func() { cs.mover.Run(ctx) })
 	startDiagnosticsServers(ctx, &wg, cfg.HTTP, reg, healthHandler(ctx, bc.broker, bc.logs, ms, log), failServe, log)
 	wg.Go(func() { serveClusterRPC(ctx, cfg, cs.rpcServer, failServe, log) })
@@ -310,6 +316,7 @@ func runServe(args []string) error {
 	srv := buildAPIServer(ctx, cfg, bc.broker, bc.logs, ms, cs.router, m, reg, auth, log, func(d *handlers.Deps) {
 		d.Drain = cs.drain
 		d.NodeStatus = cs.memberStatus
+		d.Remote = handlers.RemoteDeps{Writer: cs.remotePlane, Service: cs.remoteService}
 	})
 	defer bc.lifecycle.MarkNotReady()
 
@@ -355,13 +362,20 @@ type clusterStack struct {
 	// per-member status.
 	drain        *handlers.DrainGate
 	memberStatus func(context.Context, metastore.Member) (nodewire.NodeStatus, error)
+
+	// Remote replication: the plane every remote write and check goes
+	// through, the ingress-side service behind /v1/remotes, and the
+	// credential cache the fan-out runner sends with.
+	remotePlane   *cluster.RemotePlane
+	remoteService *remote.Service
+	remoteLookup  remote.Lookup
 }
 
 // The router answers the HTTP ingress's catch-up before a 404 for a
 // topic this node's replica does not have.
 var _ handlers.LeaderSyncer = (*cluster.Router)(nil)
 
-func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, bc *brokerComponents, reg prometheus.Registerer, log *slog.Logger) *clusterStack {
+func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, bc *brokerComponents, remotes *remotesStack, reg prometheus.Registerer, log *slog.Logger) *clusterStack {
 	// One peer client for the whole process: the router, dispatcher,
 	// fan-out runner, mover, heartbeater, join loop and controller all
 	// forward through it, so each peer gets one QUIC connection and one
@@ -412,21 +426,46 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 	local := localNodeStatus(nodeID, drain, bc.ingress.DispatchBacklog, bc.logs.LastQuarantinedCopies, mover.MoveStates)
 	rpcServer.SetNodeStatus(local)
 
+	fanout := cluster.NewFanoutRunner(ms, nodeID, cfg.Storage.DataDir, bc.broker, peerRPC,
+		partition.NewHashRoundRobin(), bc.metrics, log, cluster.FanoutConfig{
+			MaxBatchRecords: cfg.Fanout.MaxBatchRecords,
+			MaxBatchBytes:   cfg.Fanout.MaxBatchBytes,
+			Linger:          time.Duration(cfg.Fanout.LingerMs) * time.Millisecond,
+		})
+
+	// Remote replication. The runner sends remote children through the
+	// credential cache; every remote write and check goes through the
+	// plane, which the RPC server serves for the other members.
+	lookup, remoteService := remotes.cache, remotes.service
+	fanout.SetRemotes(lookup, cfg.Remotes.MaxHeldBytes)
+	router.SetFanoutRunner(fanout)
+	rpcServer.SetFanoutRunner(fanout)
+	plane := cluster.NewRemotePlane(ms, router, peerRPC, nodeID, log)
+	registry := cluster.NewRemoteRegistry(cluster.RemoteRegistryDeps{
+		Store: ms, Service: remoteService, Plane: plane, Metrics: bc.metrics, Log: log, SelfID: nodeID,
+	})
+	plane.Registry = registry
+	plane.Checks = registry
+	remoteService.SetCluster(registry)
+	plane.Links = cluster.NewRemoteLinks(cluster.RemoteLinksDeps{
+		Store: ms, Runner: fanout, Plane: plane, Ingress: bc.ingress, Broker: bc.broker,
+		Metrics: bc.metrics, Log: log, SelfID: nodeID,
+	})
+	rpcServer.SetRemotePlane(plane)
+
 	return &clusterStack{
-		controller: ctrl,
-		router:     router,
-		peerRPC:    peerRPC,
-		rpcServer:  rpcServer,
-		dispatcher: cluster.NewProduceDispatcher(bc.ingress, ms, nodeID, bc.broker, peerRPC, log, cluster.ProduceDispatcherConfig{}),
-		fanout: cluster.NewFanoutRunner(ms, nodeID, cfg.Storage.DataDir, bc.broker, peerRPC,
-			partition.NewHashRoundRobin(), bc.metrics, log, cluster.FanoutConfig{
-				MaxBatchRecords: cfg.Fanout.MaxBatchRecords,
-				MaxBatchBytes:   cfg.Fanout.MaxBatchBytes,
-				Linger:          time.Duration(cfg.Fanout.LingerMs) * time.Millisecond,
-			}),
-		mover:        mover,
-		drain:        drain,
-		memberStatus: memberNodeStatus(nodeID, local, peerRPC),
+		controller:    ctrl,
+		router:        router,
+		peerRPC:       peerRPC,
+		rpcServer:     rpcServer,
+		dispatcher:    cluster.NewProduceDispatcher(bc.ingress, ms, nodeID, bc.broker, peerRPC, log, cluster.ProduceDispatcherConfig{}),
+		fanout:        fanout,
+		mover:         mover,
+		drain:         drain,
+		memberStatus:  memberNodeStatus(nodeID, local, peerRPC),
+		remotePlane:   plane,
+		remoteService: remoteService,
+		remoteLookup:  lookup,
 	}
 }
 

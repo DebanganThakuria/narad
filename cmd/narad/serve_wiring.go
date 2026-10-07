@@ -24,6 +24,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/transport/httpserver"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/health"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/messaging"
 )
 
 // buildMetrics builds the process registry: the Go and process
@@ -218,13 +219,14 @@ func healthHandler(ctx context.Context, br broker.Broker, logs *runtime.Logs, ms
 // the cluster stack's drain flag and member status this way).
 func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, logs *runtime.Logs, ms *metastore.Store, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, auth *security.Authenticator, log *slog.Logger, extra ...func(*handlers.Deps)) *httpserver.Server {
 	deps := handlers.Deps{
-		Broker:         br,
-		Logs:           logs,
-		Metastore:      ms,
-		Logger:         log,
-		MaxConsumeWait: cfg.HTTP.MaxConsumeWait.D(),
-		ShutdownCtx:    ctx,
-		Router:         router,
+		Broker:          br,
+		Logs:            logs,
+		Metastore:       ms,
+		Logger:          log,
+		MaxConsumeWait:  cfg.HTTP.MaxConsumeWait.D(),
+		ShutdownCtx:     ctx,
+		Router:          router,
+		BatchBodyBudget: cfg.HTTP.MaxBatchBodyBytesInFlight,
 	}
 	if auth != nil {
 		// Password hashing for user writes shares the authenticator's
@@ -234,6 +236,9 @@ func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, l
 	}
 	for _, fn := range extra {
 		fn(&deps)
+	}
+	if m != nil {
+		messaging.InstrumentBatchBodyBudget(m.RemoteLink.BatchBodyBudgetRejectionsTotal)
 	}
 	handlerSet := handlers.New(deps)
 	opts := apiRouterOptions(cfg.HTTP)

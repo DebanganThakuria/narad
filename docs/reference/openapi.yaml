@@ -124,16 +124,21 @@ info:
     | Limit | Value | Over it |
     |---|---|---|
     | Request body | 1 MiB (1,048,576 bytes) | [`413`](status-codes.md#status-413); `400` on the user and attach-child routes |
+    | Batch produce body (unreleased) | 16 MiB, each message's payload at most 1 MiB | [`413`](status-codes.md#status-413) |
     | Batch ack body (v3.1.0) | 64 KiB | [`413`](status-codes.md#status-413) |
+    | Remotes request body (unreleased) | 128 KiB | [`413`](status-codes.md#status-413) |
     | Request headers | 64 KiB by default | [`431`](status-codes.md#status-431) |
-    | Messages per batch produce, records per batch consume, handles per batch ack (v3.1.0) | 100 | [`400`](status-codes.md#status-400) |
+    | Messages per batch produce | 1,000 (unreleased; 100 in v3.1.0) | [`400`](status-codes.md#status-400) |
+    | Records per batch consume, handles per batch ack (v3.1.0) | 100 | [`400`](status-codes.md#status-400) |
     | Consume `wait` | 10 s by default | clamped, with an `X-Narad-Wait-Clamped` response header |
     | Concurrent consumes per user (or per client IP with security off), per node | 1024 by default | [`429`](status-codes.md#status-429) |
     | Concurrent produces per user, per node (v3.1.0) | off by default | [`429`](status-codes.md#status-429) |
+    | Batch produce bodies over 1 MiB being read at once, per node (unreleased) | 256 MiB by default | [`503`](status-codes.md#status-503) with `Retry-After: 1` |
 
     The limits marked "by default" are settings: `http.max_header_bytes`,
-    `http.max_consume_wait`, `http.max_consume_in_flight_per_identity` and
-    `http.max_produce_in_flight_per_identity` (from v3.1.0), in that order,
+    `http.max_consume_wait`, `http.max_consume_in_flight_per_identity`,
+    `http.max_produce_in_flight_per_identity` (from v3.1.0) and
+    `http.max_batch_body_bytes_in_flight` (unreleased), in that order,
     all in the [Configuration reference](configuration.md#http).
 
     ### Errors
@@ -200,6 +205,12 @@ tags:
       Link a topic to a parent so that it receives a copy of every message
       produced to the parent from the moment of the link. Task guide:
       [Fan out and delay messages](../build/fanout-and-delay.md).
+
+      **Unreleased:** a child can also be a
+      [remote child](glossary.md#remote-child), whose copy goes to a topic
+      on another Narad cluster. Its attach, pause, resume and skip need the
+      `admin` grant with security on. Task guide:
+      [Replicate a topic to another cluster](../build/remote-children.md).
   - name: Messages
     description: |
       Produce, consume and settle messages. Task guides:
@@ -216,6 +227,19 @@ tags:
       See cluster members and partition moves, and drain a node before
       removing it. Every route needs the `admin` grant, reads included.
       Task guide: [Scale out and in](../operate/scaling.md).
+  - name: Remotes
+    description: |
+      **Unreleased.** Register the other Narad clusters this one may send
+      [remote children](glossary.md#remote-child) to. Every route needs the
+      `admin` grant and a node with security on; with security off each
+      one answers [`403`](status-codes.md#status-403) (`remotes require
+      security`). Answers carry `Cache-Control: no-store`, never contain a
+      password, and every request writes one `component=audit` line on the
+      node that took it. A write also needs every member to run this
+      release ([`412`](status-codes.md#status-412) until then), and a
+      create or a password change needs the node to attest an encrypted
+      API hop (`remotes.api_hop_encrypted`). Task guide:
+      [Manage remotes](../operate/remotes.md).
   - name: Health and metrics
     description: |
       Probes and the Prometheus exposition. Where each is served, and which
@@ -344,6 +368,11 @@ paths:
         placeholders out of any total. An owner that does not answer within
         2 seconds counts as `unreachable`. A v3.0.1 node answers `421`
         instead.
+
+        **Unreleased:** a [remote child](glossary.md#remote-child)'s stub
+        has `partitions: 0` and a `remote` object that names the remote and
+        the topic there. Its `created_by` and `paused_by` are shown to
+        admins only.
       x-narad-grant: |
         Any grant that matches the topic name, ownership, or `admin`.
       parameters:
@@ -420,7 +449,7 @@ paths:
         '404':
           description: The topic does not exist, also after the answering node caught up with the leader.
         '409':
-          description: '`schema_base_version` is not the current version, the history holds 1000 versions or (from v3.1.0) the new version would take it past 4 MiB or the cluster''s schemas past 256 MiB, the topic is a child whose schema its parent manages, the new retention is too short for a delay child, or (from v3.1.0) the topic was deleted and recreated, or grew, under the request twice in a row (`topic changed since it was read`).'
+          description: '`schema_base_version` is not the current version, the history holds 1000 versions or (from v3.1.0) the new version would take it past 4 MiB or the cluster''s schemas past 256 MiB, the topic is a child whose schema its parent manages, the new retention is too short for a delay child, or (from v3.1.0) the topic was deleted and recreated, or grew, under the request twice in a row (`topic changed since it was read`). Unreleased: the topic is a remote child''s stub, which takes no change, or the new retention is below 24 hours on a parent with remote children (a retention already below it may still grow).'
         '413':
           description: The body is over 1 MiB.
         '415':
@@ -449,21 +478,53 @@ paths:
         delete is committed the answer is `204`, even if a node that is
         down could not remove its files yet; that node removes them when
         it next starts.
+
+        **Unreleased:** deleting a parent that has
+        [remote children](glossary.md#remote-child) deletes their stubs in
+        the same entry, and deleting a remote child's stub deletes the link.
+        Either is refused with `409` while any record of the parent is not
+        yet on the remote, unless `force=true` abandons them; the leader
+        checks every member's ingress backlog and every cursor first. The
+        same refusal, with its body, is in
+        [Detach a child](#detach-child).
       x-narad-grant: |
-        Ownership of the topic, or `admin`.
+        Ownership of the topic, or `admin`. Unreleased: a remote child's
+        stub has no owner; the owner of its parent, or an `admin`, deletes
+        it, with security on.
+      parameters:
+        - name: force
+          in: query
+          x-narad-since: unreleased
+          description: |
+            `true` deletes a parent with remote children, or a remote
+            child's stub, even while records are unshipped, abandoning
+            them. Ignored for any other topic. `narad topic rm --force`
+            never sends it: there `--force` only skips the prompt.
+          schema:
+            type: boolean
+            default: false
       responses:
         '204':
           description: Deleted.
+        '400':
+          description: Unreleased. `force` is not `true` or `false`.
         '401':
           description: Missing or wrong credentials.
         '403':
-          description: Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic.
+          description: Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic. For a remote child's stub (unreleased), the caller is neither an `admin` nor the parent's owner, or security is off. For a parent with remote children (unreleased), security is off (`remotes require security`).
         '404':
           description: The topic does not exist, also after the answering node caught up with the leader.
         '409':
-          description: New in v3.1.0. The topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was deleted. Read the topic again before deleting it.
+          description: New in v3.1.0. The topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was deleted. Read the topic again before deleting it. Unreleased, for a parent with remote children or a stub without `force`, records of the parent are not yet on the remote (the body carries `lag_messages`, `lag_complete` and `dispatch_backlog`), or the leader found a remote child the answering node did not know of yet; retry.
+        '412':
+          description: Unreleased. The cluster leader runs a release without remote children; finish the upgrade.
+        '429':
+          description: Unreleased. The leader ran an unshipped check for this parent less than 10 seconds ago; retry after `Retry-After`.
+          x-narad-origin: forwarding
+        '501':
+          description: Unreleased. The answering node has no remote plane, so it cannot delete a remote-linked topic.
         '503':
-          description: The cluster has no leader to write the delete, or the answering node could not reach the leader to confirm a topic it does not have.
+          description: The cluster has no leader to write the delete, or the answering node could not reach the leader to confirm a topic it does not have. Unreleased, for a remote-linked topic, also when the unshipped check could not run.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X DELETE "$NARAD/v1/topics/orders-audit"
@@ -524,8 +585,28 @@ paths:
         The delay field here is `delay_ms`. Creating a child in one call
         with [create a topic](#create-topic) takes `fanout_delay_ms`
         instead.
+
+        **Unreleased:** with `remote`, the request creates `child` as a
+        [remote child](glossary.md#remote-child) instead: a stub with no
+        partitions whose copies go, through the remote's batch produce, to
+        `remote_topic` on that cluster. The child must not exist yet. The
+        leader runs the attach checks from every member against the target
+        (it answers `401` without credentials, the topic exists, is no
+        delay child or stub and has no remote children, the schemas match,
+        it takes batch produce, the credential is not an admin there),
+        resolves the start offsets, and writes one Raft entry. With
+        `dry_run` it stops before the entry and answers what it found.
+        Without `remotes.allowed_hosts` on the leader (unreleased), a dry
+        run checks from the leader alone, its reports carry only `node`,
+        `result` and `class`, and a failed attach or resume answers the
+        `class` and the failing `members` instead of each member's report.
+        The
+        fields `remote_topic`, `from`, `lanes` and `dry_run` without
+        `remote` get `400`. Task guide:
+        [Replicate a topic to another cluster](../build/remote-children.md).
       x-narad-grant: |
-        Ownership of both topics, or `admin`.
+        Ownership of both topics, or `admin`. Unreleased: with `remote`,
+        `admin` and a node with security on; ownership is not enough.
       requestBody:
         required: true
         content:
@@ -534,27 +615,44 @@ paths:
               $ref: '#/components/schemas/AttachChildRequest'
       responses:
         '200':
-          description: Attached. The body is the parent topic.
+          description: 'Attached. The body is the parent topic. Unreleased, for a remote `dry_run`: every check passed and nothing was written, and the body is a report instead, with `dry_run`, `attach_offsets` (the start offset per parent partition), `checks` (each member''s report), `warnings` and, when the leader could probe the target, `capabilities` (`max_messages` per batch and `zstd`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Topic'
+        '201':
+          description: Unreleased. The remote child was created. The body is its stub, plus `warnings` when there are any (a parent retention below 72 hours, a target that serves no topic IDs, a certificate that expires within 14 days).
+          x-narad-origin: forwarding
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Topic'
         '400':
-          description: '`child` is missing, the two names are the same, or `delay_ms` is out of range.'
+          description: '`child` is missing, the two names are the same, or `delay_ms` is out of range. Unreleased: a remote field without `remote`, a name that is not a remote''s or a topic''s, `lanes` outside 1 to 8, `from` other than `attach`, `unconsumed` or `earliest`, or a remote that does not exist.'
         '401':
           description: Missing or wrong credentials.
         '403':
-          description: The caller does not manage both topics, as the node that answers or the cluster leader sees them.
+          description: The caller does not manage both topics, as the node that answers or the cluster leader sees them. Unreleased, with `remote`, the caller is not an `admin`, or security is off (`remotes require security`).
         '404':
           description: The parent or the child does not exist, also after the answering node caught up with the leader.
         '409':
-          description: The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, the delay is longer than the parent's retention can hold, or (from v3.1.0) the copy of the parent's schema history the child adopts would pass the cluster's schema byte budget, or either topic was recreated under the request twice in a row (`topic changed since it was read`).
+          description: 'The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, the delay is longer than the parent''s retention can hold, or (from v3.1.0) the copy of the parent''s schema history the child adopts would pass the cluster''s schema byte budget, or either topic was recreated under the request twice in a row (`topic changed since it was read`). Unreleased, with `remote`: a topic named `child` exists, the parent has 16 remote children, this cluster already links to that remote topic, the parent''s retention is below 24 hours, or a check found the target unusable (the body names the `class` and carries each member''s report in `checks`).'
+        '412':
+          description: 'Unreleased, with `remote`. A member does not apply the remote Raft entry types, did not answer, or reports a posture that forbids remotes (security off or legacy cluster auth on), and the body names it in `members`; a member holds a stale or unreadable credential; the members disagree about the target''s ID; or the leader runs an older release.'
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '429':
+          description: Unreleased, with `remote`. This node took 60 remote child writes in the last minute, or a check of this remote ran less than 5 seconds ago on a member; retry after `Retry-After`.
+        '501':
+          description: Unreleased, with `remote`. The answering node, or the leader, has no remote plane.
+        '502':
+          description: Unreleased, with `remote`. Something in front of the target answered instead of it (a load balancer or a proxy), or the target answered with a redirect, which is never followed.
+          x-narad-origin: forwarding
         '503':
-          description: No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry.
+          description: No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry. Unreleased, with `remote`, also when the target or a member was unavailable during the checks.
       x-narad-examples:
-        - request: |
+        - title: a local child
+          request: |
             curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/children" \
               -H "Content-Type: application/json" \
               -d '{"child": "orders-audit"}'
@@ -565,6 +663,36 @@ paths:
             Date: Mon, 28 Sep 2026 19:31:43 GMT
 
             {"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":172800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"parent","children":["orders-audit"]}
+        - title: a remote child, checks only (unreleased)
+          request: |
+            curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/children" \
+              -H "Content-Type: application/json" \
+              -d '{"child": "orders-to-b", "remote": "b", "remote_topic": "orders",
+                   "from": "unconsumed", "dry_run": true}'
+          response: |
+            HTTP/1.1 200 OK
+            Cache-Control: no-store
+            Content-Type: application/json
+            X-Content-Type-Options: nosniff
+            Date: Tue, 06 Oct 2026 13:06:41 GMT
+            Content-Length: 435
+
+            {"attach_offsets":[0,0,0],"capabilities":{"max_messages":1000,"zstd":true},"checks":[{"node":"narad-0","result":"pass","credential_version":1,"target_id":"128e63dd156ff568","target_serves_ids":true,"rtt_ms":0,"lane_capacity_per_s":20000,"server_cert_not_after":"2026-11-05T13:04:25Z","warnings":[],"posture":{"security_enabled":true,"legacy_cluster_auth":false,"raft_tls":true,"api_hop_encrypted":true}}],"dry_run":true,"warnings":[]}
+        - title: a remote child (unreleased)
+          request: |
+            curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/children" \
+              -H "Content-Type: application/json" \
+              -d '{"child": "orders-to-b", "remote": "b", "remote_topic": "orders",
+                   "from": "unconsumed"}'
+          response: |
+            HTTP/1.1 201 Created
+            Cache-Control: no-store
+            Content-Type: application/json
+            X-Content-Type-Options: nosniff
+            Date: Tue, 06 Oct 2026 13:06:59 GMT
+            Content-Length: 408
+
+            {"name":"orders-to-b","id":"d38a4383503cf4ac","partitions":0,"retention_ms":0,"visibility_timeout_ms":0,"max_in_flight_per_partition":0,"max_acked_ahead_per_partition":0,"created_at":1791292019,"role":"child","parent":"orders","attach_epoch":"341e6b8a37a9688a","attach_offsets":[0,0,0],"remote":{"name":"b","topic":"orders","target_id":"128e63dd156ff568","from":"unconsumed","lanes":1,"created_by":"admin"}}
     get:
       operationId: listChildren
       tags: [Fan-out children]
@@ -572,8 +700,27 @@ paths:
       description: |
         Lists the parent's children with their delay and how many messages
         each is behind.
+
+        **Unreleased:** a [remote child](glossary.md#remote-child) also
+        carries its link: the remote and the topic there, its state (the
+        worst of its partitions'), its recovery point (`lag_seconds`), the
+        retention left before drop-behind, the record a cursor is stuck on,
+        and when the target was last verified. The listing names the
+        remote, never its URL or credential, and a failure as a state,
+        never text from the target. The answer also carries `parent_id`,
+        which another cluster's remote child reads to notice a recreated
+        target. The states are listed in
+        [Remotes and remote children](remote-children.md#link-states).
       x-narad-grant: |
         Any grant that matches the parent's name, ownership, or `admin`.
+      parameters:
+        - name: partitions
+          in: query
+          x-narad-since: unreleased
+          description: '`true` adds one row per parent partition to each remote child (`partitions`).'
+          schema:
+            type: boolean
+            default: false
       responses:
         '200':
           description: The children.
@@ -581,6 +728,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ChildList'
+        '400':
+          description: Unreleased. `partitions` is not `true` or `false`.
         '401':
           description: Missing or wrong credentials.
         '403':
@@ -588,7 +737,8 @@ paths:
         '404':
           description: The parent does not exist.
       x-narad-examples:
-        - request: |
+        - title: local children
+          request: |
             curl -i -u "$AUTH" "$NARAD/v1/topics/orders/children"
           response: |
             HTTP/1.1 200 OK
@@ -597,6 +747,16 @@ paths:
             Date: Mon, 28 Sep 2026 19:31:43 GMT
 
             {"parent":"orders","children":[{"name":"orders-audit","delay_ms":0,"lag_messages":0,"lag_complete":false}]}
+        - title: a remote child (unreleased)
+          request: |
+            curl -i -u "$AUTH" "$NARAD/v1/topics/orders/children"
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 469
+            Content-Type: application/json
+            Date: Tue, 06 Oct 2026 13:07:03 GMT
+
+            {"parent":"orders","parent_id":"4be76b543f9c4091","children":[{"name":"orders-to-b","delay_ms":0,"lag_messages":0,"lag_complete":true,"remote":{"name":"b","topic":"orders","target_id":"128e63dd156ff568","from":"unconsumed","lanes":1,"created_by":"admin"},"paused":false,"state":"running","lag_seconds":0,"retention_headroom_seconds":259200,"source_drained":false,"blocked_at":null,"target_verified_at":"2026-10-06T13:07:00Z","last_success_at":"2026-10-06T13:07:00Z"}]}
   /v1/topics/{parent}/children/{child}:
     parameters:
       - $ref: '#/components/parameters/ParentPath'
@@ -613,28 +773,290 @@ paths:
       description: |
         Removes the link. The child keeps the messages and the schema
         history it already has and becomes a standalone topic again.
+
+        **Unreleased:** detaching a [remote child](glossary.md#remote-child)
+        deletes its stub. It travels to the leader, which first checks that
+        every record of the parent is on the remote: no cursor lag, every
+        partition owner reporting, and no member holding records of the
+        parent it answered `202` for and has not committed yet. While any
+        is left it answers `409` with the counts, unless `force=true`
+        abandons them; the leader's audit line records what a forced delete
+        abandoned. The check is a point in time, so stop the producers
+        first. A new check for one parent runs at most every 10 seconds.
       x-narad-grant: |
-        Ownership of either topic, or `admin`.
+        Ownership of either topic, or `admin`. Unreleased: for a remote
+        child, the owner of the parent, or an `admin`, with security on.
+      parameters:
+        - name: force
+          in: query
+          x-narad-since: unreleased
+          description: '`true` deletes a remote child even while records of its parent are unshipped, abandoning them. Ignored for a local child.'
+          schema:
+            type: boolean
+            default: false
       responses:
         '204':
-          description: Detached.
+          description: Detached. For a remote child (unreleased), its stub is deleted.
+        '400':
+          description: Unreleased. `force` is not `true` or `false`.
         '401':
           description: Missing or wrong credentials.
         '403':
-          description: The caller manages neither topic, as the node that answers or the cluster leader sees them.
+          description: The caller manages neither topic, as the node that answers or the cluster leader sees them. For a remote child (unreleased), the caller is neither an `admin` nor the parent's owner, or security is off.
         '404':
           description: Neither topic exists after the answering node caught up with the leader, or the two are not linked.
         '409':
-          description: New in v3.1.0. Either topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was changed.
+          description: 'New in v3.1.0. Either topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was changed. Unreleased, for a remote child without `force`: records of the parent are not yet on the remote, with `lag_messages`, `lag_complete` and `dispatch_backlog` (records each member holds, by node) in the body, and `not_answering` or `backlog_over_scan_limit` naming members that could not be counted; or the child turned out to be remote, or local, on the leader; retry.'
+        '412':
+          description: Unreleased. The cluster leader runs a release without remote children; finish the upgrade.
+        '429':
+          description: Unreleased. The leader ran an unshipped check for this parent less than 10 seconds ago; retry after `Retry-After`.
+          x-narad-origin: forwarding
+        '501':
+          description: Unreleased. The answering node has no remote plane, so it cannot detach a remote child.
         '503':
-          description: The cluster has no leader to write the change, or the answering node could not reach the leader to confirm the topics.
+          description: The cluster has no leader to write the change, or the answering node could not reach the leader to confirm the topics. Unreleased, for a remote child, also when the unshipped check could not run.
       x-narad-examples:
-        - request: |
+        - title: a local child
+          request: |
             curl -i -u "$AUTH" -X DELETE \
               "$NARAD/v1/topics/orders/children/orders-audit"
           response: |
             HTTP/1.1 204 No Content
             Date: Mon, 28 Sep 2026 19:31:43 GMT
+        - title: a remote child with records not yet on its remote (unreleased)
+          request: |
+            curl -i -u "$AUTH" -X DELETE \
+              "$NARAD/v1/topics/orders/children/orders-to-b"
+          response: |
+            HTTP/1.1 409 Conflict
+            Cache-Control: no-store
+            Content-Type: application/json
+            X-Content-Type-Options: nosniff
+            Date: Tue, 06 Oct 2026 13:07:18 GMT
+            Content-Length: 122
+
+            {"dispatch_backlog":{},"error":"remote child \"orders-to-b\" has unshipped records","lag_complete":true,"lag_messages":4}
+  /v1/topics/{parent}/children/{child}/pause:
+    parameters:
+      - $ref: '#/components/parameters/ParentPath'
+      - $ref: '#/components/parameters/ChildPath'
+    post:
+      operationId: pauseRemoteChild
+      tags: [Fan-out children]
+      summary: Pause a remote child
+      x-narad-since: unreleased
+      description: |
+        Stops a [remote child](glossary.md#remote-child) sending. Its
+        cursors keep their positions and the parent's retention clock keeps
+        running, so a pause longer than the retention headroom loses records
+        to drop-behind. The leader checks only that every member applies
+        the remote Raft entry types, from the member records, so a pause
+        works while a member is down. Pausing a paused child records the new
+        reason.
+      x-narad-grant: |
+        `admin`, with security on.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PauseRemoteChildRequest'
+      responses:
+        '200':
+          description: Paused. The body is the stub, with `remote.paused`, `pause_reason`, `paused_by` and `paused_at_ms`.
+          x-narad-origin: forwarding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Topic'
+        '400':
+          description: A name is not a topic name, or `reason` is over 256 bytes or holds a control character.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not an `admin`, or security is off (`remotes require security`).
+        '404':
+          description: No remote child of that name under that parent.
+          x-narad-origin: forwarding
+        '409':
+          description: The child was detached and attached again under the request; read it and retry.
+          x-narad-origin: forwarding
+        '412':
+          description: A member does not apply the remote Raft entry types (the body names it), or the leader runs an older release.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '429':
+          description: This node took 60 remote child writes in the last minute; retry after `Retry-After`.
+        '501':
+          description: The answering node has no remote plane.
+        '503':
+          description: The leader could not be reached or could not write the change; retry.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X POST \
+              "$NARAD/v1/topics/orders/children/orders-to-b/pause" \
+              -H "Content-Type: application/json" \
+              -d '{"reason": "target maintenance, CHG-4211"}'
+          response: |
+            HTTP/1.1 200 OK
+            Cache-Control: no-store
+            Content-Type: application/json
+            X-Content-Type-Options: nosniff
+            Date: Tue, 06 Oct 2026 13:07:15 GMT
+            Content-Length: 517
+
+            {"name":"orders-to-b","id":"d38a4383503cf4ac","partitions":0,"retention_ms":0,"visibility_timeout_ms":0,"max_in_flight_per_partition":0,"max_acked_ahead_per_partition":0,"created_at":1791292019,"role":"child","parent":"orders","attach_epoch":"341e6b8a37a9688a","attach_offsets":[0,0,0],"remote":{"name":"b","topic":"orders","target_id":"128e63dd156ff568","from":"unconsumed","lanes":1,"paused":true,"pause_reason":"target maintenance, CHG-4211","paused_by":"admin","paused_at_ms":1791292035849,"created_by":"admin"}}
+  /v1/topics/{parent}/children/{child}/resume:
+    parameters:
+      - $ref: '#/components/parameters/ParentPath'
+      - $ref: '#/components/parameters/ChildPath'
+    post:
+      operationId: resumeRemoteChild
+      tags: [Fan-out children]
+      summary: Resume a remote child
+      x-narad-since: unreleased
+      description: |
+        Runs the attach checks from every member again, then lets a paused
+        [remote child](glossary.md#remote-child) send. A target topic that
+        was deleted and recreated since the attach (its ID changed) is
+        refused with `409` (`target_replaced`) before anything is sent to
+        it; `accept_target` records the new ID and resumes. Resuming a
+        running child re-runs the checks and changes nothing else. Unlike
+        pause, resume needs every member to answer.
+      x-narad-grant: |
+        `admin`, with security on.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResumeRemoteChildRequest'
+      responses:
+        '200':
+          description: Resumed. The body is the stub.
+          x-narad-origin: forwarding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Topic'
+        '400':
+          description: A name is not a topic name, or the body is malformed.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not an `admin`, or security is off (`remotes require security`).
+        '404':
+          description: No remote child of that name under that parent.
+          x-narad-origin: forwarding
+        '409':
+          description: The remote no longer exists (create it again first), the target topic was replaced (resume with `accept_target`), a check found the target unusable (the body names the `class` and carries each member's report), or the child was detached and attached again under the request.
+          x-narad-origin: forwarding
+        '412':
+          description: A member does not apply the remote Raft entry types, did not answer, or reports a posture that forbids remotes (the body names it); a member holds a stale or unreadable credential; or the leader runs an older release.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '429':
+          description: This node took 60 remote child writes in the last minute, or a check of this remote ran less than 5 seconds ago on a member; retry after `Retry-After`.
+        '501':
+          description: The answering node has no remote plane.
+        '502':
+          description: Something in front of the target answered instead of it, or the target answered with a redirect.
+          x-narad-origin: forwarding
+        '503':
+          description: The leader could not be reached, or the target or a member was unavailable during the checks; retry.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X POST \
+              "$NARAD/v1/topics/orders/children/orders-to-b/resume" \
+              -H "Content-Type: application/json"
+          response: |
+            HTTP/1.1 200 OK
+            Cache-Control: no-store
+            Content-Type: application/json
+            X-Content-Type-Options: nosniff
+            Date: Tue, 06 Oct 2026 13:07:33 GMT
+            Content-Length: 423
+
+            {"name":"orders-to-b","id":"d38a4383503cf4ac","partitions":0,"retention_ms":0,"visibility_timeout_ms":0,"max_in_flight_per_partition":0,"max_acked_ahead_per_partition":0,"created_at":1791292019,"role":"child","parent":"orders","attach_epoch":"341e6b8a37a9688a","attach_offsets":[0,0,0],"remote":{"name":"b","topic":"orders","target_id":"128e63dd156ff568","from":"unconsumed","lanes":1,"skip":{"0":[2]},"created_by":"admin"}}
+  /v1/topics/{parent}/children/{child}/skip:
+    parameters:
+      - $ref: '#/components/parameters/ParentPath'
+      - $ref: '#/components/parameters/ChildPath'
+    post:
+      operationId: skipRemoteChildRecord
+      tags: [Fan-out children]
+      summary: Skip a record a remote child cannot ship
+      x-narad-since: unreleased
+      description: |
+        Records that one parent record may be dropped from a
+        [remote child](glossary.md#remote-child). The leader asks the
+        partition's owner first and accepts the skip only while the
+        link's cursor is stuck on exactly that partition and offset in
+        `rejected_record` or `record_too_large` (the listing's
+        `blocked_at`); any other record is refused with `409`, so a
+        mistyped partition or offset is never stored. With several lanes
+        stuck, the owner reports the lowest record: skip them in order.
+        The record stays in the parent's log for its retention. Each
+        dropped record counts on
+        `narad_fanout_remote_skipped_records_total` and is logged by the
+        node that drops it. The child's `remote.skip` keeps skipped
+        offsets per partition, ascending, at most 4000 of them (one
+        full slab), always including the one just skipped, so a slab read again (after a
+        restart or a partition move) drops each of them again.
+      x-narad-grant: |
+        `admin`, with security on.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SkipRemoteRecordRequest'
+      responses:
+        '200':
+          description: Recorded. The body is the stub, with `remote.skip`.
+          x-narad-origin: forwarding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Topic'
+        '400':
+          description: '`partition` or `offset` is missing or negative, `partition` is not a partition of the parent, or a name is not a topic name.'
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not an `admin`, or security is off (`remotes require security`).
+        '404':
+          description: No remote child of that name under that parent, or the parent is gone.
+          x-narad-origin: forwarding
+        '409':
+          description: The link's cursor of that partition is not stuck on that offset in `rejected_record` or `record_too_large` (the body names the record it is stuck on, as `blocked_at`, if any), or the child was detached and attached again under the request; read it and retry.
+          x-narad-origin: forwarding
+        '412':
+          description: A member does not apply the remote Raft entry types (the body names it), or the leader runs an older release.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '429':
+          description: This node took 60 remote child writes in the last minute; retry after `Retry-After`.
+        '501':
+          description: The answering node has no remote plane.
+        '503':
+          description: The leader could not be reached, could not ask the partition's owner, or could not write the change; retry.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X POST \
+              "$NARAD/v1/topics/orders/children/orders-to-b/skip" \
+              -H "Content-Type: application/json" \
+              -d '{"partition": 0, "offset": 2}'
+          response: |
+            HTTP/1.1 200 OK
+            Cache-Control: no-store
+            Content-Type: application/json
+            X-Content-Type-Options: nosniff
+            Date: Tue, 06 Oct 2026 13:07:33 GMT
+            Content-Length: 532
+
+            {"name":"orders-to-b","id":"d38a4383503cf4ac","partitions":0,"retention_ms":0,"visibility_timeout_ms":0,"max_in_flight_per_partition":0,"max_acked_ahead_per_partition":0,"created_at":1791292019,"role":"child","parent":"orders","attach_epoch":"341e6b8a37a9688a","attach_offsets":[0,0,0],"remote":{"name":"b","topic":"orders","target_id":"128e63dd156ff568","from":"unconsumed","lanes":1,"paused":true,"pause_reason":"target maintenance, CHG-4211","paused_by":"admin","paused_at_ms":1791292035849,"skip":{"0":[2]},"created_by":"admin"}}
   /v1/topics/{topic}/produce:
     parameters:
       - $ref: '#/components/parameters/TopicPath'
@@ -695,7 +1117,7 @@ paths:
         '404':
           description: The topic does not exist.
         '409':
-          description: The topic is a delay child, which only its parent can feed.
+          description: 'The topic is a delay child, which only its parent can feed. Unreleased: the topic is a remote child''s stub, whose messages live on its remote (`remote child "<name>" lives on remote <remote>; consume it there`).'
         '413':
           description: The body is over 1 MiB.
         '415':
@@ -725,7 +1147,8 @@ paths:
       summary: Produce a batch
       x-narad-since: v3.1.0
       description: |
-        Stores 1 to 100 messages in one request, all or none. Every message
+        Stores 1 to 1,000 messages in one request, all or none (1 to 100
+        in v3.1.0). Every message
         is checked as a single produce would check it before any is stored.
         If one fails, the request gets the status a single produce of that
         message would get, its error starts with `message <index>: `, and
@@ -736,11 +1159,23 @@ paths:
         `key` and `partition` belong to each message; as query parameters
         they get `400`. A node on v3.0.1 or earlier answers `404`: fall back
         to single produces.
+
+        **Unreleased:** the body may be up to 16 MiB, with each message's
+        decoded payload at most 1 MiB, the single-produce cap, so anything a
+        single produce accepts fits in a batch. It may be sent compressed,
+        `Content-Encoding: zstd` or `gzip`, decoded under the same cap. A
+        body over 1 MiB first takes its share of the node's batch body
+        budget (`http.max_batch_body_bytes_in_flight`, 256 MiB by default)
+        and is answered `503` with `Retry-After: 1` when the budget is
+        full; bodies of 1 MiB or less never touch it. v3.1.0 answers a
+        batch over 100 messages `400` and a body over 1 MiB `413`, and does
+        not decode a compressed body. This is the route a
+        [remote child](glossary.md#remote-child) sends to.
       x-narad-grant: |
         `produce` on the topic.
       requestBody:
         required: true
-        description: At most 1 MiB in total.
+        description: At most 16 MiB in total, each payload at most 1 MiB (unreleased; 1 MiB in total in v3.1.0), optionally zstd or gzip compressed.
         content:
           application/json:
             schema:
@@ -753,7 +1188,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProduceBatchAccepted'
         '400':
-          description: No messages, more than 100, a bad encoding, an empty payload, a message the schema refuses (one nested deeper than 256 levels included), or `key` or `partition` in the query.
+          description: No messages, more than 1,000 (more than 100 in v3.1.0), a bad encoding, an empty payload, a message the schema refuses (one nested deeper than 256 levels included), `key` or `partition` in the query, or (unreleased) a compressed body that does not decode.
         '401':
           description: Missing or wrong credentials.
         '403':
@@ -761,17 +1196,17 @@ paths:
         '404':
           description: The topic does not exist, or the node runs v3.0.1 or earlier.
         '409':
-          description: The topic is a delay child.
+          description: 'The topic is a delay child. Unreleased: the topic is a remote child''s stub, whose messages live on its remote (`remote child "<name>" lives on remote <remote>; consume it there`).'
         '413':
-          description: The body is over 1 MiB.
+          description: 'The body is over 16 MiB, decoded or as sent (1 MiB in v3.1.0), or (unreleased) one message''s payload is over 1 MiB (`message <i>: message too large`).'
         '415':
-          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+          description: No accepted `Content-Type` and no `X-Narad-Client` header, or (unreleased) a `Content-Encoding` other than `zstd`, `gzip` or none.
         '429':
           description: The batch does not fit this user's produce cap on this node (only when the cap is set). A batch counts as its message count, clamped to the cap.
         '500':
           description: The node could not write to its ingress WAL.
         '503':
-          description: 'Nothing was checked or stored; retry through another node. Either this node is being decommissioned and takes no new produce (with `Retry-After: 1`), or the topic has a schema and every schema validation slot on the node stayed busy for 5 seconds.'
+          description: 'Nothing was checked or stored; retry through another node. Either this node is being decommissioned and takes no new produce (with `Retry-After: 1`), or the topic has a schema and every schema validation slot on the node stayed busy for 5 seconds, or (unreleased) the body is over 1 MiB and the node''s batch body budget is full (with `Retry-After: 1`).'
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/produce/batch" \
@@ -873,6 +1308,8 @@ paths:
           description: No `consume` grant on the topic.
         '404':
           description: The topic does not exist.
+        '409':
+          description: 'Unreleased. The topic is a remote child''s stub, whose messages live on its remote (`remote child "<name>" lives on remote <remote>; consume it there`).'
         '410':
           description: Replay only. The record at `offset` aged out of retention or cannot be read.
         '421':
@@ -972,6 +1409,8 @@ paths:
           description: No `consume` grant on the topic.
         '404':
           description: The topic does not exist.
+        '409':
+          description: 'Unreleased. The topic is a remote child''s stub, whose messages live on its remote (`remote child "<name>" lives on remote <remote>; consume it there`).'
         '410':
           description: The lease ran out, or the message was already settled or delivered again under a new handle. A handle from another topic, or for a partition this topic does not have, also answers `410`.
         '413':
@@ -1584,6 +2023,450 @@ paths:
             Date: Mon, 05 Oct 2026 14:20:04 GMT
 
             {"id":"narad-3","voter":false}
+  /v1/remotes:
+    post:
+      operationId: createRemote
+      tags: [Remotes]
+      summary: Register a remote
+      x-narad-since: unreleased
+      description: |
+        Registers another Narad cluster this one may send remote children
+        to. The node that takes the request checks every field, resolves
+        the URL's host and checks it against the address guard, and seals
+        the password with AES-256-GCM under a key derived from the cluster
+        secret; only the ciphertext travels to the leader and into Raft.
+        The password is never shown again: answers carry a keyed
+        `fingerprint` instead. Nothing is sent to the remote; run
+        [test a remote](#test-remote) next.
+
+        The URL must be `https`, on a port in `remotes.allowed_ports`
+        (443 by default), on a host in `remotes.allowed_hosts` when that is
+        set, with no user, query or fragment. A node takes at most 10
+        remote writes a minute, and a cluster holds at most 64 remotes.
+      x-narad-grant: |
+        `admin`, with security on.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRemoteRequest'
+      responses:
+        '201':
+          description: Registered. The body is the remote.
+          x-narad-origin: forwarding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Remote'
+        '400':
+          description: A field is missing, unknown or invalid (the message names the field, never its value), or the URL's host resolves to an address the guard refuses.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not an `admin`, or security is off (`remotes require security`).
+        '409':
+          description: A remote of that name exists, the cluster holds 64 remotes, or two first creates raced (retry).
+          x-narad-origin: forwarding
+        '412':
+          description: 'Nothing was sealed or stored: this node does not attest an encrypted API hop (`remotes.api_hop_encrypted`); the cluster secret is missing or decodes to fewer than 32 bytes; the current key''s seal budget is spent (rotate the cluster secret); a member does not apply the remote Raft entry types, did not answer, or reports a posture that forbids remotes (the body names it in `members`); or the leader runs an older release.'
+        '413':
+          description: The body is over 128 KiB.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '429':
+          description: 'This node took 10 remote writes in the last minute; retry after `Retry-After`, the seconds until the oldest of them leaves the minute.'
+        '500':
+          description: The node failed to seal the password; logged on the node.
+        '501':
+          description: The answering node has no remote plane.
+        '503':
+          description: The leader could not be reached, or could not write the change; the request ID in the node's audit line joins it to the leader's. Read the remote back before retrying.
+      x-narad-examples:
+        - request: |
+            jq -n --rawfile pw repl-password --rawfile ca narad-b-ca.pem \
+              '{name: "b", url: "https://localhost:8443",
+                username: "repl-from-a-7f3k9q",
+                password: ($pw | rtrimstr("\n")), ca_pem: $ca}' |
+            curl -i -u "$AUTH" -X POST "$NARAD/v1/remotes" \
+              -H "Content-Type: application/json" -d @-
+          response: |
+            HTTP/1.1 201 Created
+            Cache-Control: no-store
+            Content-Type: application/json
+            X-Content-Type-Options: nosniff
+            Date: Tue, 06 Oct 2026 13:06:22 GMT
+            Content-Length: 622
+
+            {"name":"b","id":"8ccffc20e36f644c","url":"https://localhost:8443","username":"repl-from-a-7f3k9q","password":{"fingerprint":"ced1ea5d18d1","set_at":"2026-10-06T13:06:22Z","set_by":"admin","key_version":"b51c9412df29325d"},"credential_version":1,"ca_pem_sha512":"a85bc5f06c550eb18ff2a2a29187fe3a290b1fc74c76d0ef2781531bd4df4f84187980295b5484a6e363a2ff24c52fd9cec309bd74405beb5c815fb48b1e80b0","limits":{"max_in_flight":16,"request_timeout_ms":30000,"idle_conn_timeout_ms":30000,"conn_max_age_ms":300000,"check_interval_ms":60000,"compression":"none"},"revision":1,"created_at":"2026-10-06T13:06:22Z","created_by":"admin"}
+    get:
+      operationId: listRemotes
+      tags: [Remotes]
+      summary: List remotes
+      x-narad-since: unreleased
+      description: |
+        Lists every remote, the remote children that use it, and what each
+        member's credential cache holds for it: its state, the credential
+        and key versions it decrypted, when it last reached the remote, and
+        the server certificate's expiry. `lingering` lists deleted remotes
+        some member still holds (it has not applied the delete) and the
+        members that did not answer; `not_answering` names every member
+        that did not answer, even when no answering member holds a deleted
+        remote. `key` is the current encryption key's
+        version and age, absent before the first remote.
+      x-narad-grant: |
+        `admin`, with security on.
+      parameters:
+        - name: nodes
+          in: query
+          description: '`false` skips asking the members for their caches; the answer then has no `nodes`, no `lingering` and no `not_answering`.'
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: The remotes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoteList'
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not an `admin`, or security is off (`remotes require security`).
+        '501':
+          description: The answering node has no remote plane.
+        '503':
+          description: The node could not read its copy of the remotes; retry.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" "$NARAD/v1/remotes"
+          response: |
+            HTTP/1.1 200 OK
+            Cache-Control: no-store
+            Content-Length: 1012
+            Content-Type: application/json
+            Date: Tue, 06 Oct 2026 13:06:32 GMT
+
+            {"allowlist":"set","key":{"key_version":"b51c9412df29325d","first_sealed_at":"2026-10-06T13:06:22Z","age_seconds":10},"remotes":[{"name":"b","id":"8ccffc20e36f644c","url":"https://localhost:8443","username":"repl-from-a-7f3k9q","password":{"fingerprint":"ced1ea5d18d1","set_at":"2026-10-06T13:06:22Z","set_by":"admin","key_version":"b51c9412df29325d"},"credential_version":1,"ca_pem_sha512":"a85bc5f06c550eb18ff2a2a29187fe3a290b1fc74c76d0ef2781531bd4df4f84187980295b5484a6e363a2ff24c52fd9cec309bd74405beb5c815fb48b1e80b0","limits":{"max_in_flight":16,"request_timeout_ms":30000,"idle_conn_timeout_ms":30000,"conn_max_age_ms":300000,"check_interval_ms":60000,"compression":"none"},"revision":1,"created_at":"2026-10-06T13:06:22Z","created_by":"admin","nodes":[{"node":"narad-0","state":"ready","credential_version":1,"key_version":"b51c9412df29325d","fingerprint":"ced1ea5d18d1","last_ok_at":"2026-10-06T13:06:32Z","last_error":"none","server_cert_not_after":"2026-11-05T13:04:25Z","rtt_ms":0}]}],"lingering":[],"not_answering":[]}
+  /v1/remotes/{name}:
+    parameters:
+      - $ref: '#/components/parameters/RemoteNamePath'
+    get:
+      operationId: getRemote
+      tags: [Remotes]
+      summary: Get a remote
+      x-narad-since: unreleased
+      description: |
+        Returns one remote, with what each member's credential cache holds
+        for it, as [list remotes](#list-remotes) does.
+      x-narad-grant: |
+        `admin`, with security on.
+      parameters:
+        - name: nodes
+          in: query
+          description: '`false` skips asking the members for their caches.'
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: The remote.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Remote'
+        '400':
+          description: '`name` is not a remote''s name.'
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not an `admin`, or security is off (`remotes require security`).
+        '404':
+          description: No remote of that name.
+        '501':
+          description: The answering node has no remote plane.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" "$NARAD/v1/remotes/b?nodes=false"
+          response: |
+            HTTP/1.1 200 OK
+            Cache-Control: no-store
+            Content-Length: 622
+            Content-Type: application/json
+            Date: Tue, 06 Oct 2026 13:06:32 GMT
+
+            {"name":"b","id":"8ccffc20e36f644c","url":"https://localhost:8443","username":"repl-from-a-7f3k9q","password":{"fingerprint":"ced1ea5d18d1","set_at":"2026-10-06T13:06:22Z","set_by":"admin","key_version":"b51c9412df29325d"},"credential_version":1,"ca_pem_sha512":"a85bc5f06c550eb18ff2a2a29187fe3a290b1fc74c76d0ef2781531bd4df4f84187980295b5484a6e363a2ff24c52fd9cec309bd74405beb5c815fb48b1e80b0","limits":{"max_in_flight":16,"request_timeout_ms":30000,"idle_conn_timeout_ms":30000,"conn_max_age_ms":300000,"check_interval_ms":60000,"compression":"none"},"revision":1,"created_at":"2026-10-06T13:06:22Z","created_by":"admin"}
+    patch:
+      operationId: updateRemote
+      tags: [Remotes]
+      summary: Change a remote
+      x-narad-since: unreleased
+      description: |
+        Changes the fields named and nothing else. A new `url`, `username`
+        or `ca_pem` needs `password` in the same request: a stored password
+        is only ever sent to the URL and user it was entered with, verified
+        against the CA it was entered with. `ca_pem: ""` drops the CA and
+        uses the system roots. A new password is sealed on this node, as on
+        a create, and the links pick it up without a restart. `limits`
+        change live; a limit named with `0` or `""` is refused.
+      x-narad-grant: |
+        `admin`, with security on.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRemoteRequest'
+      responses:
+        '200':
+          description: Changed. The body is the remote.
+          x-narad-origin: forwarding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Remote'
+        '400':
+          description: A field is unknown or invalid, nothing to change, or a new `url`, `username` or `ca_pem` came without `password`.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not an `admin`, or security is off (`remotes require security`).
+        '404':
+          description: No remote of that name.
+        '409':
+          description: The remote changed since this node read it (retry), or it was created again under the same name.
+          x-narad-origin: forwarding
+        '412':
+          description: As for [register a remote](#create-remote); the hop and secret rules apply only to a change that carries a password.
+        '413':
+          description: The body is over 128 KiB.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '429':
+          description: 'This node took 10 remote writes in the last minute; retry after `Retry-After`, the seconds until the oldest of them leaves the minute.'
+        '500':
+          description: The node failed to seal the password; logged on the node.
+        '501':
+          description: The answering node has no remote plane.
+        '503':
+          description: The leader could not be reached, or could not write the change. Read the remote back before retrying.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X PATCH "$NARAD/v1/remotes/b" \
+              -H "Content-Type: application/json" \
+              -d '{"limits": {"max_in_flight": 32, "compression": "zstd"}}'
+          response: |
+            HTTP/1.1 200 OK
+            Cache-Control: no-store
+            Content-Type: application/json
+            X-Content-Type-Options: nosniff
+            Date: Tue, 06 Oct 2026 13:06:32 GMT
+            Content-Length: 622
+
+            {"name":"b","id":"8ccffc20e36f644c","url":"https://localhost:8443","username":"repl-from-a-7f3k9q","password":{"fingerprint":"ced1ea5d18d1","set_at":"2026-10-06T13:06:22Z","set_by":"admin","key_version":"b51c9412df29325d"},"credential_version":1,"ca_pem_sha512":"a85bc5f06c550eb18ff2a2a29187fe3a290b1fc74c76d0ef2781531bd4df4f84187980295b5484a6e363a2ff24c52fd9cec309bd74405beb5c815fb48b1e80b0","limits":{"max_in_flight":32,"request_timeout_ms":30000,"idle_conn_timeout_ms":30000,"conn_max_age_ms":300000,"check_interval_ms":60000,"compression":"zstd"},"revision":2,"created_at":"2026-10-06T13:06:22Z","created_by":"admin"}
+    delete:
+      operationId: deleteRemote
+      tags: [Remotes]
+      summary: Delete a remote
+      x-narad-since: unreleased
+      description: |
+        Deletes the remote and its stored password. Refused while remote
+        children name it, unless `force=true`: they then hold, without
+        loss while the parent's retention lasts, in state
+        `remote_missing` until a remote of that name exists again. Each
+        member drops its cached credential and closes its connections when
+        it applies the delete; [list remotes](#list-remotes) shows the
+        members that have not under `lingering`. The leader checks only
+        the member records, so a delete works while a member is down. In
+        an emergency, revoke the user on the target first
+        ([Manage remotes](../operate/remotes.md#emergency-revocation)).
+      x-narad-grant: |
+        `admin`, with security on.
+      parameters:
+        - name: force
+          in: query
+          description: '`true` deletes the remote even while remote children use it.'
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '204':
+          description: Deleted.
+          x-narad-origin: forwarding
+        '400':
+          description: '`name` is not a remote''s name, or `force` is not `true` or `false`.'
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not an `admin`, or security is off (`remotes require security`).
+        '404':
+          description: No remote of that name.
+          x-narad-origin: forwarding
+        '409':
+          description: Remote children use the remote; the body lists them in `links`.
+          x-narad-origin: forwarding
+        '412':
+          description: A member does not apply the remote Raft entry types (the body names it), or the leader runs an older release.
+        '429':
+          description: 'This node took 10 remote writes in the last minute; retry after `Retry-After`, the seconds until the oldest of them leaves the minute.'
+        '501':
+          description: The answering node has no remote plane.
+        '503':
+          description: The leader could not be reached, or could not write the change. Read the remotes back before retrying.
+      x-narad-examples:
+        - title: in use
+          request: |
+            curl -i -u "$AUTH" -X DELETE "$NARAD/v1/remotes/b"
+          response: |
+            HTTP/1.1 409 Conflict
+            Cache-Control: no-store
+            Content-Type: application/json
+            X-Content-Type-Options: nosniff
+            Date: Tue, 06 Oct 2026 13:07:49 GMT
+            Content-Length: 79
+
+            {"error":"remote is used by 1 remote children","links":["orders/orders-to-b"]}
+        - title: once no remote child uses it
+          request: |
+            curl -i -u "$AUTH" -X DELETE "$NARAD/v1/remotes/b"
+          response: |
+            HTTP/1.1 204 No Content
+            Cache-Control: no-store
+            Date: Tue, 06 Oct 2026 13:07:49 GMT
+  /v1/remotes/{name}/test:
+    parameters:
+      - $ref: '#/components/parameters/RemoteNamePath'
+    post:
+      operationId: testRemote
+      tags: [Remotes]
+      summary: Test a remote
+      x-narad-since: unreleased
+      description: |
+        Runs the attach checks against `topic` on the remote, writing
+        nothing on either cluster: the dial passes the address guard, TLS
+        verifies against the remote's CA (or the system roots), the target
+        answers `401` without credentials, the topic exists and is no delay
+        child or remote child stub, its children include no remote child,
+        the schemas match (with `source`), an empty batch produce is
+        answered as a target that takes batch produce answers it, and the
+        credential is not an admin there. With `remotes.allowed_hosts` set,
+        every member runs the checks and reports the connect time
+        (`rtt_ms`) and an estimate of one lane's capacity; without it only
+        this node runs them, and its report carries only `node`, `result`,
+        `class` and this cluster's own fields: no time, no target ID, no
+        certificate expiry, no warnings drawn from the target's answers.
+
+        The answer is `200` whether or not the checks pass: read `result`.
+        `narad remote test` exits non-zero unless it is `pass`.
+      x-narad-grant: |
+        `admin`, with security on.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TestRemoteRequest'
+      responses:
+        '200':
+          description: The checks ran. `result` is `pass` only when every member passed at the remote's current credential version; otherwise `class` names the most important failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoteTestResult'
+        '400':
+          description: '`topic` is missing or not a topic name, or `source` is not one.'
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not an `admin`, or security is off (`remotes require security`).
+        '404':
+          description: No remote of that name, or no `source` topic of that name.
+        '413':
+          description: The body is over 128 KiB.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '429':
+          description: A check of this remote ran less than 5 seconds ago on this node (or, with an allowlist, on a member); retry after `Retry-After`.
+        '501':
+          description: The answering node has no remote plane.
+        '503':
+          description: The cluster's members could not be listed; retry.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X POST "$NARAD/v1/remotes/b/test" \
+              -H "Content-Type: application/json" \
+              -d '{"topic": "orders", "source": "orders"}'
+          response: |
+            HTTP/1.1 200 OK
+            Cache-Control: no-store
+            Content-Length: 361
+            Content-Type: application/json
+            Date: Tue, 06 Oct 2026 13:06:32 GMT
+
+            {"remote":"b","result":"pass","checks":[{"node":"narad-0","result":"pass","credential_version":1,"target_id":"128e63dd156ff568","target_serves_ids":true,"rtt_ms":0,"lane_capacity_per_s":20000,"server_cert_not_after":"2026-11-05T13:04:25Z","warnings":[],"posture":{"security_enabled":true,"legacy_cluster_auth":false,"raft_tls":true,"api_hop_encrypted":true}}]}
+  /v1/cluster/reencrypt-remotes:
+    post:
+      operationId: reencryptRemotes
+      tags: [Remotes]
+      summary: Re-encrypt remote passwords
+      x-narad-since: unreleased
+      description: |
+        After a cluster secret rotation, re-seals every stored remote
+        password that is still under the previous key: the leader opens it
+        with `NARAD_CLUSTER_SECRET_PREVIOUS` and seals it under the current
+        secret, bound to the same remote, URL, username and CA. A remote
+        changed in between keeps its newer ciphertext. Safe to repeat.
+        Steps: [Rotate the cluster secret](../operate/remotes.md#rotate-cluster-secret).
+      x-narad-grant: |
+        `admin`, with security on.
+      requestBody:
+        required: false
+        description: Empty, or `{}`.
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '200':
+          description: 'Done. `reencrypted` names the remotes moved to the current key, `already_current` the ones that were, and `failed` the ones the leader could not open (`key_unknown`: sealed under a key neither secret derives, as when `NARAD_CLUSTER_SECRET_PREVIOUS` is not set on the leader; `open_failed`) or write, each with a `reason`.'
+          x-narad-origin: forwarding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReencryptResult'
+        '400':
+          description: The body is not empty or `{}`.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not an `admin`, or security is off (`remotes require security`).
+        '412':
+          description: The leader's cluster secret is missing or decodes to fewer than 32 bytes, a member does not apply the remote Raft entry types, did not answer, or reports a posture that forbids remotes (the body names it in `members`), or the leader runs an older release. Nothing was re-sealed.
+        '413':
+          description: The body is over 128 KiB.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '429':
+          description: 'This node took 10 remote writes in the last minute; retry after `Retry-After`, the seconds until the oldest of them leaves the minute.'
+        '501':
+          description: The answering node has no remote plane.
+        '503':
+          description: The leader could not be reached; it is safe to repeat.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X POST "$NARAD/v1/cluster/reencrypt-remotes" \
+              -H "Content-Type: application/json"
+          response: |
+            HTTP/1.1 200 OK
+            Cache-Control: no-store
+            Content-Type: application/json
+            X-Content-Type-Options: nosniff
+            Date: Tue, 06 Oct 2026 13:07:49 GMT
+            Content-Length: 88
+
+            {"key_version":"b51c9412df29325d","reencrypted":[],"already_current":["b"],"failed":[]}
   /healthz:
     get:
       operationId: healthz
@@ -1708,6 +2591,20 @@ components:
       in: path
       required: true
       description: Name of the parent topic.
+      schema:
+        type: string
+    ChildPath:
+      name: child
+      in: path
+      required: true
+      description: Name of the child topic.
+      schema:
+        type: string
+    RemoteNamePath:
+      name: name
+      in: path
+      required: true
+      description: The remote's name.
       schema:
         type: string
     UsernamePath:
@@ -1861,6 +2758,51 @@ components:
           items:
             type: integer
           description: A child's attach point, one offset per parent partition.
+        remote:
+          $ref: '#/components/schemas/RemoteLink'
+    RemoteLink:
+      type: object
+      x-narad-since: unreleased
+      description: A [remote child](glossary.md#remote-child)'s link. Present only on a remote child's stub, which has `partitions` `0` and no owner.
+      properties:
+        name:
+          type: string
+          description: The remote the copies go to.
+        topic:
+          type: string
+          description: The topic on the remote.
+        target_id:
+          type: string
+          description: The target topic's ID as the attach, or the last resume with `accept_target`, saw it. A target on v3.1.0 serves it in its describe answer, so recreate detection works there too. Empty for a target topic created before topic IDs (v2.1 and earlier); such a link stops in `target_replaced` if the target later reports an ID, because a topic gains one only by being recreated.
+        from:
+          type: string
+          enum: [attach, unconsumed, earliest]
+          description: Where the link started on each parent partition.
+        lanes:
+          type: integer
+          description: Ordered streams per parent partition, 1 to 8.
+        paused:
+          type: boolean
+          description: '`true` while paused. Absent otherwise.'
+        pause_reason:
+          type: string
+          description: The reason given to pause.
+        paused_by:
+          type: string
+          description: The admin who paused it; shown to admins only.
+        paused_at_ms:
+          type: integer
+          description: When it was paused, Unix milliseconds.
+        skip:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: integer
+          description: Per parent partition, the offsets an admin accepted to lose, ascending, at most 4000. A cursor drops a record only while it is stuck on exactly one of them.
+        created_by:
+          type: string
+          description: The admin who attached it; shown to admins only.
     TopicDetails:
       allOf:
         - $ref: '#/components/schemas/Topic'
@@ -1959,12 +2901,42 @@ components:
         delay_ms:
           type: integer
           description: Make the child a delay child that receives each message this long after the parent committed it. At most one year. Fixed while attached.
+        remote:
+          type: string
+          x-narad-since: unreleased
+          description: Create `child` as a remote child that sends to this remote. `child` must not exist yet.
+        remote_topic:
+          type: string
+          x-narad-since: unreleased
+          description: With `remote`, the topic on the remote. Defaults to the parent's name.
+        from:
+          type: string
+          enum: [attach, unconsumed, earliest]
+          default: attach
+          x-narad-since: unreleased
+          description: With `remote`, where the link starts on each parent partition. `attach` at the parent's committed high watermark, as a local child; `unconsumed` at the parent's consumer ack frontier, so everything not yet acked here is sent; `earliest` at the oldest retained record.
+        lanes:
+          type: integer
+          minimum: 1
+          maximum: 8
+          default: 1
+          x-narad-since: unreleased
+          description: With `remote`, ordered streams per parent partition. A key always uses one lane; more lanes help a link with a long round trip.
+        dry_run:
+          type: boolean
+          default: false
+          x-narad-since: unreleased
+          description: With `remote`, run every check and resolve the start offsets, and write nothing.
     ChildList:
       type: object
       properties:
         parent:
           type: string
           description: Parent topic name.
+        parent_id:
+          type: string
+          x-narad-since: unreleased
+          description: The parent's incarnation ID, empty for a topic created before topic IDs (v2.1 and earlier). A remote child on another cluster that sends to this topic reads it to notice a recreate.
         children:
           type: array
           items:
@@ -1978,10 +2950,82 @@ components:
                 description: The child's delay, `0` for an immediate child.
               lag_messages:
                 type: integer
-                description: Parent messages not yet copied into the child, summed over partitions.
+                description: Parent messages not yet copied into the child, summed over partitions. For a remote child, not yet accepted by the remote.
               lag_complete:
                 type: boolean
                 description: '`false` while some partitions have not reported, so `lag_messages` is a lower bound.'
+              remote:
+                $ref: '#/components/schemas/RemoteLink'
+              paused:
+                type: boolean
+                x-narad-since: unreleased
+                description: A remote child only. `true` while it is paused.
+              state:
+                type: string
+                x-narad-since: unreleased
+                description: A remote child only. Its worst partition's [link state](remote-children.md#link-states), `running` or `paused` when healthy; `unknown` when a partition owner did not report.
+              lag_seconds:
+                type: number
+                x-narad-since: unreleased
+                description: 'A remote child only. Age, on the owners'' clocks, of the oldest parent record not yet accepted by the remote, the worst partition''s: the link''s live recovery point.'
+              retention_headroom_seconds:
+                type: number
+                x-narad-since: unreleased
+                description: A remote child only. The parent's retention minus `lag_seconds`, the time left before drop-behind. Absent when the parent keeps messages forever.
+              source_drained:
+                type: boolean
+                x-narad-since: unreleased
+                description: A remote child only. `true` once the parent's consumers have acked past the link's start offset on every partition.
+              blocked_at:
+                type: object
+                x-narad-since: unreleased
+                description: A remote child only. The one record a cursor is stuck on, as `partition`, `offset` and `state` (`rejected_record` or `record_too_large`); `null` when none is.
+              target_verified_at:
+                type: string
+                x-narad-since: unreleased
+                description: A remote child only. The oldest of the cursors' last successful target checks, RFC 3339; `null` while any cursor has had none (a node whose checks keep failing is not hidden behind another node's success).
+              unverified:
+                type: boolean
+                x-narad-since: unreleased
+                description: A remote child only. `true` for a running link with a cursor whose node has had no successful target check in the last 10 minutes (counted from when the node began checking, for a cursor that never had one).
+              last_success_at:
+                type: string
+                x-narad-since: unreleased
+                description: A remote child only. When the remote last accepted a chunk, RFC 3339.
+              partitions:
+                type: array
+                x-narad-since: unreleased
+                description: A remote child only, with `partitions=true`. One row per parent partition.
+                items:
+                  type: object
+                  properties:
+                    partition:
+                      type: integer
+                      description: Parent partition.
+                    node:
+                      type: string
+                      description: The owner that reported the cursor.
+                    start_offset:
+                      type: integer
+                      description: Where the link started on this partition.
+                    next_offset:
+                      type: integer
+                      description: The cursor's next offset; `null` when the owner did not report.
+                    high_watermark:
+                      type: integer
+                      description: The partition's high watermark; `null` when the owner did not report.
+                    ack_frontier:
+                      type: integer
+                      description: The parent's consumer ack frontier on this partition; `null` when unknown.
+                    state:
+                      type: string
+                      description: This partition's link state.
+                    last_success_at:
+                      type: string
+                      description: When the remote last accepted a chunk from this partition.
+                    blocked_at:
+                      type: object
+                      description: The record this partition's cursor is stuck on, if any.
     Message:
       type: object
       description: 'One message. A batch consume answers `{"messages": [...]}` with one of these per message.'
@@ -2025,7 +3069,7 @@ components:
       properties:
         messages:
           type: array
-          description: 1 to 100 messages, stored in this order.
+          description: 1 to 1,000 messages (unreleased; 1 to 100 in v3.1.0), stored in this order.
           items:
             type: object
             required: [payload]
@@ -2051,6 +3095,303 @@ components:
                 type: integer
                 minimum: 0
                 description: Pin the message to this partition.
+    PauseRemoteChildRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          description: Why, shown in the listing and the audit line. At most 256 bytes of printable text.
+    ResumeRemoteChildRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        accept_target:
+          type: boolean
+          default: false
+          description: Accept a target topic that was deleted and recreated since the attach (state `target_replaced`), and send to it.
+    SkipRemoteRecordRequest:
+      type: object
+      required: [partition, offset]
+      additionalProperties: false
+      properties:
+        partition:
+          type: integer
+          minimum: 0
+          description: The parent partition of the stuck record.
+        offset:
+          type: integer
+          minimum: 0
+          description: Its offset, as `blocked_at` shows it.
+    RemoteLimits:
+      type: object
+      additionalProperties: false
+      description: A remote's limits. Each applies per node and changes live; a field left out keeps its value (its default on a create).
+      properties:
+        max_in_flight:
+          type: integer
+          minimum: 1
+          maximum: 256
+          default: 16
+          description: Requests to the remote in flight at once on each node, shared by every cursor that sends to it.
+        request_timeout_ms:
+          type: integer
+          minimum: 5000
+          maximum: 120000
+          default: 30000
+          description: Timeout of one request to the remote.
+        idle_conn_timeout_ms:
+          type: integer
+          minimum: 1000
+          maximum: 300000
+          default: 30000
+          description: How long an idle connection to the remote is kept.
+        conn_max_age_ms:
+          type: integer
+          minimum: 10000
+          maximum: 3600000
+          default: 300000
+          description: How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up.
+        check_interval_ms:
+          type: integer
+          minimum: 10000
+          maximum: 3600000
+          default: 60000
+          description: How often each node re-checks the target of each link, with records to send or not (with 20% jitter).
+        compression:
+          type: string
+          enum: [none, zstd]
+          default: none
+          description: '`zstd` compresses a chunk when that saves at least 10% and the target decodes zstd; otherwise it goes uncompressed.'
+    CreateRemoteRequest:
+      type: object
+      required: [name, url, username, password]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          description: A lowercase letter, then up to 62 lowercase letters, digits or `-`.
+        url:
+          type: string
+          description: The remote cluster's `https` URL, such as its ingress. Stored in a canonical form.
+        username:
+          type: string
+          description: The replicator user on the remote. Give it `produce` on the replicated topics only; an admin credential fails the checks.
+        password:
+          type: string
+          writeOnly: true
+          description: That user's password, 24 to 72 bytes. Write-only.
+        ca_pem:
+          type: string
+          description: 1 to 16 PEM certificates, at most 64 KiB, that alone verify the remote. Left out, the system roots do.
+        limits:
+          $ref: '#/components/schemas/RemoteLimits'
+    UpdateRemoteRequest:
+      type: object
+      additionalProperties: false
+      description: Name at least one field. A new `url`, `username` or `ca_pem` needs `password` too.
+      properties:
+        url:
+          type: string
+          description: A new `https` URL.
+        username:
+          type: string
+          description: A new replicator user.
+        password:
+          type: string
+          writeOnly: true
+          description: A new password, 24 to 72 bytes.
+        ca_pem:
+          type: string
+          description: A new CA bundle, or `""` for the system roots.
+        limits:
+          $ref: '#/components/schemas/RemoteLimits'
+    Remote:
+      type: object
+      description: A remote as the API shows it. It never holds the password.
+      properties:
+        name:
+          type: string
+          description: The remote's name.
+        id:
+          type: string
+          description: An ID minted at create; a remote created again under the same name gets a new one.
+        url:
+          type: string
+          description: The canonical URL.
+        username:
+          type: string
+          description: The replicator user on the remote.
+        password:
+          type: object
+          description: 'What can be said about the password: `fingerprint` (keyed, so it reveals nothing without the cluster secret), `set_at`, `set_by` and `key_version`, the key it is sealed under.'
+        credential_version:
+          type: integer
+          description: Moves on every new password or re-encrypt.
+        ca_pem_sha512:
+          type: string
+          description: SHA-512 of the CA bundle. Absent when the system roots verify the remote.
+        limits:
+          $ref: '#/components/schemas/RemoteLimits'
+        revision:
+          type: integer
+          description: Moves on every change.
+        created_at:
+          type: string
+          description: RFC 3339.
+        created_by:
+          type: string
+          description: The admin who created it.
+        links:
+          type: array
+          items:
+            type: string
+          description: The remote children that use it, as `parent/child`. Absent in a write's answer.
+        nodes:
+          type: array
+          description: What each member's credential cache holds for the remote. Absent with `nodes=false` and in a write's answer.
+          items:
+            type: object
+            properties:
+              node:
+                type: string
+                description: Member ID.
+              state:
+                type: string
+                enum: [ready, stale, credential_unreadable, node_insecure, missing, unknown]
+                description: '`ready`; `stale` while it holds an older credential version than the record; `credential_unreadable` when it cannot open the password (a secret it does not have); `node_insecure` when its posture forbids remotes; `missing` when it holds no entry yet; `unknown` when it did not answer, with `last_error` `unreachable` or `old_release`.'
+              credential_version:
+                type: integer
+                description: The credential version it decrypted.
+              key_version:
+                type: string
+                description: The key that version was sealed under.
+              fingerprint:
+                type: string
+                description: The fingerprint of the password it holds.
+              last_ok_at:
+                type: string
+                description: When it last reached the remote successfully.
+              last_error:
+                type: string
+                description: The class of its last failure toward the remote, `none` when there was none. Never text from the remote.
+              server_cert_not_after:
+                type: string
+                description: When the remote's certificate expires, as the last check saw it; only with `remotes.allowed_hosts` set.
+              rtt_ms:
+                type: integer
+                description: Connect time to the remote; only with `remotes.allowed_hosts` set.
+    RemoteList:
+      type: object
+      properties:
+        allowlist:
+          type: string
+          enum: [set, none]
+          description: Whether the answering node has `remotes.allowed_hosts` set.
+        key:
+          type: object
+          description: The current encryption key's `key_version`, `first_sealed_at` and `age_seconds`. Absent before the first remote.
+        remotes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Remote'
+        lingering:
+          type: array
+          description: Deleted remotes some member still holds, with the members `holding` them and the ones `not_answering`.
+          items:
+            type: object
+        not_answering:
+          type: array
+          description: Every member that was asked and did not answer, whether or not an answering member still holds a deleted remote. Such a member may still hold one.
+          items:
+            type: string
+    TestRemoteRequest:
+      type: object
+      required: [topic]
+      additionalProperties: false
+      properties:
+        topic:
+          type: string
+          description: The topic on the remote.
+        source:
+          type: string
+          description: The parent topic on this cluster, for the schema, source and loop checks.
+    RemoteTestResult:
+      type: object
+      properties:
+        remote:
+          type: string
+          description: The remote.
+        result:
+          type: string
+          enum: [pass, fail]
+          description: '`pass` only when every member passed.'
+        class:
+          type: string
+          description: When `result` is `fail`, the most important failure ([check classes](remote-children.md#check-classes)).
+        checks:
+          type: array
+          description: One report per member that ran the checks.
+          items:
+            type: object
+            properties:
+              node:
+                type: string
+                description: Member ID.
+              result:
+                type: string
+                enum: [pass, fail]
+                description: This member's verdict.
+              class:
+                type: string
+                description: Why it failed.
+              credential_version:
+                type: integer
+                description: The credential version it checked with.
+              target_id:
+                type: string
+                description: The target topic's ID.
+              target_serves_ids:
+                type: boolean
+                description: '`false` for a target whose children listing serves no `parent_id` and no `remote` objects (v3.1.0): it cannot hold a remote child, so loop detection starts once it is upgraded; recreate detection reads the topic id from its describe answer.'
+              rtt_ms:
+                type: integer
+                description: TCP connect time, with `remotes.allowed_hosts` set.
+              lane_capacity_per_s:
+                type: integer
+                description: An estimate of one lane's records per second at that round trip, with `remotes.allowed_hosts` set.
+              server_cert_not_after:
+                type: string
+                description: When the target's certificate expires, with `remotes.allowed_hosts` set.
+              warnings:
+                type: array
+                items:
+                  type: string
+                description: Advisories, such as a certificate that expires within 14 days.
+              posture:
+                type: object
+                description: The member's `security_enabled`, `legacy_cluster_auth`, `raft_tls` and `api_hop_encrypted`.
+    ReencryptResult:
+      type: object
+      properties:
+        key_version:
+          type: string
+          description: The current key.
+        reencrypted:
+          type: array
+          items:
+            type: string
+          description: Remotes moved to the current key.
+        already_current:
+          type: array
+          items:
+            type: string
+          description: Remotes already under it.
+        failed:
+          type: array
+          description: Remotes not moved, each with `name` and `reason`.
+          items:
+            type: object
     ProduceBatchAccepted:
       type: object
       properties:

@@ -47,6 +47,7 @@ func (c *Config) Validate() error {
 	errs = append(errs, fanoutValidationErrors(c.Fanout)...)
 	errs = append(errs, logValidationErrors(c.Log)...)
 	errs = append(errs, securityValidationErrors(c.Security, c.Cluster)...)
+	errs = append(errs, remotesValidationErrors(c.Remotes, c.Security)...)
 	if len(errs) == 0 {
 		return nil
 	}
@@ -72,6 +73,9 @@ func httpValidationErrors(cfg HTTPConfig) []string {
 	}
 	if cfg.MaxConsumeWait < 0 {
 		errs = append(errs, "http.max_consume_wait must be >= 0")
+	}
+	if cfg.MaxBatchBodyBytesInFlight < 0 {
+		errs = append(errs, "http.max_batch_body_bytes_in_flight must be >= 0")
 	}
 	// A long-poll that actually waits max_consume_wait must still fit
 	// inside the server write deadline and the shutdown grace window,
@@ -402,6 +406,10 @@ func securityValidationErrors(cfg SecurityConfig, cluster ClusterConfig) []strin
 	}
 	return errs
 }
+
+// RaftServesBeyondLoopback reports whether this node's Raft port can be
+// reached from other hosts (see raftServesBeyondLoopback).
+func (c ClusterConfig) RaftServesBeyondLoopback() bool { return raftServesBeyondLoopback(c) }
 
 // raftServesBeyondLoopback reports whether a node would serve Raft on an
 // address processes on other hosts can reach: its bind address

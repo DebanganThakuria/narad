@@ -109,7 +109,7 @@ Content-Length: 0
 
 **New in v3.1.0.**
 
-A batch sends up to 100 messages in one request, and they share one write to disk:
+A batch sends up to 100 messages in one request (1,000 from the next release, unreleased), and they share one write to disk:
 
 ```sh title="Produce two messages in one request"
 curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/produce/batch" \
@@ -138,6 +138,7 @@ The `202` makes the same promise as a single produce, for every message in the b
 - **Ambiguous failures cover the whole batch.** After a timeout or a `5xx`, some or all of the batch may have been accepted, so a retry can duplicate part of it.
 - **Order.** Messages that share a key reach their partition in batch order in normal operation. That is how it usually behaves, not a guarantee.
 - **Limits.** More than 100 messages, or a `key` or `partition` in the query string, gets [`400`](../reference/status-codes.md#status-400). The whole body counts against the 1 MiB cap.
+- **Larger and compressed batches (unreleased).** A node on master takes up to 1,000 messages in a body of up to 16 MiB, with each message's decoded payload at most 1 MiB, the single-produce cap, so anything a single produce accepts fits in a batch. A larger payload gets [`413`](../reference/status-codes.md#status-413) for the whole batch (`message 3: message too large`), and more than 1,000 messages `400`. The body may be sent with `Content-Encoding: zstd` or `gzip`, decoded under the same cap; another encoding gets [`415`](../reference/status-codes.md#status-415). A body over 1 MiB first takes its share of the node's budget for large bodies, `http.max_batch_body_bytes_in_flight` (256 MiB by default), and gets [`503`](../reference/status-codes.md#status-503) with `Retry-After: 1` while it is full; retry it. Bodies of 1 MiB or less never touch it. A v3.1.0 node refuses all of these, so keep to 100 messages, 1 MiB and no compression while a client can reach one. Larger batches roll the write-ahead log's segments more often, so the case where a failed batch still delivers its leading messages comes up a little more often; a retry duplicates, and nothing is lost.
 - **Speed.** A batch waits for one disk sync however many messages it carries. Measured at the write-ahead log on macOS with one caller, that came to about 51 µs per message in batches of 100 and 0.5 ms per message in batches of 10, against about 4.7 ms for a single produce. For a single message, a plain produce is cheaper.
 - **Older nodes.** A node on v3.0.1 or earlier answers [`404`](../reference/status-codes.md#status-404) to a batch. Keep single produces for as long as a client can reach such a node.
 

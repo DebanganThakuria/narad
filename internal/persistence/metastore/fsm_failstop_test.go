@@ -181,14 +181,15 @@ func TestEveryKnownEntryTypeReachesItsHandler(t *testing.T) {
 	for op, want := range map[opCode]uint32{
 		opCreateTopicWith: 23, opUpdateTopicIf: 24, opDeleteTopicIf: 25, opPutSchemaIf: 26, opAttachChildIf: 27,
 		opDetachChildIf: 28, opAssignPartitionIfAbsent: 29, opPruneAssignment: 30, opMarkMemberDeadIf: 31,
-		opDeleteUserReleaseTopics: 32,
+		opDeleteUserReleaseTopics: 32, opAttachRemoteChild: 33, opSetRemoteChildState: 34, opPutRemote: 35,
+		opUpdateRemote: 36, opDeleteRemote: 37,
 	} {
 		if uint32(op) != want || entryTypeNames[op] == "" {
 			t.Fatalf("entry type %q is %d, want %d with a name for its log lines", entryTypeNames[op], op, want)
 		}
 	}
-	if MaxEntryType != 32 {
-		t.Fatalf("MaxEntryType = %d, want 32", MaxEntryType)
+	if MaxEntryType != 37 {
+		t.Fatalf("MaxEntryType = %d, want 37", MaxEntryType)
 	}
 	f := newTestFSM(t)
 	for et := uint32(1); et <= MaxEntryType; et++ {

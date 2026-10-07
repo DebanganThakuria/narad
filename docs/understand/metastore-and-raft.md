@@ -146,6 +146,22 @@ This release adds ten entry types, 23 to 32. Each one carries what its write was
 
 The topic manager on the leader asks before each write whether every member applies the type. While one does not, it proposes the entry every release applies and the leader-side checks are all the protection (the name lock, the leader barrier and the owner re-check); it logs `metastore: not using a new raft entry type yet; proposing the entries every member applies` at info, at most once a minute per type, with the member holding it back. The first time the leader uses each type it logs `metastore: every member applies raft entry type <n>; using <name>` at info. That line marks the first use, not the rollback boundary, which comes earlier: once every member has reported this release, a rollback is unsupported even if no such line was logged ([above](#entry-types)). When the state machine refuses a write because the topic changed, the manager reads the topic again, checks the request again and retries once; a second refusal answers `409` (`topic changed since it was read`).
 
+### Remote entry types (unreleased) {#remote-entry-types}
+
+**Unreleased:** in master, not in v3.1.0.
+
+The next release adds five entry types, 33 to 37, all for [remote replication](remote-children.md), under the same rule: the leader proposes one only once every member reports a release that applies it. A remote write has no older entry to fall back to, so until then it is refused with `412`, naming the member that holds the type back; nothing is written another way.
+
+| Type | Name in the logs | What it does |
+|---|---|---|
+| 33 | remote child attach | Creates a remote child's stub and links it to its parent in one transaction, only if the parent is still the incarnation the checks ran against, the parent's retention is at least 24 hours (or forever), it has fewer than 16 remote children, the remote still exists, and no other remote child sends to the same topic through the same remote (the leader also refuses one through another remote that reaches the same host and port). |
+| 34 | remote child state change | Pauses, resumes or records a skip on a remote child, only while its attach epoch is the one the change was checked against. |
+| 35 | remote create | Stores a remote with its sealed credential; the cluster's first create also stores the per-cluster salt. |
+| 36 | remote change | Applies a field-scoped change, a new sealed credential, or a re-encrypt, only if the remote still matches what the credential was sealed against. |
+| 37 | remote delete | Deletes a remote, refused while remote children name it unless forced. |
+
+The remotes live in their own `remotes` bucket of `fsm.db`. A release without these types stops applying at the first one, and refuses at startup a database that has applied one (`written by a newer Narad release`): `fsm_meta` keeps the newest type applied, so deleting every remote afterwards does not make a rollback possible. [Manage remotes](../operate/remotes.md#upgrade) has the upgrade and rollback steps.
+
 A Raft server with no member record holds every new type back until it registers. If it never will (a joiner that crashed or was replaced), remove it with `narad cluster members forget <id>` ([Troubleshooting](../operate/troubleshooting.md#raft-server-no-member-record)).
 
 ## Leader and controller {#controller}
@@ -174,7 +190,7 @@ The first seconds of a cluster need care. A partition placed on the only member 
 
 | Thing | Value |
 |---|---|
-| FSM store | bbolt (`fsm.db`), buckets: `topics`, `schemas`, `assignments`, `members`, `users`, `removed_members`, and `fsm_meta` (applied index, the transaction that wrote it, newest entry type applied) |
+| FSM store | bbolt (`fsm.db`), buckets: `topics`, `schemas`, `assignments`, `members`, `users`, `removed_members`, `remotes` (unreleased), and `fsm_meta` (applied index, the transaction that wrote it, newest entry type applied) |
 | Raft log store | boltdb (`raft.db`); snapshots: file store, **2 retained** |
 | Snapshot copy | `fsm.db.snapshot-<random>` beside `fsm.db`, deleted once Raft has written its snapshot; a restore streams into `fsm.db.restore` ([Snapshots](#snapshots)) |
 | Heartbeat / dead marking | every 5s / after 30s silence |
@@ -182,7 +198,7 @@ The first seconds of a cluster need care. A partition placed on the only member 
 | `Barrier` timeout | 5s |
 | Failed metastore write | retried 100 ms doubling to 5 s, for up to 30 s, then the node stops ([When a node stops applying](#fail-stop)) |
 | New Raft entry type | proposed only once every Raft server and member record reports a release that applies it ([Raft entry types](#entry-types)) |
-| Entry types added by this release | 23 to 32 ([the list](#new-entry-types)); the leader logs the first use of each at info |
+| Entry types added by this release | 23 to 32 ([the list](#new-entry-types)); the leader logs the first use of each at info. Unreleased: 33 to 37 ([remote entry types](#remote-entry-types)) |
 | Orphan assignment row prune | on the leader, when it takes over and every 6th reconcile tick (about a minute) |
 | Joiner older than every member | refused with `409`, code `older_release`; the leader logs it at error at most once a minute per joiner |
 | Startup reconcile wait for caught-up | up to 60s, then the destructive sweep is skipped rather than rushed |

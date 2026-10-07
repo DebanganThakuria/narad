@@ -45,7 +45,7 @@ var (
 
 // dataBuckets are the buckets that hold metadata, as opposed to
 // fsm_meta's bookkeeping.
-var dataBuckets = [][]byte{bucketTopics, bucketSchemas, bucketAssignments, bucketMembers, bucketUsers, bucketRemovedMembers}
+var dataBuckets = [][]byte{bucketTopics, bucketSchemas, bucketAssignments, bucketMembers, bucketUsers, bucketRemovedMembers, bucketRemotes}
 
 // fsmMeta is what a database says about itself.
 type fsmMeta struct {

@@ -132,6 +132,8 @@ Date: Mon, 28 Sep 2026 19:18:45 GMT
 | Limit | Default | Over the limit |
 |---|---|---|
 | Request body | 1 MiB (1,048,576 bytes) | [`413`](../reference/status-codes.md#status-413) |
+| Batch produce body (unreleased) | 16 MiB, each payload at most 1 MiB | [`413`](../reference/status-codes.md#status-413) |
+| Batch produce bodies over 1 MiB being read at once, per node (unreleased) | 256 MiB, `http.max_batch_body_bytes_in_flight` | [`503`](../reference/status-codes.md#status-503) with `Retry-After: 1` |
 | Request headers | 64 KiB, `http.max_header_bytes` | `431`, with a plain-text body from Go's HTTP server |
 | Concurrent consume requests per identity, per node | 1024, `http.max_consume_in_flight_per_identity` | [`429`](../reference/status-codes.md#status-429) |
 | Concurrent produce requests per identity, per node (v3.1.0) | off, `http.max_produce_in_flight_per_identity` | [`429`](../reference/status-codes.md#status-429) |

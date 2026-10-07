@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"regexp"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -14,26 +13,11 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
 
-// topicNamePattern is the set of allowed topic names. Restricting to a
-// single path-safe segment is load-bearing: the name becomes a directory
-// under dataDir/topics, so "/" would nest (and the startup orphan sweep
-// would delete the nested dirs), ".." would resolve the topic dir to the
-// data dir itself, and "." to the topics root — either of which would
-// make DeleteTopic/PurgeTopic os.RemoveAll far more than one topic.
-var topicNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,255}$`)
-
 // validateTopicName rejects names that are unsafe as on-disk directory
-// names. "." and ".." match the allowed character set but are path
-// traversals, so they are rejected explicitly.
+// names (see topic.ValidateName, which holds the rule).
 func validateTopicName(name string) error {
-	if name == "" {
-		return fmt.Errorf("%w: name required", ErrInvalid)
-	}
-	if name == "." || name == ".." {
-		return fmt.Errorf("%w: topic name must not be %q", ErrInvalid, name)
-	}
-	if !topicNamePattern.MatchString(name) {
-		return fmt.Errorf("%w: topic name must match %s", ErrInvalid, topicNamePattern)
+	if err := topic.ValidateName(name); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 	return nil
 }

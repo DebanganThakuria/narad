@@ -116,3 +116,45 @@ func TestRetentionFloor_CreateAndUpdateReject(t *testing.T) {
 		t.Fatalf("UpdateTopicRetention(2h) error = %v", err)
 	}
 }
+
+// A shrink below the 24h floor of a parent with a remote child is
+// refused before anything is proposed: the FSM refuses it too, but the
+// refused entry would stay in the Raft log for an older release, which
+// has no floor, to apply after a rollback. A retention already below
+// the floor may still grow, and a parent without remote children keeps
+// the ordinary 1h floor.
+func TestRemoteSourceRetentionFloorIsCheckedBeforeProposing(t *testing.T) {
+	ms := newFakeMetastore()
+	manager := newTestManager(t, ms, nil)
+	ctx := context.Background()
+	ms.topics["orders"] = topic.Topic{
+		Name: "orders", Partitions: 1, RetentionMs: 2 * topic.MinRemoteSourceRetentionMs,
+		Role: topic.RoleParent, Children: []string{"orders-to-b", "local"},
+	}
+	ms.topics["orders-to-b"] = topic.Topic{Name: "orders-to-b", Role: topic.RoleChild, Parent: "orders", Remote: &topic.RemoteLink{Name: "b", Topic: "orders"}}
+	ms.topics["local"] = topic.Topic{Name: "local", Partitions: 1, Role: topic.RoleChild, Parent: "orders"}
+	proposals := 0
+	ms.updateTopicHook = func() { proposals++ }
+
+	_, err := manager.UpdateTopicRetention(ctx, "orders", topic.MinRemoteSourceRetentionMs-1)
+	if !errors.Is(err, errs.ErrRemoteRetentionFloor) || proposals != 0 {
+		t.Fatalf("shrink below the floor: err=%v proposals=%d, want ErrRemoteRetentionFloor and nothing proposed", err, proposals)
+	}
+	if _, err := manager.UpdateTopicRetention(ctx, "orders", topic.MinRemoteSourceRetentionMs); err != nil || proposals != 1 {
+		t.Fatalf("shrink to the floor: err=%v proposals=%d", err, proposals)
+	}
+
+	// Already below the floor (set before the attach): growing is fine.
+	below := ms.topics["orders"]
+	below.RetentionMs = 2 * topic.MinRetentionMs
+	ms.topics["orders"] = below
+	if _, err := manager.UpdateTopicRetention(ctx, "orders", 3*topic.MinRetentionMs); err != nil {
+		t.Fatalf("growing a retention under the floor: %v", err)
+	}
+
+	// Without a remote child the ordinary floor is all that applies.
+	delete(ms.topics, "orders-to-b")
+	if _, err := manager.UpdateTopicRetention(ctx, "orders", topic.MinRetentionMs); err != nil {
+		t.Fatalf("a parent with only local children: %v", err)
+	}
+}

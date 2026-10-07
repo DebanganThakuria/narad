@@ -21,7 +21,7 @@ It produces 10,000 messages of 256 bytes from 8 workers, then consumes and acks 
 | 3 nodes, 4.5 vCPU each (13.5 vCPU in total) | 50,000 messages/s sustained through produce, consume and ack; about 3,700 messages/s per vCPU | Every produce synced to disk before its `202`, one copy of each partition, zstd compression on. The run ended because the load generator saturated, so this is a floor, not a ceiling. |
 | 1 node in Docker, 2 CPUs and 2 GB, October 2026 (master, shortly before **v3.1.0**) | 10,454 messages/s produced (p50 1.5 ms, p99 2.5 ms), then 9,239 messages/s consumed and acked; 50,000 messages of 256 bytes | The median of three runs on a laptop; an August 2026 build measured 5,597 and 8,567 on the same test. The same test of five other brokers on the same resources is in [Compare Narad with other brokers](../get-started/compare.md#same-compute-measured-ourselves). |
 
-Syncing to disk before answering costs throughput; that is the price of what a [`202` promises](../understand/delivery-contract.md#what-202-means). Batch produce (**v3.1.0**) shares one sync across up to 100 messages; see [Produce a batch](http-api.md#produce-batch).
+Syncing to disk before answering costs throughput; that is the price of what a [`202` promises](../understand/delivery-contract.md#what-202-means). Batch produce (**v3.1.0**) shares one sync across up to 100 messages (1,000, unreleased); see [Produce a batch](http-api.md#produce-batch).
 
 ## Disk sizing {#disk-sizing}
 

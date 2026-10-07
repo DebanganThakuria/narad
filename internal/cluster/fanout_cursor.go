@@ -114,12 +114,26 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 		}
 	}
 
+	var remoteState *remoteCursor
+	if key.remote {
+		var forget func()
+		remoteState, forget = r.registerRemoteCursor(key)
+		defer forget()
+	}
+
 	r.logger.Info("fanout cursor started",
 		"parent", key.parent, "partition", key.partition, "child", key.child,
-		"from_offset", next, "delay_ms", delayMs)
+		"from_offset", next, "delay_ms", delayMs, "remote", key.remote)
 
 	for ctx.Err() == nil {
-		batch, batchBytes, newNext, hwm, dropped, blockedUntil, err := r.readBatch(ctx, key, next, delayMs)
+		maxRecords, maxBytes := r.cfg.MaxBatchRecords, r.cfg.MaxBatchBytes
+		if key.remote {
+			var ok bool
+			if maxRecords, maxBytes, ok = r.remoteBeforeRead(ctx, key, remoteState, next); !ok {
+				return
+			}
+		}
+		batch, batchBytes, newNext, hwm, dropped, blockedUntil, err := r.readBatch(ctx, key, next, delayMs, maxRecords, maxBytes)
 		if err != nil {
 			if !r.cursorReadRetryable(key, err) {
 				return
@@ -138,15 +152,20 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 			// a dropped/skipped range; persist so a restart doesn't
 			// re-count the same loss.
 			if newNext != next {
+				from := next
 				next = newNext
 				if !r.persistCursor(key, partitionDir, next) {
 					return
 				}
 				if dropped > 0 {
-					r.recordDropped(key, dropped)
+					r.recordDropped(ctx, key, dropped, from, next)
 				}
 			}
 			r.recordLag(key, hwm-next)
+			if key.remote {
+				r.remoteIdle(ctx, key, remoteState)
+				r.remoteAfterCommit(ctx, key, remoteState, next, hwm)
+			}
 			// Blocked on a record that is not due yet: nothing newer
 			// can be due either, so sleep until the head's due time
 			// (capped so lag gauges and metadata stay fresh; ctx
@@ -162,16 +181,24 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 			continue
 		}
 
-		if !r.commitBatch(ctx, key, batch) {
+		switch r.commitSlab(ctx, key, batch) {
+		case commitStopped:
 			return // stopped mid-commit; the cursor stays at next
+		case commitReread:
+			// A remote lane could not hold its records across a wait: read
+			// the slab again from the unadvanced cursor. The cursor keeps
+			// what the target already accepted of it, so only a request
+			// cut off in flight is sent again (duplicates, never loss).
+			continue
 		}
 
+		from := next
 		next = newNext
 		if !r.persistCursor(key, partitionDir, next) {
 			return
 		}
 		if dropped > 0 {
-			r.recordDropped(key, dropped)
+			r.recordDropped(ctx, key, dropped, from, next)
 		}
 		if r.metrics != nil {
 			r.metrics.FanoutCommittedTotal.WithLabelValues(key.parent, key.child).Add(float64(len(batch)))
@@ -179,7 +206,26 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 			r.metrics.FanoutBatchBytes.Observe(float64(batchBytes))
 		}
 		r.recordLag(key, hwm-next)
+		if key.remote {
+			r.remoteAfterCommit(ctx, key, remoteState, next, hwm)
+		}
 	}
+}
+
+// remoteAfterCommit refreshes a remote cursor's recovery point once it
+// advanced (or found nothing to send): 0 when it reached the high
+// watermark, else the age of the next record it has yet to send.
+func (r *FanoutRunner) remoteAfterCommit(ctx context.Context, key fanoutCursorKey, cur *remoteCursor, next, hwm int64) {
+	if hwm > next {
+		r.refreshRemoteLag(ctx, key, cur, next, nil)
+	} else {
+		var retention int64
+		if parent, err := r.store.GetTopic(ctx, key.parent); err == nil {
+			retention = parent.RetentionMs
+		}
+		cur.setLag(0, retention)
+	}
+	r.publishRemoteState(cur)
 }
 
 // cursorLostByMove reports whether the partition directory was installed
@@ -206,11 +252,11 @@ func cursorLostByMove(partitionDir string, key fanoutCursorKey) bool {
 // the parent HWM observed, how many offsets were lost (aged out or
 // unreadable), and — when the read stopped at an undue record — that
 // record's commit time.
-func (r *FanoutRunner) readBatch(ctx context.Context, key fanoutCursorKey, next, delayMs int64) ([]topic.KeyedRecord, int64, int64, int64, int64, int64, error) {
+func (r *FanoutRunner) readBatch(ctx context.Context, key fanoutCursorKey, next, delayMs int64, maxRecords int, maxBytes int64) ([]topic.KeyedRecord, int64, int64, int64, int64, int64, error) {
 	opts := topic.FanoutReadOpts{
 		FromOffset: next,
-		MaxRecords: r.cfg.MaxBatchRecords,
-		MaxBytes:   r.cfg.MaxBatchBytes,
+		MaxRecords: maxRecords,
+		MaxBytes:   maxBytes,
 		Wait:       defaultFanoutLongPollWait,
 	}
 	if delayMs > 0 {
@@ -234,15 +280,15 @@ func (r *FanoutRunner) readBatch(ctx context.Context, key fanoutCursorKey, next,
 
 	if len(records) > 0 && blockedUntil == 0 && r.cfg.Linger > 0 {
 		deadline := time.Now().Add(r.cfg.Linger)
-		for ctx.Err() == nil && len(records) < r.cfg.MaxBatchRecords && bytes < r.cfg.MaxBatchBytes {
+		for ctx.Err() == nil && len(records) < maxRecords && bytes < maxBytes {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
 				break
 			}
 			moreOpts := topic.FanoutReadOpts{
 				FromOffset: cursor,
-				MaxRecords: r.cfg.MaxBatchRecords - len(records),
-				MaxBytes:   r.cfg.MaxBatchBytes - bytes,
+				MaxRecords: maxRecords - len(records),
+				MaxBytes:   maxBytes - bytes,
 				Wait:       remaining,
 			}
 			if delayMs > 0 {
@@ -305,25 +351,51 @@ type fanoutBucket struct {
 	records   []ingress.ProduceRecord
 }
 
-// commitBatch commits the slab to the child: one batch per touched
+// commitOutcome is how a slab commit ended.
+type commitOutcome int
+
+const (
+	// commitDone: every record is committed; advance the cursor.
+	commitDone commitOutcome = iota
+	// commitStopped: ctx ended first; the cursor stays where it is.
+	commitStopped
+	// commitReread: a remote child could not hold the slab's records
+	// across a failure (the per-node held budget was full); read the slab
+	// again from the unadvanced cursor.
+	commitReread
+)
+
+// commitBatch is commitSlab for callers that only need to know whether
+// every record was committed.
+func (r *FanoutRunner) commitBatch(ctx context.Context, key fanoutCursorKey, batch []topic.KeyedRecord) bool {
+	return r.commitSlab(ctx, key, batch) == commitDone
+}
+
+// commitSlab commits the slab to the child: one batch per touched
 // child partition, the partitions concurrently. A partition whose
 // commit fails (after commitBucket's quick retries) is retried on its
 // own after defaultFanoutRetryBackoff, until it commits. The partitions
 // that already committed are never sent again, and the retry works
 // from the records in hand rather than a re-read: a re-read from the
 // unadvanced cursor can come back longer (linger top-up refills it), so
-// it would not line up with what already committed. Returns true once
-// every record is committed, false only if ctx ended first; the cursor
-// never advances past an uncommitted record.
-func (r *FanoutRunner) commitBatch(ctx context.Context, key fanoutCursorKey, batch []topic.KeyedRecord) bool {
+// it would not line up with what already committed. A remote child's
+// slab goes to its target instead (see fanout_remote.go). Returns
+// commitDone once every record is committed, commitStopped only if ctx
+// ended first, and commitReread for a remote slab that must be read
+// again; the cursor never advances past an uncommitted record.
+func (r *FanoutRunner) commitSlab(ctx context.Context, key fanoutCursorKey, batch []topic.KeyedRecord) commitOutcome {
 	pending := batch
 	for {
-		pending = r.commitBatchOnce(ctx, key, pending)
+		var reread bool
+		pending, reread = r.commitBatchOnce(ctx, key, pending)
+		if reread {
+			return commitReread
+		}
 		if len(pending) == 0 {
-			return true
+			return commitDone
 		}
 		if !sleepCtx(ctx, defaultFanoutRetryBackoff) {
-			return false
+			return commitStopped
 		}
 	}
 }
@@ -331,27 +403,35 @@ func (r *FanoutRunner) commitBatch(ctx context.Context, key fanoutCursorKey, bat
 // commitBatchOnce makes one pass over records: re-validate the link,
 // bucket by child partition under the child's current partition count,
 // and commit every bucket. Returns the records whose partition did not
-// commit, in slab order (nil when all did).
-func (r *FanoutRunner) commitBatchOnce(ctx context.Context, key fanoutCursorKey, records []topic.KeyedRecord) []topic.KeyedRecord {
+// commit, in slab order (nil when all did). A remote child's records go
+// to its target; reread reports a slab that must be read again.
+func (r *FanoutRunner) commitBatchOnce(ctx context.Context, key fanoutCursorKey, records []topic.KeyedRecord) (pending []topic.KeyedRecord, reread bool) {
+	// The version is read before the record, so a change applied between
+	// the two reads leaves the record older than its version, never the
+	// other way round: a remote slab then re-reads its stub at once.
+	version := r.store.TopicVersion(key.child)
 	child, err := r.store.GetTopic(ctx, key.child)
 	if err != nil || !child.IsChild() || child.Parent != key.parent || child.AttachEpoch != key.epoch {
 		// The link dissolved (or the child is gone) mid-batch: commit
 		// nothing and let the reconciler stop this cursor.
-		return records
+		return records, false
+	}
+	if child.Remote != nil {
+		return r.sender().commit(ctx, key, child, version, records)
 	}
 	keepIndex, ok := r.keylessKeepsIndex(ctx, key, records, child.Partitions)
 	if !ok {
-		return records
+		return records, false
 	}
 	buckets, picks, ok := r.bucketByChildPartition(key, records, child.Partitions, keepIndex)
 	if !ok {
-		return records
+		return records, false
 	}
 	failed := r.commitBuckets(ctx, key, buckets, child.Partitions)
 	if failed == nil {
-		return nil
+		return nil, false
 	}
-	return pendingRecords(records, picks, failed)
+	return pendingRecords(records, picks, failed), false
 }
 
 // keylessKeepsIndex reports whether the keyless records of this slab
@@ -624,9 +704,25 @@ func (r *FanoutRunner) cursorReadError(key fanoutCursorKey, err error) {
 		"parent", key.parent, "partition", key.partition, "child", key.child, "err", err)
 }
 
-func (r *FanoutRunner) recordDropped(key fanoutCursorKey, dropped int64) {
-	r.logger.Warn("fanout: child lost records (drop-behind or unreadable)",
-		"parent", key.parent, "partition", key.partition, "child", key.child, "dropped", dropped)
+// recordDropped counts and logs records a cursor passed without
+// delivering them (aged out of the parent, or unreadable), between the
+// offsets from and to. A remote child's are lost for the other cluster,
+// which has no other copy: that is logged at error level with the remote.
+func (r *FanoutRunner) recordDropped(ctx context.Context, key fanoutCursorKey, dropped, from, to int64) {
+	attrs := []any{
+		"parent", key.parent, "partition", key.partition, "child", key.child,
+		"dropped", dropped, "from_offset", from, "to_offset", to,
+	}
+	if key.remote {
+		if r.store != nil {
+			if stub, err := r.store.GetTopic(ctx, key.child); err == nil && stub.Remote != nil {
+				attrs = append(attrs, "remote", stub.Remote.Name)
+			}
+		}
+		r.logger.Error("fanout: remote child lost records the remote never received (drop-behind: they aged out of the parent before the link sent them)", attrs...)
+	} else {
+		r.logger.Warn("fanout: child lost records (drop-behind or unreadable)", attrs...)
+	}
 	if r.metrics != nil {
 		r.metrics.FanoutChildDroppedMessages.WithLabelValues(key.parent, key.child).Add(float64(dropped))
 	}

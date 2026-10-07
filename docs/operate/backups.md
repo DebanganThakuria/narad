@@ -165,6 +165,12 @@ Restore when a node's volume is lost or damaged. These steps replace the volume 
 
 The node rejoins with the metadata it had at the snapshot, and the Raft leader brings it up to date before it reports ready. Outside Kubernetes, the same restore is: stop the node, replace its data directory with the snapshot's contents, and start it.
 
+## Copy a topic to another cluster {#remote-children}
+
+**Unreleased:** in master, not in v3.1.0.
+
+A replica child and volume snapshots stay inside one cluster. A [remote child](../reference/glossary.md#remote-child) keeps an asynchronous copy of a topic on another Narad cluster, in another region if you like, which survives the loss of this whole cluster. It trails the parent by the link's lag, and its copy is consumed on the other cluster. [Set up disaster recovery](playbooks/disaster-recovery.md) shows the setup, the retention it needs and what to watch.
+
 ## Next steps
 
 - [Fan out and delay messages](../build/fanout-and-delay.md): children for other purposes, such as delayed retries.

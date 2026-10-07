@@ -18,6 +18,11 @@
 //     restarted before any Raft snapshot skips the entries its metadata
 //     database already holds instead of applying them again, so an
 //     attach the cluster refused stays refused on it.
+//   - TestRemoteChildOffloadAcrossClusters: two clusters, a remote child
+//     shipping one's topic to the other's through a TLS front: every
+//     accepted record lands at least once with its key on one partition,
+//     the listing reaches lag 0, a delete is refused while records are
+//     unshipped and goes ahead forced.
 //
 // The scenarios take minutes and spawn processes, so they are behind the
 // "cluster" build tag and do not run with a plain go test ./...:

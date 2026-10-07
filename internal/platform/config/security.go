@@ -30,6 +30,18 @@ type SecurityConfig struct {
 	// TLS session, in both directions. Env: NARAD_CLUSTER_SECRET.
 	ClusterSecret string `json:"-"`
 
+	// ClusterSecretGenerated is true when ClusterSecret was generated
+	// for the life of this process (a secured node with no peers and no
+	// NARAD_CLUSTER_SECRET). Such a secret serves node RPC only: it is
+	// gone after a restart, so nothing durable (a remote password) may
+	// be sealed under it. Never set from a file or the environment.
+	ClusterSecretGenerated bool `json:"-"`
+
+	// ClusterSecretPrevious opens remote passwords sealed under the
+	// previous cluster secret during a rotation. Never used for cluster
+	// RPC. Env only: NARAD_CLUSTER_SECRET_PREVIOUS.
+	ClusterSecretPrevious string `json:"-"`
+
 	// AllowLegacyClusterAuth is the one-release compatibility path for
 	// a rolling upgrade from nodes that proved the cluster secret with
 	// a fixed (replayable, one-way) token. While true, this node also

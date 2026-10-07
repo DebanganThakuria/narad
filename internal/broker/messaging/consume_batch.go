@@ -42,6 +42,9 @@ func (e *Engine) ConsumeBatch(ctx context.Context, topicName string, opts Consum
 	if err != nil {
 		return dst, nil, err
 	}
+	if err := remoteChildGuard(t); err != nil {
+		return dst, nil, err
+	}
 	scan, err := e.localProbePartitions(topicName, t.Partitions, opts.Partition)
 	if err != nil {
 		return dst, nil, err

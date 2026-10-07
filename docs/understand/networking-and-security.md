@@ -14,6 +14,7 @@ Learn how Narad nodes talk to clients and to each other over HTTP, QUIC and Raft
     - Raft runs on its own TCP port (7943) and needs its own mutual TLS, because Raft has no authentication of its own.
     - State-changing requests must carry an API content type or an `X-Narad-Client` header, or they get `415`, and so must a batch consume, or it gets `400`: this blocks cross-site requests from a browser.
     - The cluster network is assumed private. Fence 7942/udp and 7943/tcp with a network policy.
+    - **Unreleased:** a node that runs a remote child's cursor is an HTTPS client of another Narad cluster, the only traffic Narad starts toward anything outside its cluster ([Outbound plane](#outbound)).
 
 Narad has two planes, each on its own port: clients speak **HTTP** to any node, and nodes speak a compact **RPC protocol over QUIC** to each other. Raft has its own TCP transport with mutual TLS.
 
@@ -34,8 +35,10 @@ The listener is bounded:
 - A cap on open connections (`http.max_connections`, through `netutil.LimitListener`). Extra clients wait in the accept backlog rather than each getting a goroutine.
 - A per-identity cap on concurrent consume requests (`http.max_consume_in_flight_per_identity`, `429` beyond it), since every long-poll pins a goroutine and, on a node that does not own the partition, a forwarded RPC stream slot for up to `max_consume_wait`. A batch consume of N counts as N, clamped to the cap.
 - An optional cap of the same kind on produce (`http.max_produce_in_flight_per_identity`, from v3.1.0, off by default). A batch produce counts as one from before its body is read, so the cap bounds the batch bodies being read and decoded too, and as its message count, clamped to the cap, once its body is decoded. It has no default because a produce holds its goroutine only until its write-ahead log fsync, not for a long-poll's wait.
-- A batch body is decoded one element at a time and refused at the 101st message or receipt handle, and a JSON body with a second value after the first is refused after one token of it. So decoding a request never costs more than its bound: before, a 1 MiB batch body of `[0,0,...]` allocated about 280 times its size before the count check refused it.
+- A batch body is decoded one element at a time and refused at the 101st message (the 1,001st, unreleased) or receipt handle, and a JSON body with a second value after the first is refused after one token of it. So decoding a request never costs more than its bound: before, a 1 MiB batch body of `[0,0,...]` allocated about 280 times its size before the count check refused it.
 - A request body is not allocated at its declared `Content-Length` before it arrives. Up to 64 KiB is read into one buffer of exactly that size; a larger body starts at 64 KiB and grows fourfold as it fills. So a client that declares 1 MiB and then stalls pins at most 64 KiB, or four times what it actually sent, whichever is larger.
+
+- **Unreleased:** a batch produce body may be up to 16 MiB, and zstd or gzip compressed, decoded under the same cap. A body over 1 MiB takes its share of a node-wide budget (`http.max_batch_body_bytes_in_flight`, 256 MiB by default) before it is read, a megabyte at a time as it grows, and is answered `503` with `Retry-After: 1` when the budget is full, so many large batches at once cannot exhaust a node's memory.
 
 The limits a client sees are listed in [Connect and authenticate](../build/connect.md#limits).
 
@@ -150,9 +153,22 @@ Enforcement lives in the HTTP handlers, ahead of any routing, so a forwarded req
 
 The **root admin** is seeded once, by the leader, from the operator's secret at first startup. Without one, the seeding node generates a password and writes it to a file in its data directory before it proposes the seed, never to the log ([Manage the root user](../operate/users.md#root-admin)).
 
+## Outbound plane {#outbound}
+
+**Unreleased:** in master, not in v3.1.0.
+
+A node that runs a [remote child](../reference/glossary.md#remote-child)'s cursor sends to another Narad cluster: `POST /v1/topics/{t}/produce/batch` with Basic auth, plus the reads its checks make (`GET /v1/topics/{t}`, `GET /v1/topics/{t}/children` and `GET /v1/users`). It is the only traffic Narad starts toward anything outside its own cluster. [Remote replication](remote-children.md) has the whole design; in short:
+
+- **Credentials.** The password is sealed with AES-256-GCM under a key derived from the cluster secret and a per-cluster salt, bound to the remote's name, ID, URL, username and trust anchor, and stored in the metastore. Each node decrypts it once per credential version into a ready `Authorization` value and HTTP client; the send path does no cryptography. [Manage remotes](../operate/remotes.md#accepted-risk) says what that protects and what it does not.
+- **TLS, and where it ends.** `https` only, with verification always on: TLS 1.2 or later, key exchange X25519MLKEM768 or X25519, the remote's CA bundle alone when it has one, else the system roots. TLS from this cluster ends at the target's ingress, and the hop from there to the target's pods carries the Basic header, so it must be encrypted on the target, which this cluster cannot check. `HTTP_PROXY` and `HTTPS_PROXY` are ignored.
+- **The address guard.** The URL's port must be in `remotes.allowed_ports` and its host in `remotes.allowed_hosts` when that is set. Every dial is checked again after DNS resolution, which also defeats DNS rebinding: loopback, link-local, multicast and cloud metadata addresses, in any spelling, are refused unless `remotes.allow_addresses` lists them. Private ranges stay reachable.
+- **Redirects are never followed**, so the `Authorization` header never reaches a `Location` host.
+- **Blind by design.** Answers from a remote reach an admin as a status and a class, never a body, and nothing from the target is logged but its status and class.
+- **Who may point it.** Remotes and remote children are admin only, with security on. The node that takes a write authorizes it and seals any password; the leader checks the gates, runs the checks on every member and proposes through Raft; each write is audited on both. The ingress-to-pod hop on this cluster carries the password in the body of a create or a password change, so those answer `412` unless the node attests that hop is encrypted (`remotes.api_hop_encrypted`).
+
 ## Trust model {#trust-model}
 
-Narad assumes the *cluster network* (the node RPC and Raft ports) is a private network the operator controls. The shared secret and mutual TLS are guards, not a substitute for network policy. The client plane is hardened for untrusted callers: authenticated, authorized, size-capped (1 MiB bodies), and strict about malformed input.
+Narad assumes the *cluster network* (the node RPC and Raft ports) is a private network the operator controls. The shared secret and mutual TLS are guards, not a substitute for network policy. The client plane is hardened for untrusted callers: authenticated, authorized, size-capped (1 MiB bodies; 16 MiB for a batch produce, unreleased), and strict about malformed input.
 
 ## Node RPC wire format {#wire-format}
 
@@ -178,8 +194,14 @@ The full opcode registry (`internal/protocol/node/types.go`; values are stable o
 | 14 | DeleteUser | 30 | TokenRegister |
 | 15 | AttachChild | 31 | TokenNotify |
 | 16 | DetachChild | 32 | AckBatch |
+| | | 33 | NodeStatus |
+| | | 34 | ForgetServer |
+| | | 35 | RemoteWrite (unreleased) |
+| | | 36 | RemoteCheck (unreleased) |
 
 An unknown opcode gets a clean `400` (`unsupported rpc operation`), and so does a trailing field the decoder does not know. That is how mixed versions work during a rolling upgrade: an old node declines what it has not heard of, and the caller sends the request again in a shape the old node understands, and keeps doing so for that node for 2 minutes. An `AckBatch` becomes single acks, a commit batch goes out without its topic ids, a forwarded batch consume asks for one record, and a claim becomes a plain probe.
+
+`RemoteWrite` (a remotes or remote child write, forwarded to the leader with the caller's name and a request ID) and `RemoteCheck` (a member's checks, its credential cache status, or its ingress backlog of one topic) have no older shape. An older node's `400` becomes a `412` (`old_release`), and the [release gate](remote-children.md#gates) keeps both from being needed before every member knows them.
 
 ## Timeouts {#timeouts}
 

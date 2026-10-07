@@ -95,6 +95,38 @@ The leader exports why a decommission or a move cannot progress ([Cluster contro
 | Moves blocked | `sum by (reason) (narad_moves_blocked) > 0`, held for 10 minutes (`for: 10m`) | A partition move cannot finish on its own, and holds one of the 8 move slots until it does or is aborted ([Troubleshooting](troubleshooting.md#moves-blocked)). |
 | Dead marking refused | `max(narad_dead_marking_refused) == 1`, held for 5 minutes (`for: 5m`) | The leader is not hearing heartbeats from most voters although Raft still reaches them: its node RPC plane is likely broken ([Troubleshooting](troubleshooting.md#log-dead-marking-refused)). |
 
+### Remote replication alerts (unreleased) {#remote-alerts}
+
+A cluster with [remote children](../reference/glossary.md#remote-child) adds these, on the [remote replication series](../reference/metrics.md#remote-replication). The link series come from the node that owns each parent partition, so evaluate them across every node; for a disaster-recovery link, evaluate them outside the source cluster's region ([Watch the link](playbooks/disaster-recovery.md#watch)).
+
+| Alert | Expression | What it means |
+|---|---|---|
+| Link stalled | `max by (parent, child, state) (narad_fanout_remote_state{state=~NEEDS_FIX}) == 1`, with `NEEDS_FIX` below | The link holds in a state only a person fixes. Page at once ([Troubleshooting](troubleshooting.md#remote-link-stalled)). |
+| Link not running | `max by (parent, child, state) (narad_fanout_remote_state{state!~HEALTHY}) == 1`, held for 5 minutes (`for: 5m`) | Any other state (`unavailable`, `throttled`, `unknown`) that has not cleared on its own. |
+| Recovery point | `max by (parent, child) (narad_fanout_remote_lag_seconds) > <objective>` | The oldest record not yet on the remote is older than your recovery point objective. |
+| Headroom | `min by (parent, child) (narad_fanout_remote_retention_headroom_seconds) < 4 * 3600` (warn below 12 hours) | The oldest unshipped record ages out of the parent within 4 hours: drop-behind comes next ([Troubleshooting](troubleshooting.md#remote-headroom-low)). |
+| No progress | `(time() - narad_fanout_remote_last_success_timestamp_seconds > 300) and on (instance, parent, child) (sum by (instance, parent, child) (narad_fanout_lag_messages) > 0)` | Nothing from a node reached the remote for 5 minutes although records wait on that node. |
+| Records skipped | `increase(narad_fanout_remote_skipped_records_total[5m]) > 0` | An admin's skip dropped a record: one record not copied. |
+| Credential unreadable | `narad_remote_credential_state{state="credential_unreadable"} == 1` or the same with `node_insecure` | A node cannot use a remote's password ([Troubleshooting](troubleshooting.md#remote-credential-unreadable)). |
+| Credential stale | `max by (remote) (narad_remote_credential_version) != min by (remote) (narad_remote_credential_version)` held for 1 minute | A node still holds an older password than its peers: its Raft replica is behind ([Troubleshooting](troubleshooting.md#remote-credential-unreadable)). |
+| Destination refused | `increase(narad_remote_destination_refused_total[5m]) > 0` | The address guard refused a dial or a redirect: DNS or a URL points where it must not. |
+| Held memory | `narad_remote_held_bytes > 0.8 * <remotes.max_held_bytes>` | Cursors hold most of the node's budget for waiting records; past it they read again from disk. |
+| Password age | `narad_remote_credential_age_seconds > 80 * 86400` | A remote's password is due for [rotation](remotes.md#rotate-password). |
+| Rotation unfinished | `narad_remote_credential_key_current == 0`, held for 1 day | A cluster secret rotation was not finished with `narad remote reencrypt`. |
+| Key age | `narad_remote_key_age_seconds{key="current"} > <rotation period> - 10 * 86400` | The cluster secret is due for rotation within 10 days ([operating condition 3](remotes.md#operating-conditions)). |
+| Key seals | `narad_remote_key_seals{key="current"} > 2^29` | The key is halfway to the 2^30 seals it allows. |
+| Allowlist unset, plaintext Raft | `narad_remotes_allowlist_configured == 0` or `narad_remotes_plaintext_raft == 1` in production | [Operating condition 4](remotes.md#operating-conditions), and Raft TLS on a cluster that holds remotes. |
+| Batch body budget | `rate(narad_http_batch_body_budget_rejections_total[5m]) > 0`, sustained | Large batch produces are turned away with `503`: raise `http.max_batch_body_bytes_in_flight` or send smaller batches. |
+
+The two state selectors, as PromQL regular expressions:
+
+```text
+NEEDS_FIX = "remote_missing|credential_unreadable|node_insecure|destination_refused|auth_failed|forbidden|target_replaced|target_has_remote_children|target_missing|no_batch_produce|redirect_refused|tls_failed|rejected_record|record_too_large"
+HEALTHY   = "running|paused"
+```
+
+`narad_fanout_child_dropped_messages`, in the first table, counts a remote child's drop-behind too. A dashboard of `narad_remote_resent_records_total` (duplicates on the remote), `narad_remote_inflight_wait_seconds` (lanes waiting for a slot: raise `max_in_flight`) and `narad_remote_chunk_bytes_limit` (at the 64 KiB floor for 10 minutes, the path is cutting uploads short) explains most slow links.
+
 What to do when one fires is on the [Troubleshooting](troubleshooting.md) page: [produce latched off](troubleshooting.md#produce-500), [delay child behind](troubleshooting.md#due-lag-stuck), [messages lost to retention](troubleshooting.md#log-frontier-behind-retention), [quarantined copies](troubleshooting.md#quarantined-copies), [pod not ready](troubleshooting.md#node-down). For disk runway, check the retention of the largest topics against [Capacity and disk sizing](../reference/capacity.md#disk-sizing).
 
 `rate(narad_errors_total[5m])`, split by its `component` and `kind` labels, makes a useful catch-all panel beside these alerts.
@@ -114,6 +146,8 @@ Changes to users, topics and cluster membership are logged as audit lines: messa
 | `unknown` | The request ended without a decision the answering node knows: a forward to the leader whose answer never came back (`503`), a `503` from a leader that lost its leadership while committing the change (a later leader may still commit it), or a client that went away mid-change (`499`). The change may have been applied; read the topic to find out. |
 
 `unknown` is never logged as `rejected` or `failed`: a search for the changes that may have happened must include it along with `ok`.
+
+**Unreleased:** remotes and remote children are audited too: `remote.create`, `remote.update`, `remote.delete`, `remote.test`, `remote.reencrypt`, `remote.list` and `remote.get`, and `remote_child.create`, `.pause`, `.resume`, `.accept_target`, `.skip` and `.delete`, refusals included. Each request carries a `request_id`, and the leader writes a second line for every write it proposes, with the same `request_id` and `outcome` `committed` or `refused`, so the two can be joined. No line carries a password, a URL or a username ([Audit lines](remotes.md#audit)).
 
 A `PATCH` that sets several kinds of field applies them one at a time (retention, caps, partitions, then schema) and stops at the first failure, so one that fails part way has already changed the fields before it. Its lines say so: on the node that applied the `PATCH`, the fields applied before the failure are `ok`, and on a node that forwarded it to the leader, which cannot tell how far the leader got, every kind of field before the last is `unknown`. Those lines still carry the failure's `status`, and fields whose outcomes differ go on separate `topic.alter` lines. For example, `{"retention_ms":7200000,"schema":{...}}` with a schema the leader refuses logs `topic.alter fields=retention_ms outcome=ok status=400` and `topic.schema outcome=rejected status=400` when the client called the leader, and the same lines with `outcome=unknown` for `retention_ms` when it called another node.
 

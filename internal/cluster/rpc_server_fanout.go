@@ -14,6 +14,10 @@ import (
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
+// SetFanoutRunner gives the RPC server the node's fan-out runner. Call
+// before serving.
+func (s *RPCServer) SetFanoutRunner(r *FanoutRunner) { s.fanout = r }
+
 func (s *RPCServer) handleAttachChild(payload []byte) nodewire.Response {
 	req, err := nodewire.DecodeChildLinkRequest(payload, nodewire.OpAttachChild)
 	if err != nil {
@@ -38,6 +42,10 @@ func (s *RPCServer) handleDetachChild(payload []byte) nodewire.Response {
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid detach child request: "+err.Error())
 	}
+	// A remote child's delete must run the unshipped check, which only
+	// the remote-aware delete (OpRemoteWrite child.delete) does; the
+	// topic manager refuses a stub's plain detach under the topics'
+	// locks, after the leader barrier.
 	ctx, refusal := s.actorContext(req.Actor)
 	if refusal != nil {
 		return *refusal
@@ -57,5 +65,6 @@ func (s *RPCServer) handleFanoutCursors(payload []byte) nodewire.Response {
 	if err != nil {
 		return s.brokerError("fanout cursors", err)
 	}
+	stats = s.fanout.OverlayRemoteCursorStats(req.Topic, stats)
 	return jsonResponse(http.StatusOK, stats)
 }

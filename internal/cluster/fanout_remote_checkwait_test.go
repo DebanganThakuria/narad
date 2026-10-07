@@ -1,0 +1,528 @@
+package cluster
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	domremote "github.com/debanganthakuria/narad/internal/domain/remote"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/remote/sink"
+)
+
+// A link's target check is single-flight, but a cursor that needs no
+// fresh verdict (the interval check is merely due) must not wait for a
+// check in flight against a slow target: it reads the last verdict and
+// sends. A cursor that does need a fresh one waits for it only as long
+// as its context lives.
+func TestRemoteLinkLanesDoNotWaitOnAnIntervalCheckInFlight(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{partitions: 1}})
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitDelivered(t, rg.src.produce(t, 0, 5, 2, 0), 15*time.Second)
+	rg.waitState(t, 0, topic.RemoteStateRunning, 10*time.Second)
+
+	ctx := context.Background()
+	cur := rg.src.runner.remoteCursorFor("orders", 0, "orders-to-b")
+	if cur == nil {
+		t.Fatal("no remote cursor")
+	}
+	s := rg.src.runner.sender()
+	e, rs, state := s.entry("b")
+	if state != "" {
+		t.Fatalf("lookup state %q", state)
+	}
+	stub, err := rg.src.store.GetTopic(ctx, "orders-to-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A verdict for this entry, gate epoch and target is published.
+	cur.forceTargetCheck()
+	if ok, _, _ := s.checkTarget(ctx, ctx, cur, e, rs, stub); !ok {
+		t.Fatal("the first check stopped sending")
+	}
+
+	// The interval check is due and the target answers slowly.
+	rg.target.faults.slowDelay = 3 * time.Second
+	rg.target.faults.set("slow")
+	defer rg.target.faults.set("")
+	expireInterval := func() {
+		cur.check.mu.Lock()
+		cur.check.nextCheck = time.Time{}
+		cur.check.mu.Unlock()
+	}
+	expireInterval()
+	before := rg.target.faults.listings.Load()
+	inflight := make(chan struct{})
+	go func() {
+		defer close(inflight)
+		s.checkTarget(ctx, ctx, cur, e, rs, stub)
+	}()
+	rigWait(t, "the interval check to reach the target", 10*time.Second, func() bool {
+		return rg.target.faults.listings.Load() > before
+	})
+	expireInterval()
+
+	start := time.Now()
+	ok, _, ran := s.checkTarget(ctx, ctx, cur, e, rs, stub)
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("a lane waited %s on an interval check in flight", took)
+	}
+	if !ok || ran {
+		t.Fatalf("checkTarget = (ok %v, ran %v), want the published verdict (true, false)", ok, ran)
+	}
+
+	// A forced check waits for a fresh verdict, but no longer than its
+	// own context.
+	cur.forceTargetCheck()
+	wctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	start = time.Now()
+	if ok, _, _ := s.checkTarget(ctx, wctx, cur, e, rs, stub); ok {
+		t.Fatal("a forced check whose wait ended reported sending may go on")
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("a forced check waited %s past its context", took)
+	}
+	<-inflight
+}
+
+// A check that errored for a key no check has reached is retried after
+// a short wait, but the retry is the link's, not every lane's: a lane
+// that finds it in flight sends on the last verdict instead of waiting
+// out a target that keeps failing its listing while it takes chunks.
+func TestRemoteLinkLanesDoNotWaitOnTheRetryOfAnErroredCheck(t *testing.T) {
+	limits := domremote.DefaultLimits()
+	limits.RequestTimeoutMs = 1500
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{partitions: 1}, limits: limits})
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitDelivered(t, rg.src.produce(t, 0, 5, 2, 0), 15*time.Second)
+	rg.waitState(t, 0, topic.RemoteStateRunning, 10*time.Second)
+
+	ctx := context.Background()
+	cur := rg.src.runner.remoteCursorFor("orders", 0, "orders-to-b")
+	if cur == nil {
+		t.Fatal("no remote cursor")
+	}
+	s := rg.src.runner.sender()
+	e, rs, state := s.entry("b")
+	if state != "" {
+		t.Fatalf("lookup state %q", state)
+	}
+	stub, err := rg.src.store.GetTopic(ctx, "orders-to-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Every request now outlasts the request timeout, and no check has
+	// reached the target for the current key (as after a restart): the
+	// first check errors.
+	rg.target.faults.slowDelay = 4 * time.Second
+	rg.target.faults.set("slow")
+	defer rg.target.faults.set("")
+	cur.check.mu.Lock()
+	cur.check.checked = checkKey{}
+	cur.check.mu.Unlock()
+	s.checkTarget(ctx, ctx, cur, e, rs, stub)
+
+	// Its retry is due and in flight.
+	cur.check.mu.Lock()
+	cur.check.retryAt = time.Now().Add(-time.Millisecond)
+	cur.check.mu.Unlock()
+	before := rg.target.faults.listings.Load()
+	inflight := make(chan struct{})
+	go func() {
+		defer close(inflight)
+		s.checkTarget(ctx, ctx, cur, e, rs, stub)
+	}()
+	rigWait(t, "the retry check to reach the target", 10*time.Second, func() bool {
+		return rg.target.faults.listings.Load() > before
+	})
+
+	start := time.Now()
+	ok, _, ran := s.checkTarget(ctx, ctx, cur, e, rs, stub)
+	if took := time.Since(start); took > 500*time.Millisecond {
+		t.Fatalf("a lane waited %s on the retry of an errored check", took)
+	}
+	if !ok || ran {
+		t.Fatalf("checkTarget = (ok %v, ran %v), want the published verdict (true, false)", ok, ran)
+	}
+	<-inflight
+}
+
+// A check that errored while the remote's gate was closed is no retry:
+// the reopen check is still owed. When a chunk sent before the close
+// reopens the gate and one lane runs that check, another lane that
+// finds it in flight waits for its verdict instead of sending on the
+// old one, so nothing goes to another cluster behind the remote's name.
+func TestRemoteLinkLanesWaitOnTheReopenCheckOwedAfterAnErroredProbeCheck(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{partitions: 1}})
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitDelivered(t, rg.src.produce(t, 0, 5, 2, 0), 15*time.Second)
+	rg.waitState(t, 0, topic.RemoteStateRunning, 10*time.Second)
+
+	ctx := context.Background()
+	cur := rg.src.runner.remoteCursorFor("orders", 0, "orders-to-b")
+	if cur == nil {
+		t.Fatal("no remote cursor")
+	}
+	s := rg.src.runner.sender()
+	e, rs, state := s.entry("b")
+	if state != "" {
+		t.Fatalf("lookup state %q", state)
+	}
+	stub, err := rg.src.store.GetTopic(ctx, "orders-to-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur.forceTargetCheck()
+	if ok, _, _ := s.checkTarget(ctx, ctx, cur, e, rs, stub); !ok {
+		t.Fatal("the first check stopped sending")
+	}
+
+	// The gate closes, and the check its new epoch owes errors while it
+	// is closed.
+	defer rg.target.faults.set("")
+	rs.gate.Failed(sink.Verdict{Action: sink.ActRetry, State: topic.RemoteStateUnavailable}, true)
+	rg.target.faults.set("reset")
+	if _, _, ran := s.checkTarget(ctx, ctx, cur, e, rs, stub); !ran {
+		t.Fatal("the check owed by the closed gate did not run")
+	}
+	// A chunk sent before the close is accepted: the gate opens at the
+	// same epoch, its check still owed.
+	rs.gate.Succeeded(false)
+
+	// Another cluster now answers the name, slowly. One lane runs the
+	// owed check.
+	rg.target.faults.slowDelay = 1500 * time.Millisecond
+	rg.target.faults.set("otherID")
+	before := rg.target.faults.listings.Load()
+	inflight := make(chan struct{})
+	go func() {
+		defer close(inflight)
+		s.checkTarget(ctx, ctx, cur, e, rs, stub)
+	}()
+	rigWait(t, "the reopen check to reach the target", 10*time.Second, func() bool {
+		return rg.target.faults.listings.Load() > before
+	})
+
+	if ok, _, _ := s.checkTarget(ctx, ctx, cur, e, rs, stub); ok {
+		t.Fatal("a lane went on sending before the reopen check answered from another cluster")
+	}
+	<-inflight
+}
+
+// A target check the target throttles carries its Retry-After to the
+// gate, as a throttled chunk does: a probe answered by it holds the
+// gate for the time the target asked, not a shorter jittered backoff.
+func TestRemoteLinkThrottledCheckHoldsTheGateForTheTargetsRetryAfter(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{partitions: 1}})
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitDelivered(t, rg.src.produce(t, 0, 5, 2, 0), 15*time.Second)
+	rg.waitState(t, 0, topic.RemoteStateRunning, 10*time.Second)
+
+	ctx := context.Background()
+	cur := rg.src.runner.remoteCursorFor("orders", 0, "orders-to-b")
+	if cur == nil {
+		t.Fatal("no remote cursor")
+	}
+	s := rg.src.runner.sender()
+	e, rs, state := s.entry("b")
+	if state != "" {
+		t.Fatalf("lookup state %q", state)
+	}
+	stub, err := rg.src.store.GetTopic(ctx, "orders-to-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer rg.target.faults.set("")
+	rg.target.faults.retryAfter = "5"
+	rg.target.faults.set("throttled")
+	cur.forceTargetCheck()
+	_, res, ran := s.checkTarget(ctx, ctx, cur, e, rs, stub)
+	if !ran {
+		t.Fatal("the forced check did not run")
+	}
+	v, outcome := res.GateVerdict()
+	if outcome != sink.CheckFailed || v.State != topic.RemoteStateThrottled {
+		t.Fatalf("verdict %+v (outcome %v), want a throttled failure", v, outcome)
+	}
+	if v.RetryAfter != 5*time.Second {
+		t.Fatalf("the check's verdict carries Retry-After %s, want the target's 5s", v.RetryAfter)
+	}
+	// Answered as the gate's probe, it holds the gate that long.
+	rs.gateFailed(v, true)
+	time.Sleep(2 * time.Second)
+	if !rs.gate.WouldWait() {
+		t.Fatal("the gate's next probe fell due before the target's Retry-After")
+	}
+}
+
+// The reopen check owed by a closed gate is owed whenever the gate
+// reopens, also while that check is in flight: a check that started
+// while the gate was closed and errors after a chunk sent before the
+// close reopened it is not the open gate's retry, so the next lane
+// checks again before it sends rather than going on the old verdict.
+func TestRemoteLinkReopenCheckIsStillOwedWhenTheGateReopensWhileItErrs(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{partitions: 1}})
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitDelivered(t, rg.src.produce(t, 0, 5, 2, 0), 15*time.Second)
+	rg.waitState(t, 0, topic.RemoteStateRunning, 10*time.Second)
+
+	ctx := context.Background()
+	cur := rg.src.runner.remoteCursorFor("orders", 0, "orders-to-b")
+	if cur == nil {
+		t.Fatal("no remote cursor")
+	}
+	s := rg.src.runner.sender()
+	e, rs, state := s.entry("b")
+	if state != "" {
+		t.Fatalf("lookup state %q", state)
+	}
+	stub, err := rg.src.store.GetTopic(ctx, "orders-to-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur.forceTargetCheck()
+	if ok, _, _ := s.checkTarget(ctx, ctx, cur, e, rs, stub); !ok {
+		t.Fatal("the first check stopped sending")
+	}
+
+	// The gate closes. The check its new epoch owes starts while it is
+	// closed; before the target hangs up on it, a chunk sent before the
+	// close is accepted and the gate opens at the same epoch.
+	defer rg.target.faults.set("")
+	rs.gate.Failed(sink.Verdict{Action: sink.ActRetry, State: topic.RemoteStateUnavailable}, true)
+	reopen := func(batch bool) {
+		if !batch {
+			rs.gate.Succeeded(false)
+		}
+	}
+	rg.target.faults.onReset.Store(&reopen)
+	rg.target.faults.set("reset")
+	s.checkTarget(ctx, ctx, cur, e, rs, stub)
+	rg.target.faults.onReset.Store(nil)
+	if rs.gate.Closed() {
+		t.Fatal("the gate did not reopen during the check")
+	}
+
+	// Another cluster now answers the name. The next lane checks before
+	// it sends.
+	rg.target.faults.set("otherID")
+	if ok, _, _ := s.checkTarget(ctx, ctx, cur, e, rs, stub); ok {
+		t.Fatal("a lane went on sending on the old verdict while the reopen check was owed")
+	}
+}
+
+// A lane that passed the gate just before it closed can run the check
+// the closed gate owes. The gate's probe that finds that check in
+// flight waits for it, and when the remote refuses it as a whole (a
+// throttle, a wrong password) the probe gets that refusal as its own
+// answer: it sends no chunk behind it, so the probe costs the target
+// one refused request, not two.
+func TestRemoteLinkProbeThatWaitedOnARefusedCheckGetsTheRefusal(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{partitions: 1}})
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitDelivered(t, rg.src.produce(t, 0, 5, 2, 0), 15*time.Second)
+	rg.waitState(t, 0, topic.RemoteStateRunning, 10*time.Second)
+
+	ctx := context.Background()
+	cur := rg.src.runner.remoteCursorFor("orders", 0, "orders-to-b")
+	if cur == nil {
+		t.Fatal("no remote cursor")
+	}
+	s := rg.src.runner.sender()
+	e, rs, state := s.entry("b")
+	if state != "" {
+		t.Fatalf("lookup state %q", state)
+	}
+	stub, err := rg.src.store.GetTopic(ctx, "orders-to-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur.forceTargetCheck()
+	if ok, _, _ := s.checkTarget(ctx, ctx, cur, e, rs, stub); !ok {
+		t.Fatal("the first check stopped sending")
+	}
+
+	// The gate closes, and a lane that passed it just before runs the
+	// check its new epoch owes; the target throttles it, slowly.
+	defer rg.target.faults.set("")
+	rg.target.faults.slowDelay = 2 * time.Second
+	rg.target.faults.retryAfter = "5"
+	rg.target.faults.set("throttled")
+	rs.gate.Failed(sink.Verdict{Action: sink.ActRetry, State: topic.RemoteStateUnavailable}, true)
+	before := rg.target.faults.listings.Load()
+	inflight := make(chan struct{})
+	go func() {
+		defer close(inflight)
+		s.checkTarget(ctx, ctx, cur, e, rs, stub)
+	}()
+	rigWait(t, "the lane's check to reach the target", 10*time.Second, func() bool {
+		return rg.target.faults.listings.Load() > before
+	})
+
+	// The probe finds it in flight and waits for it.
+	_, res, _ := s.checkTarget(ctx, ctx, cur, e, rs, stub)
+	<-inflight
+	v, outcome := res.GateVerdict()
+	if outcome != sink.CheckFailed || v.Action != sink.ActGate || v.State != topic.RemoteStateThrottled {
+		t.Fatalf("the probe got verdict %+v (outcome %v), want the throttle it waited on", v, outcome)
+	}
+}
+
+// The same race on the lane path: a lane that takes the gate's probe
+// while another lane's reopen check is in flight waits for that check,
+// and when the remote refuses it as a whole the lane records the refusal
+// as the probe's answer and holds its records. No produce request
+// reaches the target behind it.
+func TestRemoteLinkLaneProbeSendsNoChunkBehindARefusedCheckItWaitedOn(t *testing.T) {
+	// The runner stays stopped, so no cursor of its own takes the probe.
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{partitions: 1}})
+	ctx := context.Background()
+	s := rg.src.runner.sender()
+	e, rs, state := s.entry("b")
+	if state != "" {
+		t.Fatalf("lookup state %q", state)
+	}
+	version := rg.src.store.TopicVersion("orders-to-b")
+	stub, err := rg.src.store.GetTopic(ctx, "orders-to-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := fanoutCursorKey{parent: "orders", partition: 0, child: "orders-to-b", epoch: stub.AttachEpoch, remote: true}
+	cur := newRemoteCursor(key)
+	cur.forceTargetCheck()
+	if ok, _, _ := s.checkTarget(ctx, ctx, cur, e, rs, stub); !ok {
+		t.Fatal("the first check stopped sending")
+	}
+
+	// The gate closes, and a lane that passed it just before runs the
+	// check its new epoch owes; the target throttles it, slowly.
+	defer rg.target.faults.set("")
+	rg.target.faults.slowDelay = 3 * time.Second
+	rg.target.faults.retryAfter = "5"
+	rg.target.faults.set("throttled")
+	rs.gate.Failed(sink.Verdict{Action: sink.ActRetry, State: topic.RemoteStateUnavailable}, true)
+	listings, posted := rg.target.faults.listings.Load(), rg.target.faults.posted.Load()
+	inflight := make(chan struct{})
+	go func() {
+		defer close(inflight)
+		s.checkTarget(ctx, ctx, cur, e, rs, stub)
+	}()
+	rigWait(t, "the lane's check to reach the target", 10*time.Second, func() bool {
+		return rg.target.faults.listings.Load() > listings
+	})
+
+	// The gate's backoff runs out while that check is in flight, and a
+	// lane with a record to send takes the probe.
+	rigWait(t, "the gate's probe to fall due", 5*time.Second, func() bool {
+		return !rs.gate.WouldWait()
+	})
+	sendCtx, cancelSend := context.WithCancel(ctx)
+	defer cancelSend()
+	laneCtx, stopLane := context.WithCancel(sendCtx)
+	defer stopLane()
+	sh := &slabShip{s: s, cur: cur, key: key, cancel: cancelSend, stopWaits: stopLane, sendCtx: sendCtx, link: stub, linkVersion: version}
+	recs := []topic.KeyedRecord{{Offset: 0, Payload: []byte(`{"seq":0}`), CommittedAtUnixMs: time.Now().UnixMilli()}}
+	lane := &laneShip{recs: recs, done: -1, cap: cur.chunkCap(0), backoff: sink.LaneBackoff(), b64: map[int64]bool{}}
+	sh.lanes = []*laneShip{lane}
+	laneDone := make(chan struct{})
+	go func() {
+		defer close(laneDone)
+		sh.runLane(laneCtx, lane)
+	}()
+	rigWait(t, "the lane to take the probe", 5*time.Second, func() bool {
+		_, mine := rs.gate.WouldWaitFor(sh)
+		return mine
+	})
+	<-inflight
+
+	// The throttle the probe waited on is its answer: the gate holds for
+	// the target's Retry-After, and the lane sends nothing behind it.
+	rigWait(t, "the probe's answer", 15*time.Second, func() bool {
+		return rs.gate.Backoff() >= 5*time.Second || rg.target.faults.posted.Load() > posted
+	})
+	stopLane()
+	<-laneDone
+	if n := rg.target.faults.posted.Load() - posted; n != 0 {
+		t.Fatalf("%d produce requests reached the target behind the refused check the probe waited on", n)
+	}
+	if n := rg.target.faults.listings.Load() - listings; n != 1 {
+		t.Fatalf("%d listings reached the target, want 1: the probe did not wait on the check in flight", n)
+	}
+	if len(lane.recs) != 1 {
+		t.Fatalf("the lane holds %d records, want its 1", len(lane.recs))
+	}
+}
+
+// A quiet cursor's probe that finds a lane's reopen check in flight
+// waits for it, and when the remote refuses it as a whole the probe
+// records that refusal as its own answer: the gate stays closed for the
+// throttle's Retry-After, so no second refused request follows it in
+// the same backoff window.
+func TestRemoteLinkIdleProbeThatWaitedOnARefusedCheckHoldsTheGate(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{partitions: 1}})
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitDelivered(t, rg.src.produce(t, 0, 5, 2, 0), 15*time.Second)
+	rg.waitState(t, 0, topic.RemoteStateRunning, 10*time.Second)
+
+	ctx := context.Background()
+	cur := rg.src.runner.remoteCursorFor("orders", 0, "orders-to-b")
+	if cur == nil {
+		t.Fatal("no remote cursor")
+	}
+	s := rg.src.runner.sender()
+	e, rs, state := s.entry("b")
+	if state != "" {
+		t.Fatalf("lookup state %q", state)
+	}
+	stub, err := rg.src.store.GetTopic(ctx, "orders-to-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur.forceTargetCheck()
+	if ok, _, _ := s.checkTarget(ctx, ctx, cur, e, rs, stub); !ok {
+		t.Fatal("the first check stopped sending")
+	}
+
+	// The gate closes, and a lane that passed it just before runs the
+	// check its new epoch owes; the target throttles it, slowly.
+	defer rg.target.faults.set("")
+	rg.target.faults.slowDelay = 2 * time.Second
+	rg.target.faults.retryAfter = "5"
+	rg.target.faults.set("throttled")
+	rs.gate.Failed(sink.Verdict{Action: sink.ActRetry, State: topic.RemoteStateUnavailable}, true)
+	before := rg.target.faults.listings.Load()
+	inflight := make(chan struct{})
+	go func() {
+		defer close(inflight)
+		s.checkTarget(ctx, ctx, cur, e, rs, stub)
+	}()
+	rigWait(t, "the lane's check to reach the target", 10*time.Second, func() bool {
+		return rg.target.faults.listings.Load() > before
+	})
+
+	// The gate's backoff runs out while the check is still in flight: a
+	// quiet cursor takes the probe and waits for that check.
+	rigWait(t, "the gate's probe to fall due", 5*time.Second, func() bool {
+		return !rs.gate.WouldWait()
+	})
+	rg.src.runner.remoteIdle(ctx, cur.key, cur)
+	<-inflight
+
+	if !rs.gate.WouldWait() {
+		t.Fatal("the gate hands out a probe at once after the idle probe inherited a throttle")
+	}
+	rg.src.runner.remoteIdle(ctx, cur.key, cur)
+	if got := rg.target.faults.listings.Load() - before; got != 1 {
+		t.Fatalf("%d listings reached the throttled target, want 1", got)
+	}
+}

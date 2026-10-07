@@ -199,6 +199,12 @@ func (s *RPCServer) handleDeleteTopic(payload []byte) nodewire.Response {
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid delete topic request: "+err.Error())
 	}
+	// A stub, or a parent with remote children, is deleted only through
+	// the remote-aware delete, which runs the unshipped check first: the
+	// topic manager refuses one under the topic's lock, after the leader
+	// barrier, so an attach this replica has not applied yet cannot slip
+	// past a check made here.
+	//
 	// The purge fan-out below names the incarnation the delete removed,
 	// so a member that has already applied a recreate of the same name
 	// purges the old directory and not the new one (see
@@ -412,5 +418,13 @@ func (s *RPCServer) handleTopicPartitionStats(payload []byte) nodewire.Response 
 	if req.Partition < 0 || req.Partition >= len(details.Partitions) {
 		return errorResponse(http.StatusBadRequest, "invalid partition")
 	}
-	return jsonResponse(http.StatusOK, details.Partitions[req.Partition])
+	stats := details.Partitions[req.Partition]
+	// The consumer ack frontier is where a remote child that starts
+	// "unconsumed" starts on this partition. Only the owner knows it.
+	if fr, ok := s.broker.(ackFrontierReader); ok {
+		if frontier, err := fr.ConsumerAckFrontier(rpcRequestContext(), req.Topic, req.Partition); err == nil {
+			stats.AckFrontier = &frontier
+		}
+	}
+	return jsonResponse(http.StatusOK, stats)
 }

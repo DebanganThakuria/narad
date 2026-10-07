@@ -23,6 +23,7 @@ Before you start: a cluster installed as in [Deploy on Kubernetes](deploy-kubern
 | Topics you cannot lose have a second copy | [Keep a second copy](#second-copy) |
 | `initialClusterSize` is set and stays fixed | [Fix the bootstrap size](#initial-cluster-size) |
 | Each service has its own user and grants | [Manage users and grants](users.md) |
+| A cluster that holds remotes keeps the five operating conditions (unreleased) | [Hold remotes](#remotes) |
 
 ## Secure the Raft port {#raft-tls}
 
@@ -148,6 +149,12 @@ A request over a per-user cap gets `429` ([Troubleshooting](troubleshooting.md#s
 --8<-- "contract/one-copy.md"
 
 Decide which topics need a second copy before the first disk fails: [Back up and replicate topics](backups.md).
+
+## Hold remotes {#remotes}
+
+**Unreleased:** in master, not in v3.1.0.
+
+A cluster that sends [remote children](../reference/glossary.md#remote-child) to another cluster stores the remotes' passwords in its metadata, encrypted under its cluster secret: an accepted risk with five operating conditions. Before the first remote, check them, and the encrypted API hop on both clusters: [Before you start](remotes.md#before-you-start) and [Operating conditions](remotes.md#operating-conditions).
 
 ## Fix the bootstrap size {#initial-cluster-size}
 

@@ -104,8 +104,23 @@ func (m *Manager) attachSides(ctx context.Context, parent, child string) (p, c t
 // DetachChild unlinks child from parent. The child keeps everything it
 // already received (data and schema) and becomes standalone again.
 // Either side's owner (or an admin) may detach, checked under both
-// names' locks against the topics as they stand.
+// names' locks against the topics as they stand. A remote child's stub,
+// as it stands under the locks, is refused
+// (errs.ErrRemoteAwareDeleteRequired): only DetachRemoteChild, after
+// the unshipped check, detaches one.
 func (m *Manager) DetachChild(ctx context.Context, parent, child string) error {
+	return m.detachChild(ctx, parent, child, func(_, c topic.Topic) error {
+		if c.IsRemoteChild() {
+			return refuseRemoteLinked(child, map[string]string{child: c.ID})
+		}
+		return nil
+	})
+}
+
+// detachChild is DetachChild with a check of both sides as they stand
+// under the locks, after the leader barrier; a side that is missing is
+// the zero topic.
+func (m *Manager) detachChild(ctx context.Context, parent, child string, check func(p, c topic.Topic) error) error {
 	if err := validateTopicName(parent); err != nil {
 		return err
 	}
@@ -118,11 +133,14 @@ func (m *Manager) DetachChild(ctx context.Context, parent, child string) error {
 		return err
 	}
 	for attempt := 1; ; attempt++ {
-		ids, err := m.detachSides(ctx, parent, child)
+		sides, err := m.detachSides(ctx, parent, child)
 		if err != nil {
 			return err
 		}
-		err = m.detachChildRecord(ctx, parent, child, ids[0], ids[1])
+		if err := check(sides[0], sides[1]); err != nil {
+			return err
+		}
+		err = m.detachChildRecord(ctx, parent, child, sides[0].ID, sides[1].ID)
 		if m.retryTopicChanged(err, attempt, "detach", parent+"/"+child) {
 			continue
 		}
@@ -140,24 +158,25 @@ func (m *Manager) DetachChild(ctx context.Context, parent, child string) error {
 
 // detachSides reads both topics of a detach under their name locks and
 // checks that the request identity manages at least one of them. It
-// returns the incarnations read, parent first; a side that is missing
-// has none (the detach is then refused as not found).
-func (m *Manager) detachSides(ctx context.Context, parent, child string) (ids [2]string, err error) {
+// returns the topics read, parent first; a side that is missing is the
+// zero topic, with no incarnation (the detach is then refused as not
+// found).
+func (m *Manager) detachSides(ctx context.Context, parent, child string) (read [2]topic.Topic, err error) {
 	var sides []topic.Topic
 	for i, name := range []string{parent, child} {
 		t, err := m.getExistingTopic(ctx, name)
 		switch {
 		case err == nil:
 			sides = append(sides, t)
-			ids[i] = t.ID
+			read[i] = t
 		case !errors.Is(err, ErrNotFound):
-			return ids, err
+			return read, err
 		}
 	}
 	if len(sides) == 0 {
-		return ids, fmt.Errorf("%w: neither %q nor %q exists", ErrNotFound, parent, child)
+		return read, fmt.Errorf("%w: neither %q nor %q exists", ErrNotFound, parent, child)
 	}
-	return ids, authorizeManageAny(ctx, sides...)
+	return read, authorizeManageAny(ctx, sides...)
 }
 
 // getExistingTopic reads the topic, with a not-found error that names

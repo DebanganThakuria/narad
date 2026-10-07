@@ -208,6 +208,10 @@ func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 		// The topic changed under the request (deleted and recreated,
 		// or grown) after the leader checked it, twice in a row.
 		errors.Is(err, errs.ErrTopicChanged),
+		// Every remote-child refusal wraps this umbrella (a stub that
+		// lives on a remote, a second link to one target, a retention
+		// floor): conflicts with the stub or the parent, not bad input.
+		errors.Is(err, errs.ErrRemoteChildConflict),
 		errors.Is(err, errs.ErrAlreadyExists):
 		s.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errs.ErrNotFound):

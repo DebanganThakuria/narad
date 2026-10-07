@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 )
 
@@ -55,6 +56,10 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 	if err != nil {
 		return 0, 0, err
 	}
+	if err := remoteChildGuard(t); err != nil {
+		e.recordRemoteChildRejection(topicName)
+		return 0, 0, err
+	}
 	// A delayed child only receives records through fan-out — a direct
 	// produce would bypass the delay the topic guarantees.
 	if t.IsChild() && t.FanoutDelayMs > 0 {
@@ -88,6 +93,23 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 	e.recordProduceCommitted(topicName, partIdx, 1, len(payload))
 
 	return offset, partIdx, nil
+}
+
+// remoteChildGuard refuses every data-plane operation on a remote
+// child's stub: it has no partitions here, and its records live on the
+// remote, where they are consumed.
+func remoteChildGuard(t topic.Topic) error {
+	if !t.IsRemoteChild() {
+		return nil
+	}
+	return errs.RemoteChildError(errs.ErrRemoteChildLocal,
+		fmt.Sprintf("remote child %q lives on remote %s; consume it there", t.Name, t.Remote.Name))
+}
+
+func (e *Engine) recordRemoteChildRejection(topicName string) {
+	if e.metrics != nil {
+		e.metrics.ProduceRejectionsTotal.WithLabelValues(topicName, "remote_child").Inc()
+	}
 }
 
 // recordProduceError classifies a produce failure into an error-metric

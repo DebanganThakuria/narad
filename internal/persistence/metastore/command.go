@@ -75,6 +75,25 @@ const (
 	// Proposed only once every member applies it (Store.DeleteUser).
 	opDeleteUserReleaseTopics
 
+	// The remote children entry types (fsm_apply_remotes.go,
+	// fsm_apply_remote_child.go). Like the ones above, the leader
+	// proposes one only once every member applies it; a remote write
+	// that needs one before then is refused, never written another way.
+
+	// opAttachRemoteChild creates a remote child's stub and links it to
+	// its parent in one transaction.
+	opAttachRemoteChild
+	// opSetRemoteChildState changes a remote child link's state
+	// (pause, resume, skip, lanes) while its attach epoch is unchanged.
+	opSetRemoteChildState
+	// opPutRemote creates a remote with its sealed credential.
+	opPutRemote
+	// opUpdateRemote applies a field-scoped change to a remote, a new
+	// credential or a re-encrypt.
+	opUpdateRemote
+	// opDeleteRemote deletes a remote.
+	opDeleteRemote
+
 	// opEnd is not an entry type: it marks the end of the list. New
 	// entry types go above this line, and a leader proposes one only
 	// once every member reports a release that knows it, so an older

@@ -105,3 +105,86 @@ func (r *FanoutRunner) partitionHighWatermark(ctx context.Context, parent string
 	}
 	return stats.HighWatermark, nil
 }
+
+// AttachOffsetsMode resolves a link's start offset on every partition of
+// parent, asking each partition's owner, in one of the remote child start
+// modes: topic.RemoteFromAttach (or "") is the committed high watermark,
+// exactly AttachOffsets; topic.RemoteFromEarliest the oldest retained
+// offset; topic.RemoteFromUnconsumed the parent's consumer ack frontier,
+// so everything not yet acked on this cluster is sent. Any owner that
+// cannot answer fails the whole resolution, as for AttachOffsets.
+func (r *FanoutRunner) AttachOffsetsMode(ctx context.Context, parent, mode string) ([]int64, error) {
+	if mode == "" || mode == topic.RemoteFromAttach {
+		return r.AttachOffsets(ctx, parent)
+	}
+	if mode != topic.RemoteFromEarliest && mode != topic.RemoteFromUnconsumed {
+		return nil, fmt.Errorf("unknown start mode %q", mode)
+	}
+	t, err := r.store.GetTopic(ctx, parent)
+	if err != nil {
+		return nil, err
+	}
+	offsets := make([]int64, t.Partitions)
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(attachOffsetsConcurrency)
+	for p := range t.Partitions {
+		g.Go(func() error {
+			off, err := r.partitionStartOffset(gctx, parent, p, mode)
+			if err != nil {
+				return fmt.Errorf("partition %d: %w", p, err)
+			}
+			offsets[p] = off
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	return offsets, nil
+}
+
+// ackFrontierReader is the broker's consumer ack frontier read
+// (messaging.Engine.ConsumerAckFrontier).
+type ackFrontierReader interface {
+	ConsumerAckFrontier(ctx context.Context, topicName string, partition int) (int64, error)
+}
+
+// partitionStartOffset is one partition's start in mode earliest or
+// unconsumed, read locally or from the owner's partition stats.
+func (r *FanoutRunner) partitionStartOffset(ctx context.Context, parent string, p int, mode string) (int64, error) {
+	local, addr, err := r.resolveOwner(parent, p)
+	if err != nil {
+		return 0, err
+	}
+	if local {
+		if mode == topic.RemoteFromUnconsumed {
+			fr, ok := r.broker.(ackFrontierReader)
+			if !ok {
+				return 0, fmt.Errorf("this node cannot read consumer frontiers")
+			}
+			return fr.ConsumerAckFrontier(ctx, parent, p)
+		}
+		slab, err := r.broker.ReadFanoutSlab(ctx, parent, p,
+			topic.FanoutReadOpts{FromOffset: topic.FanoutTailOffset, MaxRecords: 1, MaxBytes: 1})
+		if err != nil {
+			return 0, err
+		}
+		return slab.OldestOffset, nil
+	}
+	if r.peer == nil {
+		return 0, fmt.Errorf("no peer client to reach owner %s", addr)
+	}
+	rpcCtx, cancel := context.WithTimeout(ctx, defaultPeerRPCTimeout)
+	defer cancel()
+	stats, err := r.peer.TopicPartitionStats(rpcCtx, addr, parent, p)
+	if err != nil {
+		return 0, err
+	}
+	if mode == topic.RemoteFromEarliest {
+		return stats.OldestOffset, nil
+	}
+	if stats.AckFrontier == nil {
+		return 0, fmt.Errorf("owner %s does not report its consumer ack frontier (older release)", addr)
+	}
+	return *stats.AckFrontier, nil
+}

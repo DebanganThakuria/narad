@@ -52,6 +52,8 @@ const (
 	// OpForgetServer asks the leader to remove a Raft server that has no
 	// member record (ForgetServerRequest).
 	OpForgetServer
+	OpRemoteWrite // 35: leader-forwarded remote mutation (registry and link sub-ops)
+	OpRemoteCheck // 36: member-side check, status or unshipped query
 )
 
 // CompleteMoveRequest asks the leader to perform the guarded ownership flip

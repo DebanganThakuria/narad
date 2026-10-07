@@ -6,7 +6,18 @@ package main
 //
 // Resolution precedence, per field (highest wins):
 //
-//	--server/--user/--password flags  >  NARAD_ADDR/NARAD_USER/NARAD_PASS  >  selected context  >  defaults
+//	--server/--user/--password flags  >  NARAD_ADDR/NARAD_USER/NARAD_PASS  >  the selected context  >  defaults
+//
+// --ctx names the context for one command, and then the environment is
+// not read at all:
+//
+//	--server/--user/--password flags  >  the --ctx context  >  defaults
+//
+// --ctx together with NARAD_ADDR, NARAD_USER or NARAD_PASS in the
+// environment is refused (connEnvConflict): a two-cluster playbook runs
+// `narad --ctx b ...`, and an environment variable would either send
+// the command to the other cluster or send one cluster's password to
+// the other.
 //
 // The store is a plain JSON file at $XDG_CONFIG_HOME/narad/contexts.json
 // (default ~/.config/narad/contexts.json), written 0600 because it may
@@ -19,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 const defaultServer = "http://127.0.0.1:7942"
@@ -91,28 +103,55 @@ func (s *contextStore) names() []string {
 	return out
 }
 
+// connEnvVars are the environment variables that carry connection
+// settings.
+var connEnvVars = []string{"NARAD_ADDR", "NARAD_USER", "NARAD_PASS"}
+
+// connEnvConflict refuses --ctx while any of connEnvVars is set.
+func connEnvConflict(ctxName string) error {
+	var set []string
+	for _, k := range connEnvVars {
+		if os.Getenv(k) != "" {
+			set = append(set, k)
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return fmt.Errorf("--ctx %s cannot be combined with %s set in the environment: it would override or fill in the context's server and credentials; unset it, or drop --ctx",
+		ctxName, strings.Join(set, ", "))
+}
+
 // resolveContext merges flags, environment, and the selected context
 // into the connection settings a command should use. Missing store is
-// not an error — flags/env/defaults still work without one.
+// not an error — flags/env/defaults still work without one. With --ctx
+// the environment is not read (cliConnection refuses the combination
+// before this runs).
 func resolveContext(flagServer, flagUser, flagPassword string) cliContext {
 	resolved := cliContext{Server: defaultServer}
 
-	if s, err := loadContextStore(); err == nil && s.Current != "" {
-		if c, ok := s.Contexts[s.Current]; ok {
+	if s, err := loadContextStore(); err == nil && (s.Current != "" || flagCtx != "") {
+		name := s.Current
+		if flagCtx != "" {
+			name = flagCtx
+		}
+		if c, ok := s.Contexts[name]; ok {
 			if c.Server != "" {
 				resolved.Server = c.Server
 			}
 			resolved.User, resolved.Password = c.User, c.Password
 		}
 	}
-	if v := os.Getenv("NARAD_ADDR"); v != "" {
-		resolved.Server = v
-	}
-	if v := os.Getenv("NARAD_USER"); v != "" {
-		resolved.User = v
-	}
-	if v := os.Getenv("NARAD_PASS"); v != "" {
-		resolved.Password = v
+	if flagCtx == "" {
+		if v := os.Getenv("NARAD_ADDR"); v != "" {
+			resolved.Server = v
+		}
+		if v := os.Getenv("NARAD_USER"); v != "" {
+			resolved.User = v
+		}
+		if v := os.Getenv("NARAD_PASS"); v != "" {
+			resolved.Password = v
+		}
 	}
 	if flagServer != "" {
 		resolved.Server = flagServer

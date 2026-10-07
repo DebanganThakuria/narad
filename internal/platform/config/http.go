@@ -55,4 +55,11 @@ type HTTPConfig struct {
 	// callers. Ignored when MetricsAddr is set.
 	// Env: NARAD_HTTP_METRICS_UNAUTHENTICATED.
 	MetricsUnauthenticated bool `json:"metrics_unauthenticated"`
+
+	// MaxBatchBodyBytesInFlight caps, node-wide, the batch produce bodies
+	// larger than 1 MiB being read at once; a body that does not fit is
+	// answered 503 with Retry-After. Bodies of 1 MiB or less never touch
+	// it. 0 disables the cap.
+	// Env: NARAD_HTTP_MAX_BATCH_BODY_BYTES_IN_FLIGHT.
+	MaxBatchBodyBytesInFlight int64 `json:"max_batch_body_bytes_in_flight"`
 }

@@ -28,8 +28,9 @@ Every command that talks to a broker takes these flags.
 | `-u`, `--user <name>` | `NARAD_USER` | the selected context |
 | `-p`, `--password <password>` | `NARAD_PASS` | the selected context |
 | `--password-stdin` | none | read the password from the first line of standard input |
+| `--ctx <name>` (unreleased) | none | use this [context](#ctx) for this command only |
 
-For each setting, a flag wins over its environment variable, which wins over the selected [context](#ctx). A password on the command line shows up in `ps` and in shell history; prefer `--password-stdin` or `NARAD_PASS`. The CLI warns on standard error when it is about to send credentials over plain `http://` to another machine: use an `https://` URL for anything remote.
+For each setting, a flag wins over its environment variable, which wins over the selected [context](#ctx). With `--ctx`, the environment variables are not read at all, and the CLI refuses `--ctx` while `NARAD_ADDR`, `NARAD_USER` or `NARAD_PASS` is set, so a command meant for one cluster never reaches another or carries its password there. A password on the command line shows up in `ps` and in shell history; prefer `--password-stdin` or `NARAD_PASS`. The CLI warns on standard error when it is about to send credentials over plain `http://` to another machine: use an `https://` URL for anything remote.
 
 ## narad server {#server}
 
@@ -84,10 +85,14 @@ Manage topics. `narad topics` works too.
 | `narad topic info <name>` | Print the topic and its partition statistics, as [get a topic](http-api.md#get-topic) returns them. |
 | `narad topic edit <name>` | Change retention or the partition count, or register a new schema version. |
 | `narad topic schema <name>` | Print the schema history (version `0` and an empty list when there is none), or with `--current` only the current schema, which prints `no schema` when there is none. |
-| `narad topic rm <name>` | Delete the topic and all its data. It asks `delete topic "<name>" and all its data? [y/N]` unless `-f` (`--force`) is given. |
-| `narad topic attach <parent> <child>` | Attach an existing topic as a child. With `--delay <duration>`, attach it as a delay child. |
-| `narad topic detach <parent> <child>` | Detach a child. The child and its messages remain. |
-| `narad topic children <parent>` | List a parent's children with how far each is behind. |
+| `narad topic rm <name>` | Delete the topic and all its data. It asks `delete topic "<name>" and all its data? [y/N]` unless `-f` (`--force`) is given. `--force` only skips the question: it never abandons a remote child's unshipped records (unreleased). |
+| `narad topic attach <parent> <child>` | Attach an existing topic as a child. With `--delay <duration>`, attach it as a delay child. With `--remote <name>` (unreleased), create `<child>` as a [remote child](glossary.md#remote-child) instead; flags below. |
+| `narad topic detach <parent> <child>` | Detach a child. The child and its messages remain. A remote child's stub is deleted instead (unreleased), refused while records of the parent are unshipped unless `--force` abandons them. |
+| `narad topic children <parent>` | List a parent's children with how far each is behind. With `--partitions` (unreleased), one row per parent partition for each remote child. |
+| `narad topic pause <parent> <child>` (unreleased) | Stop a remote child sending; `--reason <text>`, at most 256 bytes, shows in the listing. |
+| `narad topic resume <parent> <child>` (unreleased) | Check the target from every node, then let a paused remote child send. `--accept-target` accepts a target topic that was recreated (`target_replaced`). |
+| `narad topic skip <parent> <child> --partition <p> --offset <o>` (unreleased) | Let a remote child drop the one record it is stuck on (`rejected_record` or `record_too_large`). |
+| `narad topic wait <parent> <child>` (unreleased) | Poll the listing until a remote child has shipped everything (`--lag-zero`) or the parent's consumers passed its start (`--source-drained`); flags below. |
 
 Flags of `narad topic add`:
 
@@ -113,6 +118,31 @@ Flags of `narad topic edit`:
 | `--visibility <duration>` | Refused: the visibility timeout is fixed when a topic is created. |
 
 The per-partition caps have no `edit` flag; change them with [change a topic](http-api.md#alter-topic).
+
+Flags of `narad topic attach` with `--remote` (unreleased):
+
+| Flag | Meaning |
+|---|---|
+| `--remote <name>` | The remote to send to. |
+| `--remote-topic <topic>` | The topic on the remote. Defaults to the parent's name. |
+| `--from <mode>` | `attach` (default), `unconsumed` or `earliest`. |
+| `--lanes <n>` | Ordered streams per parent partition, 1 to 8 (default 1). |
+| `--delay <duration>` | Send each record no earlier than this after the parent committed it. |
+| `--dry-run` | Run every check and resolve the start offsets; write nothing. |
+
+`--remote-topic`, `--from`, `--lanes` and `--dry-run` without `--remote` are refused.
+
+Flags of `narad topic wait` (unreleased):
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--lag-zero` | | Wait until every record committed to the parent is on the remote. |
+| `--source-drained` | | Wait until the parent's consumers have acked past the link's start on every partition. |
+| `--stable <duration>` | `0` | The condition must hold this long. |
+| `--timeout <duration>` | `30m` | Give up after this long. |
+| `--interval <duration>` | `2s` | Poll interval. |
+
+Give exactly one of `--lag-zero` and `--source-drained`. It exits `0` when the condition holds, `1` on `--timeout`, and `2` at once when the link is stalled in a state that needs a fix (every [link state](remote-children.md#link-states) but `unavailable`, `throttled`, `unknown` and `running`; `paused` included), printing the state and the stuck record.
 
 ## narad pub {#pub}
 
@@ -187,6 +217,25 @@ Manage users. Every command needs the `admin` grant ([Manage users and grants](.
 | `narad user rm <username>` | Delete a user. |
 
 `--grant` is repeatable. Each value is `action:pattern`, with several patterns separated by commas, such as `produce:orders-*,invoices.*`. The actions are `produce`, `consume`, `create` and `admin`; `admin` takes no patterns ([Access model and grants](access-model.md#actions)).
+
+## narad remote {#remote}
+
+**Unreleased:** in master, not in v3.1.0.
+
+Manage [remotes](glossary.md#remote), the other clusters this one may send remote children to. Every command needs the `admin` grant and a cluster with security on ([Manage remotes](../operate/remotes.md)).
+
+| Command | What it does |
+|---|---|
+| `narad remote add <name>` | Register a remote: `--url <https url>`, `--username <name>`, optionally `--ca-file <pem>` and the limit flags below. The password comes from the first line of standard input with `--remote-password-stdin`, the only way to give it. |
+| `narad remote set <name>` | Change the fields given. `--url`, `--username`, `--ca-file` and `--no-ca` (back to the system roots) need `--remote-password-stdin` too; the limit flags do not. |
+| `narad remote rm <name>` | Delete a remote. Refused while remote children use it, unless `--force`; they then hold in `remote_missing`. |
+| `narad remote ls` | List remotes, their remote children and what each node's credential cache holds, as JSON. `--no-nodes` skips asking the nodes. |
+| `narad remote test <name> --topic <topic>` | Run the attach checks against a topic on the remote, writing nothing; `--source <parent>` adds the schema and loop checks. With `remotes.allowed_hosts` set, every node runs the checks and the command exits `0` only when every node passes; without it, only the node that took the request runs them, so a `0` says nothing about the other nodes' egress (the attach checks from every node either way). |
+| `narad remote reencrypt` | After a cluster secret rotation, re-seal every password under the new key. Exits non-zero when any remote failed to re-seal; keep the previous secret until it exits 0. |
+
+Limit flags of `add` and `set`: `--max-in-flight <n>` (1 to 256, default 16), `--request-timeout <duration>` (5s to 120s, default 30s), `--idle-conn-timeout <duration>` (default 30s), `--conn-max-age <duration>` (default 5m), `--check-interval <duration>` (default 60s) and `--compression none|zstd`. What each does is in [Remotes and remote children](remote-children.md#limits).
+
+The CLI refuses to send a remote password over plain `http://` to a host other than this machine, and refuses `--remote-password-stdin` together with `--password-stdin`, which read the same input.
 
 ## narad ctx {#ctx}
 

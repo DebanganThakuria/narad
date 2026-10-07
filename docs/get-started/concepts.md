@@ -83,6 +83,7 @@ A topic can have child topics. From the moment a child is attached, Narad copies
 | [Fan-out child](../reference/glossary.md#fan-out-child) | A second service that needs every message, consuming at its own pace |
 | [Delay child](../reference/glossary.md#delay-child) | Each copy appears a fixed delay after the parent committed it, never earlier; useful for retrying later |
 | [Replica child](../reference/glossary.md#replica-child) | A second copy of a topic's messages on other nodes, created in the same request as the link to its parent |
+| [Remote child](../reference/glossary.md#remote-child) (unreleased) | A copy of a topic's messages on another Narad cluster, sent through that cluster's API |
 
 A child has one parent, and a child cannot have children of its own. [Fan out and delay messages](../build/fanout-and-delay.md) shows how to attach each kind; replica children are covered in [Back up and replicate topics](../operate/backups.md#replica-children).
 

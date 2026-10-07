@@ -292,6 +292,22 @@ var decoders = []decoder{
 		encode: func(any) ([]byte, error) { return EncodeAppliedIndexRequest(), nil },
 	},
 	{
+		name: "RemoteWrite",
+		decode: func(b []byte) (any, int, error) {
+			v, err := DecodeRemoteWriteRequest(b)
+			return v, len(v.SubOp) + len(v.Actor) + len(v.RequestID) + len(v.Body), err
+		},
+		encode: func(v any) ([]byte, error) { return EncodeRemoteWriteRequest(v.(RemoteWriteRequest)) },
+	},
+	{
+		name: "RemoteCheck",
+		decode: func(b []byte) (any, int, error) {
+			v, err := DecodeRemoteCheckRequest(b)
+			return v, len(v.Mode) + len(v.RequestID) + len(v.Body), err
+		},
+		encode: func(v any) ([]byte, error) { return EncodeRemoteCheckRequest(v.(RemoteCheckRequest)) },
+	},
+	{
 		name: "Response",
 		decode: func(b []byte) (any, int, error) {
 			v, err := DecodeResponse(b)
@@ -353,6 +369,10 @@ func seedPayloads(t testing.TB) [][]byte {
 		must(EncodeAbortMoveRequest(AbortMoveRequest{Topic: "orders", Partition: 2, ExpectedTarget: "n2"})),
 		must(EncodeGetAssignmentRequest(GetAssignmentRequest{Topic: "orders", Partition: 2})),
 		EncodeAppliedIndexRequest(),
+		must(EncodeRemoteWriteRequest(RemoteWriteRequest{SubOp: RemoteSubCreate, Actor: "alice", RequestID: "0123456789abcdef", Body: []byte(`{"name":"b"}`)})),
+		must(EncodeRemoteWriteRequest(RemoteWriteRequest{SubOp: RemoteSubTopicDelete})),
+		must(EncodeRemoteCheckRequest(RemoteCheckRequest{Mode: RemoteCheckRun, RequestID: "fedcba9876543210", Body: []byte(`{"remote":"b","topic":"orders"}`)})),
+		must(EncodeRemoteCheckRequest(RemoteCheckRequest{Mode: RemoteCheckStatus})),
 		must(EncodeResponse(Response{Status: 200, ContentType: ContentTypeJSON, Body: []byte(`{"ok":true}`)})),
 		must(EncodeResponse(Response{Status: 65535})),
 	}

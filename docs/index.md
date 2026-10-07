@@ -524,6 +524,7 @@ What a `202` promises, and what Narad trades for it.
 - **[Fan-out children](build/fanout-and-delay.md)** Every message committed to a parent is copied into each child, with its own consumers and retention. Producers change nothing.
 - **[Replica children](operate/backups.md#replica-children)** A child whose partitions are placed on other nodes than the parent's: an async second copy of a topic, from one API call.
 - **[Delay children](build/fanout-and-delay.md#delay-children)** A child with `delay_ms` receives each message that long after the parent committed it: delayed work with no scheduler.
+- **[Remote children](build/remote-children.md)** (unreleased) A child whose copy lives on another Narad cluster, in another region if you like: move a topic, or keep a disaster-recovery copy, through the other cluster's own API.
 - **[Schemas at the broker](build/schemas.md)** Give a topic a JSON Schema and a produce that does not fit gets `400` naming the field. It never reaches the log.
 - **[Any payload](build/consuming.md#the-payload-comes-back-the-way-you-sent-it)** Send JSON, text or raw bytes as `application/octet-stream`. JSON comes back verbatim, text as text, and binary as base64 with a flag that says so.
 - **[A Go SDK and a CLI](build/go-sdk.md)** The Go client renews leases, retries with jitter and trips per-node circuit breakers, on the standard library alone. The `narad` binary is the broker and the CLI in one.

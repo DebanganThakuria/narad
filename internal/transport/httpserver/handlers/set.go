@@ -122,6 +122,11 @@ type Deps struct {
 	// node answers locally). The cluster views' ?detail=true uses it.
 	// Nil leaves the detail empty, with a status error per member.
 	NodeStatus func(ctx context.Context, m metastore.Member) (nodewire.NodeStatus, error)
+	// Remote is the remote-replication plane; zero value when not wired.
+	Remote RemoteDeps
+	// BatchBodyBudget caps batch-produce bodies above 1 MiB in flight on
+	// this node, in bytes; 0 means no cap.
+	BatchBodyBudget int64
 }
 
 // Set is shared by every handler subpackage. The Deps field is
