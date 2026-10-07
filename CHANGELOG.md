@@ -10,6 +10,8 @@ summarized more briefly than the 1.x and later entries.
 
 ## [Unreleased]
 
+## [3.2.1] - 2026-10-07
+
 ### Fixed
 - Code-scanning hardening: partition directory paths refuse a topic name that is not a single path element, as topic directories already did; a batch produce body that does not decode no longer echoes the request's `Content-Encoding` in the error (it names `zstd or gzip`); the leader audit line sizes no allocation from request data; and a remote dial parses its port at 16 bits, refusing one above 65535 instead of wrapping it onto another port, while `remotes.allowed_ports` entries outside 1..65535 are refused when the guard is built.
 
@@ -610,7 +612,8 @@ First production release.
 ### Added
 - Narad's first alpha, published for early evaluation, local development, and design review, with a container image on GHCR. The remaining production-readiness gates (API auth, rate limiting, TLS, and a tested durability and disaster-recovery contract) were documented as still open.
 
-[Unreleased]: https://github.com/DebanganThakuria/narad/compare/v3.2.0...HEAD
+[Unreleased]: https://github.com/DebanganThakuria/narad/compare/v3.2.1...HEAD
+[3.2.1]: https://github.com/DebanganThakuria/narad/compare/v3.2.0...v3.2.1
 [3.2.0]: https://github.com/DebanganThakuria/narad/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/DebanganThakuria/narad/compare/v3.0.1...v3.1.0
 [3.0.1]: https://github.com/DebanganThakuria/narad/compare/v3.0.0...v3.0.1

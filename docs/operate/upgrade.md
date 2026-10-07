@@ -13,8 +13,8 @@ Before you start: every pod ready, Helm access to the release, and the [changelo
 1. Get the chart of the target release. In a clone made as in [Deploy on Kubernetes](deploy-kubernetes.md#install):
 
     ```bash
-    git fetch --depth 1 origin tag v3.2.0
-    git checkout v3.2.0
+    git fetch --depth 1 origin tag v3.2.1
+    git checkout v3.2.1
     ```
 
 2. Read the [version notes](#version-notes) for every release you cross.
@@ -24,7 +24,7 @@ Before you start: every pod ready, Helm access to the release, and the [changelo
     ```bash
     helm upgrade narad ./charts/narad -n narad \
       --reset-then-reuse-values \
-      --set image.tag=v3.2.0
+      --set image.tag=v3.2.1
     kubectl rollout status statefulset/narad -n narad
     ```
 
@@ -82,6 +82,7 @@ Partition segments, consumer position files and fan-out cursor files need nothin
 
 Read the notes for each release boundary you cross, in either direction.
 
+- **To v3.2.1.** Nothing to do in either direction: v3.2.1 changes no stored format, config key or API, so it rolls onto, and back to, v3.2.0 node by node.
 - **To v3.2.0.**
     - *Remotes and remote children need every member upgraded.* No action during the roll. Remote writes and remote child attaches answer `412`, naming the member, until every member, dead ones and Raft servers without a member record included, runs this release with security on and legacy cluster authentication off ([Manage remotes](remotes.md#before-you-start)). The rollback boundary for their Raft entry types is the first remote write ([above](#roll-back-from-v3-2)).
     - *Batch produce takes more.* A node on this release takes up to 1,000 messages in a body of up to 16 MiB, each payload at most 1 MiB, optionally zstd or gzip compressed, and answers a body over 1 MiB `503` when its budget for large bodies is full (`http.max_batch_body_bytes_in_flight`). Until every node a client can reach runs this release, keep batches within v3.1.0's limits.
