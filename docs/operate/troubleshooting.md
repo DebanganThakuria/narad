@@ -180,7 +180,7 @@ After a node comes back, some partitions deliver in bursts with quiet gaps betwe
 
 ### `412` on a remote write or a remote child {#status-412}
 
-**Unreleased.**
+**New in v3.2.0.**
 
 A remotes request, or a remote child's attach, pause, resume or skip, answers `412` and writes nothing.
 
@@ -199,7 +199,7 @@ A remotes request, or a remote child's attach, pause, resume or skip, answers `4
 
 ### `409` has unshipped records on a detach or delete {#remote-unshipped}
 
-**Unreleased.**
+**New in v3.2.0.**
 
 `narad topic detach <parent> <child>`, or a delete of a remote child's stub or of its parent, answers `409` `has unshipped records`, with `lag_messages`, `lag_complete` and `dispatch_backlog` in the body.
 
@@ -211,7 +211,7 @@ A remotes request, or a remote child's attach, pause, resume or skip, answers `4
 
 ### `409` lives on remote {#remote-stub}
 
-**Unreleased.**
+**New in v3.2.0.**
 
 A produce, consume or ack answers `409` `remote child "<name>" lives on remote <remote>; consume it there`.
 
@@ -350,7 +350,7 @@ It answers `{"id":"narad-3","voter":true}` (or `false` for a non-voter), and the
 
 ### `narad_fanout_remote_state` is not `running` {#remote-link-stalled}
 
-**Unreleased.**
+**New in v3.2.0.**
 
 A remote child's link holds in a state other than `running` or `paused`, and its lag grows. The node that owns the parent partition logs `remote child stalled` once as the cursor enters the state, with the `state`, the `remote` and, when the target's answer stalled it, the `status`: an error for every state that needs a fix (the list below), a warning for `unavailable` and `throttled`. A record the target refuses also logs `remote child blocked on a record the target refuses` with the `offset`, and `remote child running again` follows once the link sends again.
 
@@ -375,7 +375,7 @@ The link resumes on its own once the cause is fixed: a stalled cursor retries ev
 
 ### `narad_fanout_remote_retention_headroom_seconds` falls {#remote-headroom-low}
 
-**Unreleased.**
+**New in v3.2.0.**
 
 A remote child's oldest unshipped record approaches the parent's retention.
 
@@ -385,7 +385,7 @@ A remote child's oldest unshipped record approaches the parent's retention.
 
 ### `narad_remote_credential_state` shows `credential_unreadable` or `node_insecure` {#remote-credential-unreadable}
 
-**Unreleased.**
+**New in v3.2.0.**
 
 A node cannot use a remote's stored password, and its links hold in the same state. It logs `remote credential unreadable on this node` with the `remote` and whether the password's key is `current`, `previous` or `unknown` here, never the key itself.
 
@@ -727,7 +727,7 @@ The Raft leader logs `raft: failed to heartbeat to: peer=<addr>` with `error="tl
 
 ### `this node's metastore holds remotes, so it must run with security.enabled` at start {#log-remotes-security-off}
 
-**Unreleased.**
+**New in v3.2.0.**
 
 `narad serve` exits at start with this message, or with `this node's metastore holds remotes, so NARAD_CLUSTER_SECRET is required`.
 
@@ -737,7 +737,7 @@ The Raft leader logs `raft: failed to heartbeat to: peer=<addr>` with `error="tl
 
 ### `this node holds remotes and its Raft transport runs without TLS` {#log-remotes-plaintext-raft}
 
-**Unreleased.**
+**New in v3.2.0.**
 
 A warning at startup, or when the first remote appears, with `narad_remotes_plaintext_raft` 1.
 
@@ -747,7 +747,7 @@ A warning at startup, or when the first remote appears, with `narad_remotes_plai
 
 ### `this node holds remotes and remotes.allowed_hosts is empty` {#log-remotes-allowlist}
 
-**Unreleased.**
+**New in v3.2.0.**
 
 A warning at startup, with `narad_remotes_allowlist_configured` 0.
 
@@ -757,7 +757,7 @@ A warning at startup, with `narad_remotes_allowlist_configured` 0.
 
 ### `this node holds remotes and its cluster secret fails the strength rule` {#log-remotes-weak-secret}
 
-**Unreleased.**
+**New in v3.2.0.**
 
 An error at startup. The node runs, but every create, password change and re-encrypt answers `412` until the secret is replaced.
 

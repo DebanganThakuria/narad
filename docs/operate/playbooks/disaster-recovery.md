@@ -6,7 +6,7 @@ description: "Keep a live copy of a topic on a recovery cluster, usually in anot
 
 Keep a live copy of a topic on a recovery cluster, usually in another region, and know how much you would lose if the first cluster were gone.
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 Before you start: every item of [Before you start](../remotes.md#before-you-start) on both clusters, in both directions; the CLI with a context for each (`a` for the cluster in use, `b` for the recovery cluster); and a metrics store outside `a`'s region.
 

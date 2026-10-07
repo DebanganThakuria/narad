@@ -236,7 +236,7 @@ curl -u "$AUTH" "$NARAD/v1/topics/orders/children"
 
 ## Children on another cluster {#remote-children}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 A child can also live on another Narad cluster. An admin registers that cluster once as a [remote](../reference/glossary.md#remote), then attaches a [remote child](../reference/glossary.md#remote-child):
 
@@ -254,5 +254,5 @@ Every child stores its own full copy of the parent's messages; that is what make
 
 - [Back up and replicate topics](../operate/backups.md#replica-children): use a child as a second copy on other nodes.
 - [Handle retries and dead letters](handling-retries.md#backoff-topics): build retry tiers from delay children.
-- [Replicate a topic to another cluster](remote-children.md): a child whose copy lives on another Narad cluster (unreleased).
+- [Replicate a topic to another cluster](remote-children.md): a child whose copy lives on another Narad cluster (from v3.2.0).
 - [Fan-out engine](../understand/fanout-engine.md): how copies are made, and how far behind a child can fall.

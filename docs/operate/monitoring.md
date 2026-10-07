@@ -95,7 +95,7 @@ The leader exports why a decommission or a move cannot progress ([Cluster contro
 | Moves blocked | `sum by (reason) (narad_moves_blocked) > 0`, held for 10 minutes (`for: 10m`) | A partition move cannot finish on its own, and holds one of the 8 move slots until it does or is aborted ([Troubleshooting](troubleshooting.md#moves-blocked)). |
 | Dead marking refused | `max(narad_dead_marking_refused) == 1`, held for 5 minutes (`for: 5m`) | The leader is not hearing heartbeats from most voters although Raft still reaches them: its node RPC plane is likely broken ([Troubleshooting](troubleshooting.md#log-dead-marking-refused)). |
 
-### Remote replication alerts (unreleased) {#remote-alerts}
+### Remote replication alerts (v3.2.0) {#remote-alerts}
 
 A cluster with [remote children](../reference/glossary.md#remote-child) adds these, on the [remote replication series](../reference/metrics.md#remote-replication). The link series come from the node that owns each parent partition, so evaluate them across every node; for a disaster-recovery link, evaluate them outside the source cluster's region ([Watch the link](playbooks/disaster-recovery.md#watch)).
 
@@ -147,7 +147,7 @@ Changes to users, topics and cluster membership are logged as audit lines: messa
 
 `unknown` is never logged as `rejected` or `failed`: a search for the changes that may have happened must include it along with `ok`.
 
-**Unreleased:** remotes and remote children are audited too: `remote.create`, `remote.update`, `remote.delete`, `remote.test`, `remote.reencrypt`, `remote.list` and `remote.get`, and `remote_child.create`, `.pause`, `.resume`, `.accept_target`, `.skip` and `.delete`, refusals included. Each request carries a `request_id`, and the leader writes a second line for every write it proposes, with the same `request_id` and `outcome` `committed` or `refused`, so the two can be joined. No line carries a password, a URL or a username ([Audit lines](remotes.md#audit)).
+**New in v3.2.0:** remotes and remote children are audited too: `remote.create`, `remote.update`, `remote.delete`, `remote.test`, `remote.reencrypt`, `remote.list` and `remote.get`, and `remote_child.create`, `.pause`, `.resume`, `.accept_target`, `.skip` and `.delete`, refusals included. Each request carries a `request_id`, and the leader writes a second line for every write it proposes, with the same `request_id` and `outcome` `committed` or `refused`, so the two can be joined. No line carries a password, a URL or a username ([Audit lines](remotes.md#audit)).
 
 A `PATCH` that sets several kinds of field applies them one at a time (retention, caps, partitions, then schema) and stops at the first failure, so one that fails part way has already changed the fields before it. Its lines say so: on the node that applied the `PATCH`, the fields applied before the failure are `ok`, and on a node that forwarded it to the leader, which cannot tell how far the leader got, every kind of field before the last is `unknown`. Those lines still carry the failure's `status`, and fields whose outcomes differ go on separate `topic.alter` lines. For example, `{"retention_ms":7200000,"schema":{...}}` with a schema the leader refuses logs `topic.alter fields=retention_ms outcome=ok status=400` and `topic.schema outcome=rejected status=400` when the client called the leader, and the same lines with `outcome=unknown` for `retention_ms` when it called another node.
 

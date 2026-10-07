@@ -2,7 +2,7 @@
 
 > Narad is a message broker in one Go binary: POST a message to any node over HTTP and get 202 once it is fsynced; consumers pull it under a lease and ack. Delivery is at least once, with no ordering guarantee.
 
-These docs track the master branch; the latest release is v3.1.0, what it added is marked "New in v3.1.0", and anything newer is marked "Unreleased" on its page.
+These docs track the master branch; the latest release is v3.2.0, what it added is marked "New in v3.2.0", and anything newer is marked "Unreleased" on its page.
 
 ## Start here
 
@@ -31,7 +31,7 @@ These docs track the master branch; the latest release is v3.1.0, what it added 
 - [Handle retries and dead letters](https://debanganthakuria.github.io/narad/build/handling-retries/): Bound retries, space them out and park messages that keep failing, using only topics, leases and acks in your consumer.
 - [Replay messages from an offset](https://debanganthakuria.github.io/narad/build/replay/): Read a partition's retained history from any offset without taking leases, so the consumers doing real work never notice.
 - [Fan out and delay messages](https://debanganthakuria.github.io/narad/build/fanout-and-delay/): Copy every message of one topic into other topics, at once or after a fixed delay, without changing your producers.
-- [Replicate a topic to another cluster](https://debanganthakuria.github.io/narad/build/remote-children/): Unreleased. Copy every message of a topic to a topic on another Narad cluster, at least once, with a fan-out child whose copy lives there.
+- [Replicate a topic to another cluster](https://debanganthakuria.github.io/narad/build/remote-children/): New in v3.2.0. Copy every message of a topic to a topic on another Narad cluster, at least once, with a fan-out child whose copy lives there.
 - [Enforce schemas on a topic](https://debanganthakuria.github.io/narad/build/schemas/): Give a topic a JSON Schema so the broker refuses every message that does not match it, then evolve the schema without breaking consumers.
 - [Go SDK: produce and consume from Go](https://debanganthakuria.github.io/narad/build/go-sdk/): Produce, consume and replay from a Go service with a client that manages leases, retries and failing nodes for you.
 - [Narad CLI](https://debanganthakuria.github.io/narad/build/cli/): Use the narad command to run a local broker, watch a topic, send test messages and switch between clusters from a terminal.
@@ -42,15 +42,15 @@ These docs track the master branch; the latest release is v3.1.0, what it added 
 - [Production checklist](https://debanganthakuria.github.io/narad/operate/production-checklist/): Check a Narad deployment against this list before it takes production traffic.
 - [Raft TLS certificates: enable and rotate](https://debanganthakuria.github.io/narad/operate/raft-tls/): Turn on mutual TLS for the Raft port, then renew and rotate its certificates without losing messages.
 - [Manage users and grants](https://debanganthakuria.github.io/narad/operate/users/): Create a user for each service and give it only the grants it needs.
-- [Manage remotes](https://debanganthakuria.github.io/narad/operate/remotes/): Unreleased. Register the other Narad clusters this one may copy topics to, rotate their passwords and the key that protects them, and know what that storage risks.
+- [Manage remotes](https://debanganthakuria.github.io/narad/operate/remotes/): New in v3.2.0. Register the other Narad clusters this one may copy topics to, rotate their passwords and the key that protects them, and know what that storage risks.
 - [Monitor and alert](https://debanganthakuria.github.io/narad/operate/monitoring/): Scrape Narad's Prometheus metrics, import the ready-made Grafana dashboard, and set up the seven alerts that catch real trouble.
 - [Scale out and in](https://debanganthakuria.github.io/narad/operate/scaling/): Add nodes to a running Narad cluster, or drain nodes and remove them, without stranding any partition.
 - [Back up and replicate topics](https://debanganthakuria.github.io/narad/operate/backups/): Keep a second copy of a topic on other nodes, and restore a node from a volume snapshot when its disk is lost.
 - [Upgrade Narad](https://debanganthakuria.github.io/narad/operate/upgrade/): Move a cluster to a new Narad release with a rolling restart, and roll it back safely if you need to.
-- [Move a topic to another cluster](https://debanganthakuria.github.io/narad/operate/playbooks/offload/): Unreleased. Move a busy topic, its producers and its consumers to another Narad cluster without losing a message, using a remote child as the bridge.
-- [Set up disaster recovery](https://debanganthakuria.github.io/narad/operate/playbooks/disaster-recovery/): Unreleased. Keep a live copy of a topic on a recovery cluster, usually in another region, and know how much you would lose if the first cluster were gone.
-- [Fail over to the recovery cluster](https://debanganthakuria.github.io/narad/operate/playbooks/failover/): Unreleased. Move producers and consumers to the recovery cluster when the cluster in use, or its region, is lost.
-- [Fail back to the original cluster](https://debanganthakuria.github.io/narad/operate/playbooks/failback/): Unreleased. Return producers and consumers to the original cluster after a failover, without processing its old backlog twice and without a replication loop.
+- [Move a topic to another cluster](https://debanganthakuria.github.io/narad/operate/playbooks/offload/): New in v3.2.0. Move a busy topic, its producers and its consumers to another Narad cluster without losing a message, using a remote child as the bridge.
+- [Set up disaster recovery](https://debanganthakuria.github.io/narad/operate/playbooks/disaster-recovery/): New in v3.2.0. Keep a live copy of a topic on a recovery cluster, usually in another region, and know how much you would lose if the first cluster were gone.
+- [Fail over to the recovery cluster](https://debanganthakuria.github.io/narad/operate/playbooks/failover/): New in v3.2.0. Move producers and consumers to the recovery cluster when the cluster in use, or its region, is lost.
+- [Fail back to the original cluster](https://debanganthakuria.github.io/narad/operate/playbooks/failback/): New in v3.2.0. Return producers and consumers to the original cluster after a failover, without processing its old backlog twice and without a replication loop.
 - [Troubleshooting](https://debanganthakuria.github.io/narad/operate/troubleshooting/): Match what you see, a status code, a readiness answer, a metric or a log line, to its cause, a check and a fix.
 
 ## Understand
@@ -62,7 +62,7 @@ These docs track the master branch; the latest release is v3.1.0, what it added 
 - [Storage engine](https://debanganthakuria.github.io/narad/understand/storage-engine/): Learn how Narad stores a partition on disk: segments of CRC-checked frames, the high watermark that bounds what consumers see, crash recovery and retention.
 - [Consume path](https://debanganthakuria.github.io/narad/understand/consume-path/): Learn how Narad hands each message to one consumer at a time: in-memory leases, a durable frontier of settled messages, and consumes across nodes.
 - [Fan-out engine](https://debanganthakuria.github.io/narad/understand/fanout-engine/): Learn how Narad copies a parent topic's messages to its children: cursors that tail the parent's committed log and never skip a record.
-- [Remote replication](https://debanganthakuria.github.io/narad/understand/remote-children/): Unreleased. Learn how a remote child copies a topic to another Narad cluster: the fan-out cursor, the send path, the checks, the stored credentials and the gates every write passes.
+- [Remote replication](https://debanganthakuria.github.io/narad/understand/remote-children/): New in v3.2.0. Learn how a remote child copies a topic to another Narad cluster: the fan-out cursor, the send path, the checks, the stored credentials and the gates every write passes.
 - [Metastore and Raft](https://debanganthakuria.github.io/narad/understand/metastore-and-raft/): Learn how Narad keeps its metadata: a Raft-replicated state machine on every node, read locally, and the rules that keep stale replicas from destroying data.
 - [Networking and security](https://debanganthakuria.github.io/narad/understand/networking-and-security/): Learn how Narad nodes talk to clients and to each other over HTTP, QUIC and Raft, and how each path is authenticated and bounded.
 - [Cluster lifecycle](https://debanganthakuria.github.io/narad/understand/cluster-lifecycle/): Learn how a Narad cluster forms, grows, recovers from crashes, and handles a topic that is deleted and recreated under the same name.
@@ -73,7 +73,7 @@ These docs track the master branch; the latest release is v3.1.0, what it added 
 - [HTTP API reference](https://debanganthakuria.github.io/narad/reference/http-api/): Look up every Narad HTTP endpoint: its parameters, request body, the grant it needs, the status codes it returns and a real example.
 - [Status codes and errors](https://debanganthakuria.github.io/narad/reference/status-codes/): Look up any status code Narad returns, what it means, and whether to retry the request.
 - [Access model and grants](https://debanganthakuria.github.io/narad/reference/access-model/): Look up which grant, ownership rule or admin right each Narad request needs.
-- [Remotes and remote children](https://debanganthakuria.github.io/narad/reference/remote-children/): Unreleased. Look up the fields, limits, link states and check classes of remotes and remote children.
+- [Remotes and remote children](https://debanganthakuria.github.io/narad/reference/remote-children/): New in v3.2.0. Look up the fields, limits, link states and check classes of remotes and remote children.
 - [Schema validation rules](https://debanganthakuria.github.io/narad/reference/schema-rules/): Look up exactly which payloads a topic's JSON Schema accepts, which schema documents Narad registers, and which changes between versions it allows.
 - [API stability and versions](https://debanganthakuria.github.io/narad/reference/api-stability/): Look up what can change in Narad's /v1 HTTP API, how nodes on different releases work together, and which release these docs describe.
 - [Configuration reference](https://debanganthakuria.github.io/narad/reference/configuration/): Look up every setting narad serve reads: its environment variable, its config file key, its default, and the values it accepts.

@@ -98,8 +98,8 @@ If you are about to read the source, start from this map:
 | `internal/persistence/storage` | Partition log engine: segments, frames, flusher, retention, high watermark |
 | `internal/persistence/wal` | The generic segmented WAL under ingress |
 | `internal/persistence/metastore` | Raft and the bbolt state machine: topics, members, users, assignments |
-| `internal/remote`, `internal/remote/sink` | Unreleased. Remote replication: the credential cache, the address guard, the target checks, and the send path of a remote child (lanes, chunks, the gate, the answer classifier) |
-| `internal/security/remotecred` | Unreleased. Sealing and opening remote passwords: key derivation, AES-256-GCM, fingerprints, the secret strength rule |
+| `internal/remote`, `internal/remote/sink` | New in v3.2.0. Remote replication: the credential cache, the address guard, the target checks, and the send path of a remote child (lanes, chunks, the gate, the answer classifier) |
+| `internal/security/remotecred` | New in v3.2.0. Sealing and opening remote passwords: key derivation, AES-256-GCM, fingerprints, the secret strength rule |
 | `internal/domain/*` | Pure types: topic, user, records, remotes |
 | `internal/platform/*` | Config, metrics, partitioner, network utilities |
 

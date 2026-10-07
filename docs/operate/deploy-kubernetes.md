@@ -20,7 +20,7 @@ replicaCount: 3
 initialClusterSize: 3        # set once, at the first install
 
 image:
-  tag: v3.1.0                # pin a release
+  tag: v3.2.0                # pin a release
 
 persistence:
   size: 50Gi                 # per pod; fixed once installed
@@ -70,7 +70,7 @@ The chart lives in the repository, so the install starts from a clone of the rel
 1. Get the chart and create a namespace:
 
     ```bash
-    git clone --branch v3.1.0 --depth 1 \
+    git clone --branch v3.2.0 --depth 1 \
       https://github.com/DebanganThakuria/narad
     cd narad
     kubectl create namespace narad
@@ -98,7 +98,7 @@ The chart lives in the repository, so the install starts from a clone of the rel
     helm install narad ./charts/narad -n narad \
       --set replicaCount=3 \
       --set persistence.size=50Gi \
-      --set image.tag=v3.1.0
+      --set image.tag=v3.2.0
     ```
 
     The policy holds only on a CNI that enforces NetworkPolicy ([Fence the cluster ports](production-checklist.md#network-policy)). Turn it off (`networkPolicy.enabled=false`) without TLS or `security.allowPlaintextRaft`, and the v3.1.0 chart refuses to install and names the alternatives; the v3.0.1 chart has no policy, ignores `networkPolicy.enabled` and runs the Raft port unfenced.
@@ -152,7 +152,7 @@ Images are signed keyless with [cosign](https://github.com/sigstore/cosign) and 
 ```bash
 IDENTITY='^https://github\.com/DebanganThakuria/narad/'
 IDENTITY+='\.github/workflows/container\.yml@refs/(heads/master|tags/v.*)$'
-cosign verify ghcr.io/debanganthakuria/narad:v3.1.0 \
+cosign verify ghcr.io/debanganthakuria/narad:v3.2.0 \
   --certificate-identity-regexp "$IDENTITY" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```

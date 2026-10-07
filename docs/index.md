@@ -376,7 +376,7 @@ To scale out, raise `replicaCount`. The new pod joins the cluster and the leader
 ```sh
 helm install narad ./charts/narad \
   -n narad --set replicaCount=3 \
-  --set image.tag=v3.1.0
+  --set image.tag=v3.2.0
 ```
 
 The chart's NetworkPolicy fences the Raft port to the Narad pods by default; [Raft TLS](operate/raft-tls.md) is the production choice.
@@ -524,7 +524,7 @@ What a `202` promises, and what Narad trades for it.
 - **[Fan-out children](build/fanout-and-delay.md)** Every message committed to a parent is copied into each child, with its own consumers and retention. Producers change nothing.
 - **[Replica children](operate/backups.md#replica-children)** A child whose partitions are placed on other nodes than the parent's: an async second copy of a topic, from one API call.
 - **[Delay children](build/fanout-and-delay.md#delay-children)** A child with `delay_ms` receives each message that long after the parent committed it: delayed work with no scheduler.
-- **[Remote children](build/remote-children.md)** (unreleased) A child whose copy lives on another Narad cluster, in another region if you like: move a topic, or keep a disaster-recovery copy, through the other cluster's own API.
+- **[Remote children](build/remote-children.md)** (v3.2.0) A child whose copy lives on another Narad cluster, in another region if you like: move a topic, or keep a disaster-recovery copy, through the other cluster's own API.
 - **[Schemas at the broker](build/schemas.md)** Give a topic a JSON Schema and a produce that does not fit gets `400` naming the field. It never reaches the log.
 - **[Any payload](build/consuming.md#the-payload-comes-back-the-way-you-sent-it)** Send JSON, text or raw bytes as `application/octet-stream`. JSON comes back verbatim, text as text, and binary as base64 with a flag that says so.
 - **[A Go SDK and a CLI](build/go-sdk.md)** The Go client renews leases, retries with jitter and trips per-node circuit breakers, on the standard library alone. The `narad` binary is the broker and the CLI in one.
@@ -552,7 +552,7 @@ The `narad` binary is both the broker and the CLI. `narad server start --dev` ru
       -v narad-data:/var/lib/narad \
       -e NARAD_SECURITY_ENABLED=false \
       -e NARAD_CLUSTER_ADDR=127.0.0.1:7943 \
-      ghcr.io/debanganthakuria/narad:v3.1.0
+      ghcr.io/debanganthakuria/narad:v3.2.0
     ```
 
 === "Homebrew"

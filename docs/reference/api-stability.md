@@ -20,21 +20,21 @@ A change that has to break the contract goes to a new `/v2` prefix, and both ver
 
 ## Node-to-node protocol {#node-protocol}
 
-Nodes talk to each other over a versioned protocol under the same rule. Operation codes are only ever added. New fields are optional and go at the end of a message. A node that does not know a new field answers with a clean `400`, and the sender retries in the older shape. That is what lets a cluster run two releases side by side during a rolling upgrade. The two operations remote replication adds (unreleased) have no older shape; they are refused with `412` until every member runs the release that knows them. Release-specific conditions, such as the config keys an older binary refuses, are in [Upgrade Narad](../operate/upgrade.md#version-notes).
+Nodes talk to each other over a versioned protocol under the same rule. Operation codes are only ever added. New fields are optional and go at the end of a message. A node that does not know a new field answers with a clean `400`, and the sender retries in the older shape. That is what lets a cluster run two releases side by side during a rolling upgrade. The two operations remote replication adds in v3.2.0 have no older shape; they are refused with `412` until every member runs the release that knows them. Release-specific conditions, such as the config keys an older binary refuses, are in [Upgrade Narad](../operate/upgrade.md#version-notes).
 
 ## Which release these docs describe {#docs-version}
 
-These docs follow `master`. The latest release is **v3.1.0**, tagged on 6 October 2026.
+These docs follow `master`. The latest release is **v3.2.0**, tagged on 7 October 2026.
 
-Anything v3.1.0 added carries this line under its heading:
+Anything v3.2.0 added carries this line under its heading:
 
-**New in v3.1.0.**
+**New in v3.2.0.**
 
-In a table, the item's name ends in "(v3.1.0)", and in a sentence the change is marked "(from v3.1.0)".
+In a table, the item's name ends in "(v3.2.0)", and in a sentence the change is marked "(from v3.2.0)". What v3.1.0 added is marked the same way with its own version.
 
-Work merged to `master` after v3.1.0 is marked unreleased until it ships: in a table, its name ends in "(unreleased)", and under its heading it carries this line:
+Work merged to `master` after v3.2.0 is marked unreleased until it ships: in a table, its name ends in "(unreleased)", and under its heading it carries this line:
 
-**Unreleased:** in master, not in v3.1.0.
+**Unreleased:** in master, not in v3.2.0.
 
 When the next release ships, those markers name that release instead. The [changelog](https://github.com/DebanganThakuria/narad/blob/master/CHANGELOG.md) lists every change by release.
 

@@ -67,7 +67,7 @@ Create both secrets (the security secret from [Deploy on Kubernetes](deploy-kube
 helm install narad ./charts/narad -n narad \
   --set replicaCount=3 \
   --set persistence.size=50Gi \
-  --set image.tag=v3.1.0 \
+  --set image.tag=v3.2.0 \
   --set security.clusterTLS.enabled=true
 ```
 

@@ -6,7 +6,7 @@ description: "Look up the fields, limits, link states and check classes of remot
 
 Look up the fields, limits, link states and check classes of remotes and remote children.
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 ```sh title="Request"
 curl -sS -u "$AUTH" "$NARAD/v1/topics/orders/children" \

@@ -6,7 +6,7 @@ description: "Move a busy topic, its producers and its consumers to another Nara
 
 Move a busy topic, its producers and its consumers to another Narad cluster without losing a message, using a remote child as the bridge.
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 Before you start: every item of [Before you start](../remotes.md#before-you-start) on the source cluster `a` and the target cluster `b`, the CLI with a context for each, and a way to stop and start the topic's consumers and to repoint its producers.
 
