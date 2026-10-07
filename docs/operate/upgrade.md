@@ -74,7 +74,7 @@ Partition segments, consumer position files and fan-out cursor files need nothin
 
 **New in v3.2.0.**
 
-1. **Never after a remote write.** v3.2.0 adds Raft entry types 33 to 37 for [remotes](remotes.md). Once a remote has been created or a remote child attached, a rollback to v3.1.0 or earlier is unsupported, even after every remote and remote child is deleted: v3.1.0 stops applying at the first such entry, and refuses at startup a database that applied one ([`written by a newer Narad release`](troubleshooting.md#log-metastore-newer-database)). Step 7 above applies to these types as to v3.1.0's.
+1. **Never after a remote write.** v3.2.0 adds Raft entry types 33 to 37 for [remotes](remotes.md). Once a remote has been created or a remote child attached, a rollback to v3.1.0 or earlier is unsupported, even after every remote and remote child is deleted: v3.1.0 stops applying at the first such entry, and refuses at startup a database that applied one ([`written by a newer Narad release`](troubleshooting.md#log-metastore-newer-database)). Before the first remote write a rollback is fine, but make no remote write while any node is being rolled back: a stopped node keeps counting as v3.2.0 (step 7 above), so the leader would accept the write, and the node would stop applying when it starts on v3.1.0.
 2. **Remove the new config keys.** v3.1.0 refuses to start with `http.max_batch_body_bytes_in_flight` or any `remotes.*` key in `narad.config`. The chart passes its `remotes` values, and the `cluster-secret-previous` key, as environment variables, which v3.1.0 ignores.
 3. **Move producers back to v3.1.0's batch limits.** v3.1.0 answers a batch of more than 100 messages `400`, a body over 1 MiB `413`, and a compressed body `400`.
 
