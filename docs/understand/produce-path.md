@@ -45,7 +45,7 @@ The target [partition](../reference/glossary.md#partition) is chosen at accept t
 
 **New in v3.1.0.**
 
-A [batch produce](../reference/http-api.md#produce-batch) (`POST /produce/batch`, up to 100 records; unreleased, up to 1,000 in a body of up to 16 MiB, optionally zstd or gzip compressed) takes the same path for all of its records at once. Every record is checked (key, payload, partition range, schema) before any is appended, and the first failure refuses the whole batch.
+A [batch produce](../reference/http-api.md#produce-batch) (`POST /produce/batch`, up to 100 records; from v3.2.0, up to 1,000 in a body of up to 16 MiB, optionally zstd or gzip compressed) takes the same path for all of its records at once. Every record is checked (key, payload, partition range, schema) before any is appended, and the first failure refuses the whole batch.
 
 The records are then staged into the WAL in one append (`wal.Log.AppendManyWith`): in batch order, under one hold of the append lock, so they take consecutive sequence numbers with nothing staged between them. They share one accept time, the incarnation id the payloads were validated against, and one group commit. The `202` goes out once the last of them is durable.
 

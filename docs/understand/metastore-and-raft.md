@@ -127,9 +127,9 @@ Each metadata change is a Raft entry of one type (create topic, register member,
 
 Once every member has reported a release that adds an entry type, rolling a node back to a release without that type is unsupported, whether or not the leader has used the type yet. The node being rolled back counts as the newer release while it is down, so the leader may use the type in that time (the dead mark it writes for that node after 30 s of silence, a topic create), and 3.0.x would skip those entries while a later release stops on them. Roll back only while a member still runs the older release ([Upgrade](../operate/upgrade.md#roll-back-newer)), and never add a node on an older release to a fully upgraded cluster; the leader refuses it.
 
-### The entry types this release adds {#new-entry-types}
+### The entry types v3.1.0 adds {#new-entry-types}
 
-This release adds ten entry types, 23 to 32. Each one carries what its write was checked against, so the state machine refuses the write (identically on every node) when the metadata changed in between. The entry types every release applies keep their exact meaning, so a 3.0.x node and an upgraded one never apply the same entry differently.
+v3.1.0 adds ten entry types, 23 to 32. Each one carries what its write was checked against, so the state machine refuses the write (identically on every node) when the metadata changed in between. The entry types every release applies keep their exact meaning, so a 3.0.x node and an upgraded one never apply the same entry differently.
 
 | Type | Name in the logs | What it does |
 |---|---|---|
@@ -146,11 +146,11 @@ This release adds ten entry types, 23 to 32. Each one carries what its write was
 
 The topic manager on the leader asks before each write whether every member applies the type. While one does not, it proposes the entry every release applies and the leader-side checks are all the protection (the name lock, the leader barrier and the owner re-check); it logs `metastore: not using a new raft entry type yet; proposing the entries every member applies` at info, at most once a minute per type, with the member holding it back. The first time the leader uses each type it logs `metastore: every member applies raft entry type <n>; using <name>` at info. That line marks the first use, not the rollback boundary, which comes earlier: once every member has reported this release, a rollback is unsupported even if no such line was logged ([above](#entry-types)). When the state machine refuses a write because the topic changed, the manager reads the topic again, checks the request again and retries once; a second refusal answers `409` (`topic changed since it was read`).
 
-### Remote entry types (unreleased) {#remote-entry-types}
+### Remote entry types (v3.2.0) {#remote-entry-types}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
-The next release adds five entry types, 33 to 37, all for [remote replication](remote-children.md), under the same rule: the leader proposes one only once every member reports a release that applies it. A remote write has no older entry to fall back to, so until then it is refused with `412`, naming the member that holds the type back; nothing is written another way.
+v3.2.0 adds five entry types, 33 to 37, all for [remote replication](remote-children.md), under the same rule: the leader proposes one only once every member reports a release that applies it. A remote write has no older entry to fall back to, so until then it is refused with `412`, naming the member that holds the type back; nothing is written another way.
 
 | Type | Name in the logs | What it does |
 |---|---|---|
@@ -190,7 +190,7 @@ The first seconds of a cluster need care. A partition placed on the only member 
 
 | Thing | Value |
 |---|---|
-| FSM store | bbolt (`fsm.db`), buckets: `topics`, `schemas`, `assignments`, `members`, `users`, `removed_members`, `remotes` (unreleased), and `fsm_meta` (applied index, the transaction that wrote it, newest entry type applied) |
+| FSM store | bbolt (`fsm.db`), buckets: `topics`, `schemas`, `assignments`, `members`, `users`, `removed_members`, `remotes` (from v3.2.0), and `fsm_meta` (applied index, the transaction that wrote it, newest entry type applied) |
 | Raft log store | boltdb (`raft.db`); snapshots: file store, **2 retained** |
 | Snapshot copy | `fsm.db.snapshot-<random>` beside `fsm.db`, deleted once Raft has written its snapshot; a restore streams into `fsm.db.restore` ([Snapshots](#snapshots)) |
 | Heartbeat / dead marking | every 5s / after 30s silence |
@@ -198,7 +198,7 @@ The first seconds of a cluster need care. A partition placed on the only member 
 | `Barrier` timeout | 5s |
 | Failed metastore write | retried 100 ms doubling to 5 s, for up to 30 s, then the node stops ([When a node stops applying](#fail-stop)) |
 | New Raft entry type | proposed only once every Raft server and member record reports a release that applies it ([Raft entry types](#entry-types)) |
-| Entry types added by this release | 23 to 32 ([the list](#new-entry-types)); the leader logs the first use of each at info. Unreleased: 33 to 37 ([remote entry types](#remote-entry-types)) |
+| Entry types added by v3.1.0 | 23 to 32 ([the list](#new-entry-types)); the leader logs the first use of each at info. v3.2.0 adds 33 to 37 ([remote entry types](#remote-entry-types)) |
 | Orphan assignment row prune | on the leader, when it takes over and every 6th reconcile tick (about a minute) |
 | Joiner older than every member | refused with `409`, code `older_release`; the leader logs it at error at most once a minute per joiner |
 | Startup reconcile wait for caught-up | up to 60s, then the destructive sweep is skipped rather than rushed |

@@ -134,7 +134,7 @@ See: [Produce messages](../build/producing.md#keys).
 
 ## Lane {#lane}
 
-Unreleased. One of up to 8 ordered streams a remote child sends each parent partition on. A key always travels on one lane, and a lane sends one request at a time.
+New in v3.2.0. One of up to 8 ordered streams a remote child sends each parent partition on. A key always travels on one lane, and a lane sends one request at a time.
 
 See: [Remote replication](../understand/remote-children.md#send-path).
 
@@ -185,13 +185,13 @@ See: [Ack, extend or nack a message](http-api.md#ack).
 
 ## Remote {#remote}
 
-Unreleased. Another Narad cluster this cluster may send to: a name, an `https` URL, a username and a write-only password, an optional CA bundle and limits, managed by admins through the API.
+New in v3.2.0. Another Narad cluster this cluster may send to: a name, an `https` URL, a username and a write-only password, an optional CA bundle and limits, managed by admins through the API.
 
 See: [Manage remotes](../operate/remotes.md).
 
 ## Remote child {#remote-child}
 
-Unreleased. A fan-out child whose topic lives on a remote. On this cluster it is a stub with no partitions; the owners of the parent's partitions send every record to the remote's topic through its batch produce, at least once.
+New in v3.2.0. A fan-out child whose topic lives on a remote. On this cluster it is a stub with no partitions; the owners of the parent's partitions send every record to the remote's topic through its batch produce, at least once.
 
 See: [Replicate a topic to another cluster](../build/remote-children.md).
 

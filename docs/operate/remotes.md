@@ -6,7 +6,7 @@ description: "Register the other Narad clusters this one may copy topics to, rot
 
 Register the other Narad clusters this one may copy topics to, rotate their passwords and the key that protects them, and know what that storage risks.
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 Before you start: the `admin` grant on both clusters, the [CLI](../build/cli.md) with a [context](../build/cli.md#contexts) for each (`a` for this cluster, `b` for the other one here), and the checklist below.
 
@@ -17,7 +17,7 @@ A [remote](../reference/glossary.md#remote) is another Narad cluster this cluste
 Check each of these first. Every one is enforced, and each refusal names what is missing.
 
 - **Security on, on both clusters.** Every remotes route answers `403` (`remotes require security`) on a node with security off, and the attach checks refuse a target with security off. A node whose metadata holds a remote refuses to start with security off or without a cluster secret.
-- **A strong cluster secret here.** Remote passwords are sealed under a key derived from `NARAD_CLUSTER_SECRET`, so a create, a password change and a re-encrypt answer [`412`](../reference/status-codes.md#status-412) unless the secret is at least 32 random bytes as `openssl rand -base64 32` (padded standard base64) or `openssl rand -hex 32` prints them. A passphrase is refused even when it happens to decode, because the key is only as strong as the secret and a snapshot holder can test guesses offline. A secret made the documented way passes as it is, except about once in ten thousand, when it looks like a passphrase (no digit, `+` or `/`); generate another. A secured single node started without `NARAD_CLUSTER_SECRET` generates a secret for node RPC that lasts only until it restarts; that secret never seals a remote password, so set `NARAD_CLUSTER_SECRET` before you create a remote on such a node (unreleased). Two clusters never share a secret ([operating condition 5](#operating-conditions)).
+- **A strong cluster secret here.** Remote passwords are sealed under a key derived from `NARAD_CLUSTER_SECRET`, so a create, a password change and a re-encrypt answer [`412`](../reference/status-codes.md#status-412) unless the secret is at least 32 random bytes as `openssl rand -base64 32` (padded standard base64) or `openssl rand -hex 32` prints them. A passphrase is refused even when it happens to decode, because the key is only as strong as the secret and a snapshot holder can test guesses offline. A secret made the documented way passes as it is, except about once in ten thousand, when it looks like a passphrase (no digit, `+` or `/`); generate another. A secured single node started without `NARAD_CLUSTER_SECRET` generates a secret for node RPC that lasts only until it restarts; that secret never seals a remote password, so set `NARAD_CLUSTER_SECRET` before you create a remote on such a node. Two clusters never share a secret ([operating condition 5](#operating-conditions)).
 - **An encrypted API hop, on both clusters.** TLS from a client usually ends at an ingress or a load balancer, and the hop from there to the Narad pod is plain HTTP unless something encrypts it. Narad cannot see that hop, so you attest it:
     - *Here*, a create or a password change carries the password in its body. Each node answers those `412` until `remotes.api_hop_encrypted` is `true` on it (`remotes.apiHopEncrypted` in the chart). Set it only once the ingress-to-pod hop is encrypted: a service mesh with mutual TLS, or an ingress that re-encrypts to the pod.
     - *On the target*, every request from this cluster carries the replicator's `Authorization` header across the same kind of hop. Encrypt that hop on the target too. This cluster cannot check it for you; it is a prerequisite for any cluster you register as a remote.
@@ -179,7 +179,7 @@ The command exits `0` only when `result` is `pass`; otherwise it ends with `nara
 - `last_error` is a class, never text from the remote.
 - `server_cert_not_after` and `rtt_ms` appear only with `remotes.allowed_hosts` set; without it a node shows nothing the remote answered.
 - `lingering` lists deleted remotes some node still holds, and the nodes that did not answer.
-- `not_answering` lists every node that did not answer, even when no answering node holds a deleted remote, and `narad remote ls` prints a warning naming them (unreleased).
+- `not_answering` lists every node that did not answer, even when no answering node holds a deleted remote, and `narad remote ls` prints a warning naming them.
 - `--no-nodes` (`?nodes=false`) skips asking the nodes.
 
 ## Change a remote {#change}
@@ -192,7 +192,7 @@ narad --ctx a remote set b --max-in-flight 32 --compression zstd
 
 | Limit | Default | Range | Meaning |
 |---|---|---|---|
-| `max_in_flight` (`--max-in-flight`) | 16 | 1 to 256 | Record requests to the remote in flight at once on each node, shared by every cursor that sends to it, each on its own connection. Target checks, listings and capability probes use 4 more connections of their own (unreleased), so they never wait behind record requests, nor these behind them. |
+| `max_in_flight` (`--max-in-flight`) | 16 | 1 to 256 | Record requests to the remote in flight at once on each node, shared by every cursor that sends to it, each on its own connection. Target checks, listings and capability probes use 4 more connections of their own, so they never wait behind record requests, nor these behind them. |
 | `request_timeout_ms` (`--request-timeout`) | 30 s | 5 s to 120 s | Timeout of one request. |
 | `idle_conn_timeout_ms` (`--idle-conn-timeout`) | 30 s | 1 s to 5 min | How long an idle connection is kept. |
 | `conn_max_age_ms` (`--conn-max-age`) | 5 min | 10 s to 1 h | How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up. |

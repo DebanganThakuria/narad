@@ -167,7 +167,7 @@ The node rejoins with the metadata it had at the snapshot, and the Raft leader b
 
 ## Copy a topic to another cluster {#remote-children}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 A replica child and volume snapshots stay inside one cluster. A [remote child](../reference/glossary.md#remote-child) keeps an asynchronous copy of a topic on another Narad cluster, in another region if you like, which survives the loss of this whole cluster. It trails the parent by the link's lag, and its copy is consumed on the other cluster. [Set up disaster recovery](playbooks/disaster-recovery.md) shows the setup, the retention it needs and what to watch.
 

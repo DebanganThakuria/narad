@@ -108,21 +108,21 @@ with an operator's cached credentials.
 | Limit | Value | Over it |
 |---|---|---|
 | Request body | 1 MiB (1,048,576 bytes) | [`413`](status-codes.md#status-413); `400` on the user and attach-child routes |
-| Batch produce body (unreleased) | 16 MiB, each message's payload at most 1 MiB | [`413`](status-codes.md#status-413) |
+| Batch produce body (v3.2.0) | 16 MiB, each message's payload at most 1 MiB | [`413`](status-codes.md#status-413) |
 | Batch ack body (v3.1.0) | 64 KiB | [`413`](status-codes.md#status-413) |
-| Remotes request body (unreleased) | 128 KiB | [`413`](status-codes.md#status-413) |
+| Remotes request body (v3.2.0) | 128 KiB | [`413`](status-codes.md#status-413) |
 | Request headers | 64 KiB by default | [`431`](status-codes.md#status-431) |
-| Messages per batch produce | 1,000 (unreleased; 100 in v3.1.0) | [`400`](status-codes.md#status-400) |
+| Messages per batch produce | 1,000 (from v3.2.0; 100 in v3.1.0) | [`400`](status-codes.md#status-400) |
 | Records per batch consume, handles per batch ack (v3.1.0) | 100 | [`400`](status-codes.md#status-400) |
 | Consume `wait` | 10 s by default | clamped, with an `X-Narad-Wait-Clamped` response header |
 | Concurrent consumes per user (or per client IP with security off), per node | 1024 by default | [`429`](status-codes.md#status-429) |
 | Concurrent produces per user, per node (v3.1.0) | off by default | [`429`](status-codes.md#status-429) |
-| Batch produce bodies over 1 MiB being read at once, per node (unreleased) | 256 MiB by default | [`503`](status-codes.md#status-503) with `Retry-After: 1` |
+| Batch produce bodies over 1 MiB being read at once, per node (v3.2.0) | 256 MiB by default | [`503`](status-codes.md#status-503) with `Retry-After: 1` |
 
 The limits marked "by default" are settings: `http.max_header_bytes`,
 `http.max_consume_wait`, `http.max_consume_in_flight_per_identity`,
 `http.max_produce_in_flight_per_identity` (from v3.1.0) and
-`http.max_batch_body_bytes_in_flight` (unreleased), in that order,
+`http.max_batch_body_bytes_in_flight` (from v3.2.0), in that order,
 all in the [Configuration reference](configuration.md#http).
 
 ### Errors
@@ -167,9 +167,10 @@ cannot read are removed after the page is cut.
 
 ### Release markers
 
-This page describes `master`. Anything the latest release, v3.1.0,
-added is marked **New in v3.1.0**, and its entry says how a v3.0.1
-node answers a request that uses it. Anything merged since v3.1.0 is
+This page describes `master`. Anything the latest release, v3.2.0,
+added is marked **New in v3.2.0**, and what v3.1.0 added is marked
+**New in v3.1.0**. Where an older node answers a request that uses
+it differently, its entry says how. Anything merged since v3.2.0 is
 marked **Unreleased** until it ships. See
 [Which release these docs describe](api-stability.md#docs-version).
 
@@ -338,7 +339,7 @@ placeholders out of any total. An owner that does not answer within
 2 seconds counts as `unreachable`. A v3.0.1 node answers `421`
 instead.
 
-**Unreleased:** a [remote child](glossary.md#remote-child)'s stub
+**New in v3.2.0:** a [remote child](glossary.md#remote-child)'s stub
 has `partitions: 0` and a `remote` object that names the remote and
 the topic there. Its `created_by` and `paused_by` are shown to
 admins only.
@@ -454,7 +455,7 @@ you need all or nothing.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist, also after the answering node caught up with the leader. |
-| [`409`](status-codes.md#status-409) | `schema_base_version` is not the current version, the history holds 1000 versions or (from v3.1.0) the new version would take it past 4 MiB or the cluster's schemas past 256 MiB, the topic is a child whose schema its parent manages, the new retention is too short for a delay child, or (from v3.1.0) the topic was deleted and recreated, or grew, under the request twice in a row (`topic changed since it was read`). Unreleased: the topic is a remote child's stub, which takes no change, or the new retention is below 24 hours on a parent with remote children (a retention already below it may still grow). |
+| [`409`](status-codes.md#status-409) | `schema_base_version` is not the current version, the history holds 1000 versions or (from v3.1.0) the new version would take it past 4 MiB or the cluster's schemas past 256 MiB, the topic is a child whose schema its parent manages, the new retention is too short for a delay child, or (from v3.1.0) the topic was deleted and recreated, or grew, under the request twice in a row (`topic changed since it was read`). New in v3.2.0: the topic is a remote child's stub, which takes no change, or the new retention is below 24 hours on a parent with remote children (a retention already below it may still grow). |
 | [`413`](status-codes.md#status-413) | The body is over 1 MiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, the answering node could not reach the leader to confirm a topic it does not have, or (from v3.1.0) a partition increase found every live node being decommissioned, so no node can take the new partitions; nothing was changed. |
@@ -497,7 +498,7 @@ delete is committed the answer is `204`, even if a node that is
 down could not remove its files yet; that node removes them when
 it next starts.
 
-**Unreleased:** deleting a parent that has
+**New in v3.2.0:** deleting a parent that has
 [remote children](glossary.md#remote-child) deletes their stubs in
 the same entry, and deleting a remote child's stub deletes the link.
 Either is refused with `409` while any record of the parent is not
@@ -506,29 +507,29 @@ checks every member's ingress backlog and every cursor first. The
 same refusal, with its body, is in
 [Detach a child](#detach-child).
 
-**Grant needed:** Ownership of the topic, or `admin`. Unreleased: a remote child's stub has no owner; the owner of its parent, or an `admin`, deletes it, with security on.
+**Grant needed:** Ownership of the topic, or `admin`. New in v3.2.0: a remote child's stub has no owner; the owner of its parent, or an `admin`, deletes it, with security on.
 
 **Parameters**
 
 | Name | Description |
 |---|---|
 | `topic`<br>path, string, required | Name of the topic. |
-| `force` (unreleased)<br>query, boolean, optional, default `False` | `true` deletes a parent with remote children, or a remote child's stub, even while records are unshipped, abandoning them. Ignored for any other topic. `narad topic rm --force` never sends it: there `--force` only skips the prompt. |
+| `force` (v3.2.0)<br>query, boolean, optional, default `False` | `true` deletes a parent with remote children, or a remote child's stub, even while records are unshipped, abandoning them. Ignored for any other topic. `narad topic rm --force` never sends it: there `--force` only skips the prompt. |
 
 **Responses**
 
 | Status | Meaning |
 |---|---|
 | [`204`](status-codes.md#status-204) | Deleted. |
-| [`400`](status-codes.md#status-400) | Unreleased. `force` is not `true` or `false`. |
+| [`400`](status-codes.md#status-400) | New in v3.2.0. `force` is not `true` or `false`. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
-| [`403`](status-codes.md#status-403) | Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic. For a remote child's stub (unreleased), the caller is neither an `admin` nor the parent's owner, or security is off. For a parent with remote children (unreleased), security is off (`remotes require security`). |
+| [`403`](status-codes.md#status-403) | Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic. For a remote child's stub (from v3.2.0), the caller is neither an `admin` nor the parent's owner, or security is off. For a parent with remote children (from v3.2.0), security is off (`remotes require security`). |
 | [`404`](status-codes.md#status-404) | The topic does not exist, also after the answering node caught up with the leader. |
-| [`409`](status-codes.md#status-409) | New in v3.1.0. The topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was deleted. Read the topic again before deleting it. Unreleased, for a parent with remote children or a stub without `force`, records of the parent are not yet on the remote (the body carries `lag_messages`, `lag_complete` and `dispatch_backlog`), or the leader found a remote child the answering node did not know of yet; retry. |
-| [`412`](status-codes.md#status-412) | Unreleased. The cluster leader runs a release without remote children; finish the upgrade. |
-| [`429`](status-codes.md#status-429) | Unreleased. The leader ran an unshipped check for this parent less than 10 seconds ago; retry after `Retry-After`. |
-| [`501`](status-codes.md#status-501) | Unreleased. The answering node has no remote plane, so it cannot delete a remote-linked topic. |
-| [`503`](status-codes.md#status-503) | The cluster has no leader to write the delete, or the answering node could not reach the leader to confirm a topic it does not have. Unreleased, for a remote-linked topic, also when the unshipped check could not run. |
+| [`409`](status-codes.md#status-409) | New in v3.1.0. The topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was deleted. Read the topic again before deleting it. From v3.2.0, for a parent with remote children or a stub without `force`, records of the parent are not yet on the remote (the body carries `lag_messages`, `lag_complete` and `dispatch_backlog`), or the leader found a remote child the answering node did not know of yet; retry. |
+| [`412`](status-codes.md#status-412) | New in v3.2.0. The cluster leader runs a release without remote children; finish the upgrade. |
+| [`429`](status-codes.md#status-429) | New in v3.2.0. The leader ran an unshipped check for this parent less than 10 seconds ago; retry after `Retry-After`. |
+| [`501`](status-codes.md#status-501) | New in v3.2.0. The answering node has no remote plane, so it cannot delete a remote-linked topic. |
+| [`503`](status-codes.md#status-503) | The cluster has no leader to write the delete, or the answering node could not reach the leader to confirm a topic it does not have. From v3.2.0, for a remote-linked topic, also when the unshipped check could not run. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" -X DELETE "$NARAD/v1/topics/orders-audit"
@@ -600,7 +601,7 @@ Link a topic to a parent so that it receives a copy of every message
 produced to the parent from the moment of the link. Task guide:
 [Fan out and delay messages](../build/fanout-and-delay.md).
 
-**Unreleased:** a child can also be a
+**New in v3.2.0:** a child can also be a
 [remote child](glossary.md#remote-child), whose copy goes to a topic
 on another Narad cluster. Its attach, pause, resume and skip need the
 `admin` grant with security on. Task guide:
@@ -620,7 +621,7 @@ The delay field here is `delay_ms`. Creating a child in one call
 with [create a topic](#create-topic) takes `fanout_delay_ms`
 instead.
 
-**Unreleased:** with `remote`, the request creates `child` as a
+**New in v3.2.0:** with `remote`, the request creates `child` as a
 [remote child](glossary.md#remote-child) instead: a stub with no
 partitions whose copies go, through the remote's batch produce, to
 `remote_topic` on that cluster. The child must not exist yet. The
@@ -630,7 +631,7 @@ delay child or stub and has no remote children, the schemas match,
 it takes batch produce, the credential is not an admin there),
 resolves the start offsets, and writes one Raft entry. With
 `dry_run` it stops before the entry and answers what it found.
-Without `remotes.allowed_hosts` on the leader (unreleased), a dry
+Without `remotes.allowed_hosts` on the leader, a dry
 run checks from the leader alone, its reports carry only `node`,
 `result` and `class`, and a failed attach or resume answers the
 `class` and the failing `members` instead of each member's report.
@@ -639,7 +640,7 @@ fields `remote_topic`, `from`, `lanes` and `dry_run` without
 `remote` get `400`. Task guide:
 [Replicate a topic to another cluster](../build/remote-children.md).
 
-**Grant needed:** Ownership of both topics, or `admin`. Unreleased: with `remote`, `admin` and a node with security on; ownership is not enough.
+**Grant needed:** Ownership of both topics, or `admin`. New in v3.2.0: with `remote`, `admin` and a node with security on; ownership is not enough.
 
 **Parameters**
 
@@ -653,29 +654,29 @@ fields `remote_topic`, `from`, `lanes` and `dry_run` without
 |---|---|
 | `child`<br>string, required | Name of the existing topic to attach. |
 | `delay_ms`<br>integer, optional | Make the child a delay child that receives each message this long after the parent committed it. At most one year. Fixed while attached. |
-| `remote` (unreleased)<br>string, optional | Create `child` as a remote child that sends to this remote. `child` must not exist yet. |
-| `remote_topic` (unreleased)<br>string, optional | With `remote`, the topic on the remote. Defaults to the parent's name. |
-| `from` (unreleased)<br>string: `attach`, `unconsumed`, `earliest`, optional, default `attach` | With `remote`, where the link starts on each parent partition. `attach` at the parent's committed high watermark, as a local child; `unconsumed` at the parent's consumer ack frontier, so everything not yet acked here is sent; `earliest` at the oldest retained record. |
-| `lanes` (unreleased)<br>integer, optional, default `1` | With `remote`, ordered streams per parent partition. A key always uses one lane; more lanes help a link with a long round trip. |
-| `dry_run` (unreleased)<br>boolean, optional, default `False` | With `remote`, run every check and resolve the start offsets, and write nothing. |
+| `remote` (v3.2.0)<br>string, optional | Create `child` as a remote child that sends to this remote. `child` must not exist yet. |
+| `remote_topic` (v3.2.0)<br>string, optional | With `remote`, the topic on the remote. Defaults to the parent's name. |
+| `from` (v3.2.0)<br>string: `attach`, `unconsumed`, `earliest`, optional, default `attach` | With `remote`, where the link starts on each parent partition. `attach` at the parent's committed high watermark, as a local child; `unconsumed` at the parent's consumer ack frontier, so everything not yet acked here is sent; `earliest` at the oldest retained record. |
+| `lanes` (v3.2.0)<br>integer, optional, default `1` | With `remote`, ordered streams per parent partition. A key always uses one lane; more lanes help a link with a long round trip. |
+| `dry_run` (v3.2.0)<br>boolean, optional, default `False` | With `remote`, run every check and resolve the start offsets, and write nothing. |
 
 **Responses**
 
 | Status | Meaning |
 |---|---|
-| [`200`](status-codes.md#status-200) | Attached. The body is the parent topic. Unreleased, for a remote `dry_run`: every check passed and nothing was written, and the body is a report instead, with `dry_run`, `attach_offsets` (the start offset per parent partition), `checks` (each member's report), `warnings` and, when the leader could probe the target, `capabilities` (`max_messages` per batch and `zstd`). |
-| [`201`](status-codes.md#status-201) | Unreleased. The remote child was created. The body is its stub, plus `warnings` when there are any (a parent retention below 72 hours, a target that serves no topic IDs, a certificate that expires within 14 days). |
-| [`400`](status-codes.md#status-400) | `child` is missing, the two names are the same, or `delay_ms` is out of range. Unreleased: a remote field without `remote`, a name that is not a remote's or a topic's, `lanes` outside 1 to 8, `from` other than `attach`, `unconsumed` or `earliest`, or a remote that does not exist. |
+| [`200`](status-codes.md#status-200) | Attached. The body is the parent topic. From v3.2.0, for a remote `dry_run`: every check passed and nothing was written, and the body is a report instead, with `dry_run`, `attach_offsets` (the start offset per parent partition), `checks` (each member's report), `warnings` and, when the leader could probe the target, `capabilities` (`max_messages` per batch and `zstd`). |
+| [`201`](status-codes.md#status-201) | New in v3.2.0. The remote child was created. The body is its stub, plus `warnings` when there are any (a parent retention below 72 hours, a target that serves no topic IDs, a certificate that expires within 14 days). |
+| [`400`](status-codes.md#status-400) | `child` is missing, the two names are the same, or `delay_ms` is out of range. New in v3.2.0: a remote field without `remote`, a name that is not a remote's or a topic's, `lanes` outside 1 to 8, `from` other than `attach`, `unconsumed` or `earliest`, or a remote that does not exist. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
-| [`403`](status-codes.md#status-403) | The caller does not manage both topics, as the node that answers or the cluster leader sees them. Unreleased, with `remote`, the caller is not an `admin`, or security is off (`remotes require security`). |
+| [`403`](status-codes.md#status-403) | The caller does not manage both topics, as the node that answers or the cluster leader sees them. From v3.2.0, with `remote`, the caller is not an `admin`, or security is off (`remotes require security`). |
 | [`404`](status-codes.md#status-404) | The parent or the child does not exist, also after the answering node caught up with the leader. |
-| [`409`](status-codes.md#status-409) | The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, the delay is longer than the parent's retention can hold, or (from v3.1.0) the copy of the parent's schema history the child adopts would pass the cluster's schema byte budget, or either topic was recreated under the request twice in a row (`topic changed since it was read`). Unreleased, with `remote`: a topic named `child` exists, the parent has 16 remote children, this cluster already links to that remote topic, the parent's retention is below 24 hours, or a check found the target unusable (the body names the `class` and carries each member's report in `checks`). |
-| [`412`](status-codes.md#status-412) | Unreleased, with `remote`. A member does not apply the remote Raft entry types, did not answer, or reports a posture that forbids remotes (security off or legacy cluster auth on), and the body names it in `members`; a member holds a stale or unreadable credential; the members disagree about the target's ID; or the leader runs an older release. |
+| [`409`](status-codes.md#status-409) | The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, the delay is longer than the parent's retention can hold, or (from v3.1.0) the copy of the parent's schema history the child adopts would pass the cluster's schema byte budget, or either topic was recreated under the request twice in a row (`topic changed since it was read`). From v3.2.0, with `remote`: a topic named `child` exists, the parent has 16 remote children, this cluster already links to that remote topic, the parent's retention is below 24 hours, or a check found the target unusable (the body names the `class` and carries each member's report in `checks`). |
+| [`412`](status-codes.md#status-412) | New in v3.2.0, with `remote`. A member does not apply the remote Raft entry types, did not answer, or reports a posture that forbids remotes (security off or legacy cluster auth on), and the body names it in `members`; a member holds a stale or unreadable credential; the members disagree about the target's ID; or the leader runs an older release. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
-| [`429`](status-codes.md#status-429) | Unreleased, with `remote`. This node took 60 remote child writes in the last minute, or a check of this remote ran less than 5 seconds ago on a member; retry after `Retry-After`. |
-| [`501`](status-codes.md#status-501) | Unreleased, with `remote`. The answering node, or the leader, has no remote plane. |
-| [`502`](status-codes.md#status-502) | Unreleased, with `remote`. Something in front of the target answered instead of it (a load balancer or a proxy), or the target answered with a redirect, which is never followed. |
-| [`503`](status-codes.md#status-503) | No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry. Unreleased, with `remote`, also when the target or a member was unavailable during the checks. |
+| [`429`](status-codes.md#status-429) | New in v3.2.0, with `remote`. This node took 60 remote child writes in the last minute, or a check of this remote ran less than 5 seconds ago on a member; retry after `Retry-After`. |
+| [`501`](status-codes.md#status-501) | New in v3.2.0, with `remote`. The answering node, or the leader, has no remote plane. |
+| [`502`](status-codes.md#status-502) | New in v3.2.0, with `remote`. Something in front of the target answered instead of it (a load balancer or a proxy), or the target answered with a redirect, which is never followed. |
+| [`503`](status-codes.md#status-503) | No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry. From v3.2.0, with `remote`, also when the target or a member was unavailable during the checks. |
 
 **Response body (`200`)**: a [Topic](#topic-object).
 
@@ -708,14 +709,14 @@ Date: Mon, 28 Sep 2026 19:31:43 GMT
 }
 ```
 
-```sh title="Request: a remote child, checks only (unreleased)"
+```sh title="Request: a remote child, checks only (v3.2.0)"
 curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/children" \
   -H "Content-Type: application/json" \
   -d '{"child": "orders-to-b", "remote": "b", "remote_topic": "orders",
        "from": "unconsumed", "dry_run": true}'
 ```
 
-```http title="Response: a remote child, checks only (unreleased)"
+```http title="Response: a remote child, checks only (v3.2.0)"
 HTTP/1.1 200 OK
 Cache-Control: no-store
 Content-Type: application/json
@@ -750,14 +751,14 @@ Content-Length: 435
 }
 ```
 
-```sh title="Request: a remote child (unreleased)"
+```sh title="Request: a remote child (v3.2.0)"
 curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/children" \
   -H "Content-Type: application/json" \
   -d '{"child": "orders-to-b", "remote": "b", "remote_topic": "orders",
        "from": "unconsumed"}'
 ```
 
-```http title="Response: a remote child (unreleased)"
+```http title="Response: a remote child (v3.2.0)"
 HTTP/1.1 201 Created
 Cache-Control: no-store
 Content-Type: application/json
@@ -796,7 +797,7 @@ Content-Length: 408
 Lists the parent's children with their delay and how many messages
 each is behind.
 
-**Unreleased:** a [remote child](glossary.md#remote-child) also
+**New in v3.2.0:** a [remote child](glossary.md#remote-child) also
 carries its link: the remote and the topic there, its state (the
 worst of its partitions'), its recovery point (`lag_seconds`), the
 retention left before drop-behind, the record a cursor is stuck on,
@@ -814,14 +815,14 @@ target. The states are listed in
 | Name | Description |
 |---|---|
 | `parent`<br>path, string, required | Name of the parent topic. |
-| `partitions` (unreleased)<br>query, boolean, optional, default `False` | `true` adds one row per parent partition to each remote child (`partitions`). |
+| `partitions` (v3.2.0)<br>query, boolean, optional, default `False` | `true` adds one row per parent partition to each remote child (`partitions`). |
 
 **Responses**
 
 | Status | Meaning |
 |---|---|
 | [`200`](status-codes.md#status-200) | The children. |
-| [`400`](status-codes.md#status-400) | Unreleased. `partitions` is not `true` or `false`. |
+| [`400`](status-codes.md#status-400) | New in v3.2.0. `partitions` is not `true` or `false`. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No grant on the parent. |
 | [`404`](status-codes.md#status-404) | The parent does not exist. |
@@ -831,13 +832,13 @@ target. The states are listed in
 | Field | Description |
 |---|---|
 | `parent`<br>string | Parent topic name. |
-| `parent_id` (unreleased)<br>string | The parent's incarnation ID, empty for a topic created before topic IDs (v2.1 and earlier). A remote child on another cluster that sends to this topic reads it to notice a recreate. |
+| `parent_id` (v3.2.0)<br>string | The parent's incarnation ID, empty for a topic created before topic IDs (v2.1 and earlier). A remote child on another cluster that sends to this topic reads it to notice a recreate. |
 | `children`<br>array of object |  |
 | `children[].name`<br>string | Child topic name. |
 | `children[].delay_ms`<br>integer | The child's delay, `0` for an immediate child. |
 | `children[].lag_messages`<br>integer | Parent messages not yet copied into the child, summed over partitions. For a remote child, not yet accepted by the remote. |
 | `children[].lag_complete`<br>boolean | `false` while some partitions have not reported, so `lag_messages` is a lower bound. |
-| `children[].remote` (unreleased)<br>object | A [remote child](glossary.md#remote-child)'s link. Present only on a remote child's stub, which has `partitions` `0` and no owner. |
+| `children[].remote` (v3.2.0)<br>object | A [remote child](glossary.md#remote-child)'s link. Present only on a remote child's stub, which has `partitions` `0` and no owner. |
 | `children[].remote.name`<br>string | The remote the copies go to. |
 | `children[].remote.topic`<br>string | The topic on the remote. |
 | `children[].remote.target_id`<br>string | The target topic's ID as the attach, or the last resume with `accept_target`, saw it. A target on v3.1.0 serves it in its describe answer, so recreate detection works there too. Empty for a target topic created before topic IDs (v2.1 and earlier); such a link stops in `target_replaced` if the target later reports an ID, because a topic gains one only by being recreated. |
@@ -849,16 +850,16 @@ target. The states are listed in
 | `children[].remote.paused_at_ms`<br>integer | When it was paused, Unix milliseconds. |
 | `children[].remote.skip`<br>object | Per parent partition, the offsets an admin accepted to lose, ascending, at most 4000. A cursor drops a record only while it is stuck on exactly one of them. |
 | `children[].remote.created_by`<br>string | The admin who attached it; shown to admins only. |
-| `children[].paused` (unreleased)<br>boolean | A remote child only. `true` while it is paused. |
-| `children[].state` (unreleased)<br>string | A remote child only. Its worst partition's [link state](remote-children.md#link-states), `running` or `paused` when healthy; `unknown` when a partition owner did not report. |
-| `children[].lag_seconds` (unreleased)<br>number | A remote child only. Age, on the owners' clocks, of the oldest parent record not yet accepted by the remote, the worst partition's: the link's live recovery point. |
-| `children[].retention_headroom_seconds` (unreleased)<br>number | A remote child only. The parent's retention minus `lag_seconds`, the time left before drop-behind. Absent when the parent keeps messages forever. |
-| `children[].source_drained` (unreleased)<br>boolean | A remote child only. `true` once the parent's consumers have acked past the link's start offset on every partition. |
-| `children[].blocked_at` (unreleased)<br>object | A remote child only. The one record a cursor is stuck on, as `partition`, `offset` and `state` (`rejected_record` or `record_too_large`); `null` when none is. |
-| `children[].target_verified_at` (unreleased)<br>string | A remote child only. The oldest of the cursors' last successful target checks, RFC 3339; `null` while any cursor has had none (a node whose checks keep failing is not hidden behind another node's success). |
-| `children[].unverified` (unreleased)<br>boolean | A remote child only. `true` for a running link with a cursor whose node has had no successful target check in the last 10 minutes (counted from when the node began checking, for a cursor that never had one). |
-| `children[].last_success_at` (unreleased)<br>string | A remote child only. When the remote last accepted a chunk, RFC 3339. |
-| `children[].partitions` (unreleased)<br>array of object | A remote child only, with `partitions=true`. One row per parent partition. |
+| `children[].paused` (v3.2.0)<br>boolean | A remote child only. `true` while it is paused. |
+| `children[].state` (v3.2.0)<br>string | A remote child only. Its worst partition's [link state](remote-children.md#link-states), `running` or `paused` when healthy; `unknown` when a partition owner did not report. |
+| `children[].lag_seconds` (v3.2.0)<br>number | A remote child only. Age, on the owners' clocks, of the oldest parent record not yet accepted by the remote, the worst partition's: the link's live recovery point. |
+| `children[].retention_headroom_seconds` (v3.2.0)<br>number | A remote child only. The parent's retention minus `lag_seconds`, the time left before drop-behind. Absent when the parent keeps messages forever. |
+| `children[].source_drained` (v3.2.0)<br>boolean | A remote child only. `true` once the parent's consumers have acked past the link's start offset on every partition. |
+| `children[].blocked_at` (v3.2.0)<br>object | A remote child only. The one record a cursor is stuck on, as `partition`, `offset` and `state` (`rejected_record` or `record_too_large`); `null` when none is. |
+| `children[].target_verified_at` (v3.2.0)<br>string | A remote child only. The oldest of the cursors' last successful target checks, RFC 3339; `null` while any cursor has had none (a node whose checks keep failing is not hidden behind another node's success). |
+| `children[].unverified` (v3.2.0)<br>boolean | A remote child only. `true` for a running link with a cursor whose node has had no successful target check in the last 10 minutes (counted from when the node began checking, for a cursor that never had one). |
+| `children[].last_success_at` (v3.2.0)<br>string | A remote child only. When the remote last accepted a chunk, RFC 3339. |
+| `children[].partitions` (v3.2.0)<br>array of object | A remote child only, with `partitions=true`. One row per parent partition. |
 | `children[].partitions[].partition`<br>integer | Parent partition. |
 | `children[].partitions[].node`<br>string | The owner that reported the cursor. |
 | `children[].partitions[].start_offset`<br>integer | Where the link started on this partition. |
@@ -892,11 +893,11 @@ Date: Mon, 28 Sep 2026 19:31:43 GMT
 }
 ```
 
-```sh title="Request: a remote child (unreleased)"
+```sh title="Request: a remote child (v3.2.0)"
 curl -i -u "$AUTH" "$NARAD/v1/topics/orders/children"
 ```
 
-```http title="Response: a remote child (unreleased)"
+```http title="Response: a remote child (v3.2.0)"
 HTTP/1.1 200 OK
 Content-Length: 469
 Content-Type: application/json
@@ -939,7 +940,7 @@ Date: Tue, 06 Oct 2026 13:07:03 GMT
 Removes the link. The child keeps the messages and the schema
 history it already has and becomes a standalone topic again.
 
-**Unreleased:** detaching a [remote child](glossary.md#remote-child)
+**New in v3.2.0:** detaching a [remote child](glossary.md#remote-child)
 deletes its stub. It travels to the leader, which first checks that
 every record of the parent is on the remote: no cursor lag, every
 partition owner reporting, and no member holding records of the
@@ -949,7 +950,7 @@ abandons them; the leader's audit line records what a forced delete
 abandoned. The check is a point in time, so stop the producers
 first. A new check for one parent runs at most every 10 seconds.
 
-**Grant needed:** Ownership of either topic, or `admin`. Unreleased: for a remote child, the owner of the parent, or an `admin`, with security on.
+**Grant needed:** Ownership of either topic, or `admin`. New in v3.2.0: for a remote child, the owner of the parent, or an `admin`, with security on.
 
 **Parameters**
 
@@ -957,22 +958,22 @@ first. A new check for one parent runs at most every 10 seconds.
 |---|---|
 | `parent`<br>path, string, required | Name of the parent topic. |
 | `child`<br>path, string, required | Name of the child topic. |
-| `force` (unreleased)<br>query, boolean, optional, default `False` | `true` deletes a remote child even while records of its parent are unshipped, abandoning them. Ignored for a local child. |
+| `force` (v3.2.0)<br>query, boolean, optional, default `False` | `true` deletes a remote child even while records of its parent are unshipped, abandoning them. Ignored for a local child. |
 
 **Responses**
 
 | Status | Meaning |
 |---|---|
-| [`204`](status-codes.md#status-204) | Detached. For a remote child (unreleased), its stub is deleted. |
-| [`400`](status-codes.md#status-400) | Unreleased. `force` is not `true` or `false`. |
+| [`204`](status-codes.md#status-204) | Detached. For a remote child (from v3.2.0), its stub is deleted. |
+| [`400`](status-codes.md#status-400) | New in v3.2.0. `force` is not `true` or `false`. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
-| [`403`](status-codes.md#status-403) | The caller manages neither topic, as the node that answers or the cluster leader sees them. For a remote child (unreleased), the caller is neither an `admin` nor the parent's owner, or security is off. |
+| [`403`](status-codes.md#status-403) | The caller manages neither topic, as the node that answers or the cluster leader sees them. For a remote child (from v3.2.0), the caller is neither an `admin` nor the parent's owner, or security is off. |
 | [`404`](status-codes.md#status-404) | Neither topic exists after the answering node caught up with the leader, or the two are not linked. |
-| [`409`](status-codes.md#status-409) | New in v3.1.0. Either topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was changed. Unreleased, for a remote child without `force`: records of the parent are not yet on the remote, with `lag_messages`, `lag_complete` and `dispatch_backlog` (records each member holds, by node) in the body, and `not_answering` or `backlog_over_scan_limit` naming members that could not be counted; or the child turned out to be remote, or local, on the leader; retry. |
-| [`412`](status-codes.md#status-412) | Unreleased. The cluster leader runs a release without remote children; finish the upgrade. |
-| [`429`](status-codes.md#status-429) | Unreleased. The leader ran an unshipped check for this parent less than 10 seconds ago; retry after `Retry-After`. |
-| [`501`](status-codes.md#status-501) | Unreleased. The answering node has no remote plane, so it cannot detach a remote child. |
-| [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, or the answering node could not reach the leader to confirm the topics. Unreleased, for a remote child, also when the unshipped check could not run. |
+| [`409`](status-codes.md#status-409) | New in v3.1.0. Either topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was changed. From v3.2.0, for a remote child without `force`: records of the parent are not yet on the remote, with `lag_messages`, `lag_complete` and `dispatch_backlog` (records each member holds, by node) in the body, and `not_answering` or `backlog_over_scan_limit` naming members that could not be counted; or the child turned out to be remote, or local, on the leader; retry. |
+| [`412`](status-codes.md#status-412) | New in v3.2.0. The cluster leader runs a release without remote children; finish the upgrade. |
+| [`429`](status-codes.md#status-429) | New in v3.2.0. The leader ran an unshipped check for this parent less than 10 seconds ago; retry after `Retry-After`. |
+| [`501`](status-codes.md#status-501) | New in v3.2.0. The answering node has no remote plane, so it cannot detach a remote child. |
+| [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, or the answering node could not reach the leader to confirm the topics. From v3.2.0, for a remote child, also when the unshipped check could not run. |
 
 ```sh title="Request: a local child"
 curl -i -u "$AUTH" -X DELETE \
@@ -984,12 +985,12 @@ HTTP/1.1 204 No Content
 Date: Mon, 28 Sep 2026 19:31:43 GMT
 ```
 
-```sh title="Request: a remote child with records not yet on its remote (unreleased)"
+```sh title="Request: a remote child with records not yet on its remote (v3.2.0)"
 curl -i -u "$AUTH" -X DELETE \
   "$NARAD/v1/topics/orders/children/orders-to-b"
 ```
 
-```http title="Response: a remote child with records not yet on its remote (unreleased)"
+```http title="Response: a remote child with records not yet on its remote (v3.2.0)"
 HTTP/1.1 409 Conflict
 Cache-Control: no-store
 Content-Type: application/json
@@ -1007,7 +1008,7 @@ Content-Length: 122
 
 ### Pause a remote child {#pause-remote-child}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 `POST /v1/topics/{parent}/children/{child}/pause`
 
@@ -1097,7 +1098,7 @@ Content-Length: 517
 
 ### Resume a remote child {#resume-remote-child}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 `POST /v1/topics/{parent}/children/{child}/resume`
 
@@ -1184,7 +1185,7 @@ Content-Length: 423
 
 ### Skip a record a remote child cannot ship {#skip-remote-child-record}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 `POST /v1/topics/{parent}/children/{child}/skip`
 
@@ -1329,7 +1330,7 @@ The message, 1 byte to 1 MiB. Content types: `application/json`, `application/oc
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No `produce` grant on the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist. |
-| [`409`](status-codes.md#status-409) | The topic is a delay child, which only its parent can feed. Unreleased: the topic is a remote child's stub, whose messages live on its remote (`remote child "<name>" lives on remote <remote>; consume it there`). |
+| [`409`](status-codes.md#status-409) | The topic is a delay child, which only its parent can feed. New in v3.2.0: the topic is a remote child's stub, whose messages live on its remote (`remote child "<name>" lives on remote <remote>; consume it there`). |
 | [`413`](status-codes.md#status-413) | The body is over 1 MiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`429`](status-codes.md#status-429) | Too many produces in flight for this user on this node, only when the operator set a produce cap ([Configuration reference](configuration.md#http)). |
@@ -1368,7 +1369,7 @@ each of them.
 they get `400`. A node on v3.0.1 or earlier answers `404`: fall back
 to single produces.
 
-**Unreleased:** the body may be up to 16 MiB, with each message's
+**New in v3.2.0:** the body may be up to 16 MiB, with each message's
 decoded payload at most 1 MiB, the single-produce cap, so anything a
 single produce accepts fits in a batch. It may be sent compressed,
 `Content-Encoding: zstd` or `gzip`, decoded under the same cap. A
@@ -1390,11 +1391,11 @@ not decode a compressed body. This is the route a
 
 **Request body**
 
-At most 16 MiB in total, each payload at most 1 MiB (unreleased; 1 MiB in total in v3.1.0), optionally zstd or gzip compressed.
+At most 16 MiB in total, each payload at most 1 MiB (from v3.2.0; 1 MiB in total in v3.1.0), optionally zstd or gzip compressed.
 
 | Field | Description |
 |---|---|
-| `messages`<br>array of object, required | 1 to 1,000 messages (unreleased; 1 to 100 in v3.1.0), stored in this order. |
+| `messages`<br>array of object, required | 1 to 1,000 messages (from v3.2.0; 1 to 100 in v3.1.0), stored in this order. |
 | `messages[].payload`<br>JSON, required | A JSON value, stored exactly as written (a JSON string keeps its quotes). With `payload_encoding`, a base64 string of any bytes. |
 | `messages[].payload_encoding`<br>string: `base64`, optional | Set to `base64` for a payload that is not JSON. |
 | `messages[].key`<br>string, optional | The message's key. Absent or empty means no key. |
@@ -1406,16 +1407,16 @@ At most 16 MiB in total, each payload at most 1 MiB (unreleased; 1 MiB in total 
 | Status | Meaning |
 |---|---|
 | [`202`](status-codes.md#status-202) | Every message accepted and synced to disk. |
-| [`400`](status-codes.md#status-400) | No messages, more than 1,000 (more than 100 in v3.1.0), a bad encoding, an empty payload, a message the schema refuses (one nested deeper than 256 levels included), `key` or `partition` in the query, or (unreleased) a compressed body that does not decode. |
+| [`400`](status-codes.md#status-400) | No messages, more than 1,000 (more than 100 in v3.1.0), a bad encoding, an empty payload, a message the schema refuses (one nested deeper than 256 levels included), `key` or `partition` in the query, or (from v3.2.0) a compressed body that does not decode. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No `produce` grant on the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist, or the node runs v3.0.1 or earlier. |
-| [`409`](status-codes.md#status-409) | The topic is a delay child. Unreleased: the topic is a remote child's stub, whose messages live on its remote (`remote child "<name>" lives on remote <remote>; consume it there`). |
-| [`413`](status-codes.md#status-413) | The body is over 16 MiB, decoded or as sent (1 MiB in v3.1.0), or (unreleased) one message's payload is over 1 MiB (`message <i>: message too large`). |
-| [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header, or (unreleased) a `Content-Encoding` other than `zstd`, `gzip` or none. |
+| [`409`](status-codes.md#status-409) | The topic is a delay child. New in v3.2.0: the topic is a remote child's stub, whose messages live on its remote (`remote child "<name>" lives on remote <remote>; consume it there`). |
+| [`413`](status-codes.md#status-413) | The body is over 16 MiB, decoded or as sent (1 MiB in v3.1.0), or (from v3.2.0) one message's payload is over 1 MiB (`message <i>: message too large`). |
+| [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header, or (from v3.2.0) a `Content-Encoding` other than `zstd`, `gzip` or none. |
 | [`429`](status-codes.md#status-429) | The batch does not fit this user's produce cap on this node (only when the cap is set). A batch counts as its message count, clamped to the cap. |
 | [`500`](status-codes.md#status-500) | The node could not write to its ingress WAL. |
-| [`503`](status-codes.md#status-503) | Nothing was checked or stored; retry through another node. Either this node is being decommissioned and takes no new produce (with `Retry-After: 1`), or the topic has a schema and every schema validation slot on the node stayed busy for 5 seconds, or (unreleased) the body is over 1 MiB and the node's batch body budget is full (with `Retry-After: 1`). |
+| [`503`](status-codes.md#status-503) | Nothing was checked or stored; retry through another node. Either this node is being decommissioned and takes no new produce (with `Retry-After: 1`), or the topic has a schema and every schema validation slot on the node stayed busy for 5 seconds, or (from v3.2.0) the body is over 1 MiB and the node's batch body budget is full (with `Retry-After: 1`). |
 
 **Response body (`202`)**
 
@@ -1479,7 +1480,7 @@ has no `receipt_handle` and nothing needs acking.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No `consume` grant on the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist. |
-| [`409`](status-codes.md#status-409) | Unreleased. The topic is a remote child's stub, whose messages live on its remote (`remote child "<name>" lives on remote <remote>; consume it there`). |
+| [`409`](status-codes.md#status-409) | New in v3.2.0. The topic is a remote child's stub, whose messages live on its remote (`remote child "<name>" lives on remote <remote>; consume it there`). |
 | [`410`](status-codes.md#status-410) | Replay only. The record at `offset` aged out of retention or cannot be read. |
 | [`421`](status-codes.md#status-421) | The partition moved to another node while the request was served. Retry. |
 | [`429`](status-codes.md#status-429) | Too many consumes in flight for this user on this node. |
@@ -1594,7 +1595,7 @@ Only for a batch ack, at most 64 KiB.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No `consume` grant on the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist. |
-| [`409`](status-codes.md#status-409) | Unreleased. The topic is a remote child's stub, whose messages live on its remote (`remote child "<name>" lives on remote <remote>; consume it there`). |
+| [`409`](status-codes.md#status-409) | New in v3.2.0. The topic is a remote child's stub, whose messages live on its remote (`remote child "<name>" lives on remote <remote>; consume it there`). |
 | [`410`](status-codes.md#status-410) | The lease ran out, or the message was already settled or delivered again under a new handle. A handle from another topic, or for a partition this topic does not have, also answers `410`. |
 | [`413`](status-codes.md#status-413) | A batch body over 64 KiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
@@ -2385,7 +2386,7 @@ Date: Mon, 05 Oct 2026 14:20:04 GMT
 
 ## Remotes {#remotes}
 
-**Unreleased.** Register the other Narad clusters this one may send
+**New in v3.2.0.** Register the other Narad clusters this one may send
 [remote children](glossary.md#remote-child) to. Every route needs the
 `admin` grant and a node with security on; with security off each
 one answers [`403`](status-codes.md#status-403) (`remotes require
@@ -2399,7 +2400,7 @@ API hop (`remotes.api_hop_encrypted`). Task guide:
 
 ### Register a remote {#create-remote}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 `POST /v1/remotes`
 
@@ -2532,7 +2533,7 @@ Content-Length: 622
 
 ### List remotes {#list-remotes}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 `GET /v1/remotes`
 
@@ -2667,7 +2668,7 @@ Date: Tue, 06 Oct 2026 13:06:32 GMT
 
 ### Get a remote {#get-remote}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 `GET /v1/remotes/{name}`
 
@@ -2767,7 +2768,7 @@ Date: Tue, 06 Oct 2026 13:06:32 GMT
 
 ### Change a remote {#update-remote}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 `PATCH /v1/remotes/{name}`
 
@@ -2897,7 +2898,7 @@ Content-Length: 622
 
 ### Delete a remote {#delete-remote}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 `DELETE /v1/remotes/{name}`
 
@@ -2963,7 +2964,7 @@ Date: Tue, 06 Oct 2026 13:07:49 GMT
 
 ### Test a remote {#test-remote}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 `POST /v1/remotes/{name}/test`
 
@@ -3074,7 +3075,7 @@ Date: Tue, 06 Oct 2026 13:06:32 GMT
 
 ### Re-encrypt remote passwords {#reencrypt-remotes}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 `POST /v1/cluster/reencrypt-remotes`
 
@@ -3281,7 +3282,7 @@ Bodies that several endpoints share.
 | `attach_epoch`<br>string | A child's current attachment; it changes on every attach. |
 | `fanout_delay_ms`<br>integer | A delay child's delay in milliseconds. |
 | `attach_offsets`<br>array of integer | A child's attach point, one offset per parent partition. |
-| `remote` (unreleased)<br>object | A [remote child](glossary.md#remote-child)'s link. Present only on a remote child's stub, which has `partitions` `0` and no owner. |
+| `remote` (v3.2.0)<br>object | A [remote child](glossary.md#remote-child)'s link. Present only on a remote child's stub, which has `partitions` `0` and no owner. |
 | `remote.name`<br>string | The remote the copies go to. |
 | `remote.topic`<br>string | The topic on the remote. |
 | `remote.target_id`<br>string | The target topic's ID as the attach, or the last resume with `accept_target`, saw it. A target on v3.1.0 serves it in its describe answer, so recreate detection works there too. Empty for a target topic created before topic IDs (v2.1 and earlier); such a link stops in `target_replaced` if the target later reports an ID, because a topic gains one only by being recreated. |

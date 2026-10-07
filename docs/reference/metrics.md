@@ -44,7 +44,7 @@ Gauges that describe partitions (lag, sizes, segments) are refreshed by a poller
 | `narad_bytes_produced_total`<br>counter; labels `topic`, `partition` | Payload bytes appended. |
 | `narad_messages_consumed_total`<br>counter; labels `topic`, `partition` | Messages handed to queue consumers. Replays are not counted. A message delivered again is counted again. |
 | `narad_bytes_consumed_total`<br>counter; labels `topic`, `partition` | Payload bytes handed to queue consumers. |
-| `narad_produce_rejections_total`<br>counter; labels `topic`, `reason` | Produces refused before they were stored: `schema` (the schema refused the payload), `delayed_child` (a produce to a delay child) or (unreleased) `remote_child` (a produce to a remote child's stub). |
+| `narad_produce_rejections_total`<br>counter; labels `topic`, `reason` | Produces refused before they were stored: `schema` (the schema refused the payload), `delayed_child` (a produce to a delay child) or (from v3.2.0) `remote_child` (a produce to a remote child's stub). |
 | `narad_consume_wait_seconds`<br>histogram; labels `topic`, `outcome` | Time consumes spent waiting, by `outcome`: `hit`, `timeout`, `cancelled` or `no_wait`. |
 | `narad_consume_empty_total`<br>counter; labels `topic` | Consumes that returned no message: idle consumers polling. |
 | `narad_http_requests_total`<br>counter; labels `route`, `method`, `status` | HTTP requests. `route` is the matched route pattern, such as `GET /v1/topics/{topic}`; a request that matches no route is `unmatched`. |
@@ -52,9 +52,9 @@ Gauges that describe partitions (lag, sizes, segments) are refreshed by a poller
 | `narad_http_request_bytes_in_total`<br>counter; labels `route` | Request bytes, from `Content-Length`. |
 | `narad_http_response_bytes_out_total`<br>counter; labels `route` | Response bytes. |
 | `narad_http_requests_in_flight`<br>gauge; no labels | HTTP requests being served. |
-| `narad_http_batch_body_budget_rejections_total` (unreleased)<br>counter; no labels | Batch produce bodies over 1 MiB answered `503` because the node's budget for them (`http.max_batch_body_bytes_in_flight`) was full. |
+| `narad_http_batch_body_budget_rejections_total` (v3.2.0)<br>counter; no labels | Batch produce bodies over 1 MiB answered `503` because the node's budget for them (`http.max_batch_body_bytes_in_flight`) was full. |
 
-The HTTP series count requests, not messages. A batch produce (**v3.1.0**) has its own route, `POST /v1/topics/{topic}/produce/batch`. A batch consume and a batch ack use the single-message routes, and a batch ack answers `200` where a single ack answers `204`. One batch carries up to 100 messages (a batch produce up to 1,000, unreleased), so take message rates from `narad_messages_produced_total` and `narad_messages_consumed_total`. A panel that selects `route=~".*/produce"` misses batch produces, and one that counts acks as `status="204"` misses batch acks.
+The HTTP series count requests, not messages. A batch produce (**v3.1.0**) has its own route, `POST /v1/topics/{topic}/produce/batch`. A batch consume and a batch ack use the single-message routes, and a batch ack answers `200` where a single ack answers `204`. One batch carries up to 100 messages (a batch produce up to 1,000 from v3.2.0), so take message rates from `narad_messages_produced_total` and `narad_messages_consumed_total`. A panel that selects `route=~".*/produce"` misses batch produces, and one that counts acks as `status="204"` misses batch acks.
 
 ## Schema validation {#schema-validation}
 
@@ -110,7 +110,7 @@ narad_http_requests_total{route="POST /v1/topics/{topic}/ack",status="410"}
 
 ## Remote replication {#remote-replication}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 A [remote child](glossary.md#remote-child) exports its link per parent partition from the node that runs the cursor, which is the owner of that parent partition; a cursor that stops on a node (its partition moved, the link was deleted) removes its per-partition series there. Each remote exports its transport, credential and key state per node. No series carries a URL, a username, a key version or a ciphertext. `narad_fanout_lag_messages`, `narad_fanout_committed_total` and `narad_fanout_child_dropped_messages` above count remote children too. Alerts are in [Monitor and alert](../operate/monitoring.md#remote-alerts).
 

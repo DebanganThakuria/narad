@@ -6,7 +6,7 @@ description: "Return producers and consumers to the original cluster after a fai
 
 Return producers and consumers to the original cluster after a failover, without processing its old backlog twice and without a replication loop.
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 Before you start: you [failed over](failover.md) from `a` to `b`, `a` is back, and the remote `a` on `b` with its user `repl-from-b-2m8x4d` on `a` exist, as in [Set up disaster recovery](disaster-recovery.md#setup).
 

@@ -14,7 +14,7 @@ Learn how Narad nodes talk to clients and to each other over HTTP, QUIC and Raft
     - Raft runs on its own TCP port (7943) and needs its own mutual TLS, because Raft has no authentication of its own.
     - State-changing requests must carry an API content type or an `X-Narad-Client` header, or they get `415`, and so must a batch consume, or it gets `400`: this blocks cross-site requests from a browser.
     - The cluster network is assumed private. Fence 7942/udp and 7943/tcp with a network policy.
-    - **Unreleased:** a node that runs a remote child's cursor is an HTTPS client of another Narad cluster, the only traffic Narad starts toward anything outside its cluster ([Outbound plane](#outbound)).
+    - **New in v3.2.0:** a node that runs a remote child's cursor is an HTTPS client of another Narad cluster, the only traffic Narad starts toward anything outside its cluster ([Outbound plane](#outbound)).
 
 Narad has two planes, each on its own port: clients speak **HTTP** to any node, and nodes speak a compact **RPC protocol over QUIC** to each other. Raft has its own TCP transport with mutual TLS.
 
@@ -35,10 +35,10 @@ The listener is bounded:
 - A cap on open connections (`http.max_connections`, through `netutil.LimitListener`). Extra clients wait in the accept backlog rather than each getting a goroutine.
 - A per-identity cap on concurrent consume requests (`http.max_consume_in_flight_per_identity`, `429` beyond it), since every long-poll pins a goroutine and, on a node that does not own the partition, a forwarded RPC stream slot for up to `max_consume_wait`. A batch consume of N counts as N, clamped to the cap.
 - An optional cap of the same kind on produce (`http.max_produce_in_flight_per_identity`, from v3.1.0, off by default). A batch produce counts as one from before its body is read, so the cap bounds the batch bodies being read and decoded too, and as its message count, clamped to the cap, once its body is decoded. It has no default because a produce holds its goroutine only until its write-ahead log fsync, not for a long-poll's wait.
-- A batch body is decoded one element at a time and refused at the 101st message (the 1,001st, unreleased) or receipt handle, and a JSON body with a second value after the first is refused after one token of it. So decoding a request never costs more than its bound: before, a 1 MiB batch body of `[0,0,...]` allocated about 280 times its size before the count check refused it.
+- A batch body is decoded one element at a time and refused at the 101st message (the 1,001st from v3.2.0) or receipt handle, and a JSON body with a second value after the first is refused after one token of it. So decoding a request never costs more than its bound: before, a 1 MiB batch body of `[0,0,...]` allocated about 280 times its size before the count check refused it.
 - A request body is not allocated at its declared `Content-Length` before it arrives. Up to 64 KiB is read into one buffer of exactly that size; a larger body starts at 64 KiB and grows fourfold as it fills. So a client that declares 1 MiB and then stalls pins at most 64 KiB, or four times what it actually sent, whichever is larger.
 
-- **Unreleased:** a batch produce body may be up to 16 MiB, and zstd or gzip compressed, decoded under the same cap. A body over 1 MiB takes its share of a node-wide budget (`http.max_batch_body_bytes_in_flight`, 256 MiB by default) before it is read, a megabyte at a time as it grows, and is answered `503` with `Retry-After: 1` when the budget is full, so many large batches at once cannot exhaust a node's memory.
+- **New in v3.2.0:** a batch produce body may be up to 16 MiB, and zstd or gzip compressed, decoded under the same cap. A body over 1 MiB takes its share of a node-wide budget (`http.max_batch_body_bytes_in_flight`, 256 MiB by default) before it is read, a megabyte at a time as it grows, and is answered `503` with `Retry-After: 1` when the budget is full, so many large batches at once cannot exhaust a node's memory.
 
 The limits a client sees are listed in [Connect and authenticate](../build/connect.md#limits).
 
@@ -155,7 +155,7 @@ The **root admin** is seeded once, by the leader, from the operator's secret at 
 
 ## Outbound plane {#outbound}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 A node that runs a [remote child](../reference/glossary.md#remote-child)'s cursor sends to another Narad cluster: `POST /v1/topics/{t}/produce/batch` with Basic auth, plus the reads its checks make (`GET /v1/topics/{t}`, `GET /v1/topics/{t}/children` and `GET /v1/users`). It is the only traffic Narad starts toward anything outside its own cluster. [Remote replication](remote-children.md) has the whole design; in short:
 
@@ -168,7 +168,7 @@ A node that runs a [remote child](../reference/glossary.md#remote-child)'s curso
 
 ## Trust model {#trust-model}
 
-Narad assumes the *cluster network* (the node RPC and Raft ports) is a private network the operator controls. The shared secret and mutual TLS are guards, not a substitute for network policy. The client plane is hardened for untrusted callers: authenticated, authorized, size-capped (1 MiB bodies; 16 MiB for a batch produce, unreleased), and strict about malformed input.
+Narad assumes the *cluster network* (the node RPC and Raft ports) is a private network the operator controls. The shared secret and mutual TLS are guards, not a substitute for network policy. The client plane is hardened for untrusted callers: authenticated, authorized, size-capped (1 MiB bodies; 16 MiB for a batch produce from v3.2.0), and strict about malformed input.
 
 ## Node RPC wire format {#wire-format}
 
@@ -196,8 +196,8 @@ The full opcode registry (`internal/protocol/node/types.go`; values are stable o
 | 16 | DetachChild | 32 | AckBatch |
 | | | 33 | NodeStatus |
 | | | 34 | ForgetServer |
-| | | 35 | RemoteWrite (unreleased) |
-| | | 36 | RemoteCheck (unreleased) |
+| | | 35 | RemoteWrite (v3.2.0) |
+| | | 36 | RemoteCheck (v3.2.0) |
 
 An unknown opcode gets a clean `400` (`unsupported rpc operation`), and so does a trailing field the decoder does not know. That is how mixed versions work during a rolling upgrade: an old node declines what it has not heard of, and the caller sends the request again in a shape the old node understands, and keeps doing so for that node for 2 minutes. An `AckBatch` becomes single acks, a commit batch goes out without its topic ids, a forwarded batch consume asks for one record, and a claim becomes a plain probe.
 

@@ -28,7 +28,7 @@ Every command that talks to a broker takes these flags.
 | `-u`, `--user <name>` | `NARAD_USER` | the selected context |
 | `-p`, `--password <password>` | `NARAD_PASS` | the selected context |
 | `--password-stdin` | none | read the password from the first line of standard input |
-| `--ctx <name>` (unreleased) | none | use this [context](#ctx) for this command only |
+| `--ctx <name>` (v3.2.0) | none | use this [context](#ctx) for this command only |
 
 For each setting, a flag wins over its environment variable, which wins over the selected [context](#ctx). With `--ctx`, the environment variables are not read at all, and the CLI refuses `--ctx` while `NARAD_ADDR`, `NARAD_USER` or `NARAD_PASS` is set, so a command meant for one cluster never reaches another or carries its password there. A password on the command line shows up in `ps` and in shell history; prefer `--password-stdin` or `NARAD_PASS`. The CLI warns on standard error when it is about to send credentials over plain `http://` to another machine: use an `https://` URL for anything remote.
 
@@ -85,14 +85,14 @@ Manage topics. `narad topics` works too.
 | `narad topic info <name>` | Print the topic and its partition statistics, as [get a topic](http-api.md#get-topic) returns them. |
 | `narad topic edit <name>` | Change retention or the partition count, or register a new schema version. |
 | `narad topic schema <name>` | Print the schema history (version `0` and an empty list when there is none), or with `--current` only the current schema, which prints `no schema` when there is none. |
-| `narad topic rm <name>` | Delete the topic and all its data. It asks `delete topic "<name>" and all its data? [y/N]` unless `-f` (`--force`) is given. `--force` only skips the question: it never abandons a remote child's unshipped records (unreleased). |
-| `narad topic attach <parent> <child>` | Attach an existing topic as a child. With `--delay <duration>`, attach it as a delay child. With `--remote <name>` (unreleased), create `<child>` as a [remote child](glossary.md#remote-child) instead; flags below. |
-| `narad topic detach <parent> <child>` | Detach a child. The child and its messages remain. A remote child's stub is deleted instead (unreleased), refused while records of the parent are unshipped unless `--force` abandons them. |
-| `narad topic children <parent>` | List a parent's children with how far each is behind. With `--partitions` (unreleased), one row per parent partition for each remote child. |
-| `narad topic pause <parent> <child>` (unreleased) | Stop a remote child sending; `--reason <text>`, at most 256 bytes, shows in the listing. |
-| `narad topic resume <parent> <child>` (unreleased) | Check the target from every node, then let a paused remote child send. `--accept-target` accepts a target topic that was recreated (`target_replaced`). |
-| `narad topic skip <parent> <child> --partition <p> --offset <o>` (unreleased) | Let a remote child drop the one record it is stuck on (`rejected_record` or `record_too_large`). |
-| `narad topic wait <parent> <child>` (unreleased) | Poll the listing until a remote child has shipped everything (`--lag-zero`) or the parent's consumers passed its start (`--source-drained`); flags below. |
+| `narad topic rm <name>` | Delete the topic and all its data. It asks `delete topic "<name>" and all its data? [y/N]` unless `-f` (`--force`) is given. `--force` only skips the question: it never abandons a remote child's unshipped records (from v3.2.0). |
+| `narad topic attach <parent> <child>` | Attach an existing topic as a child. With `--delay <duration>`, attach it as a delay child. With `--remote <name>` (from v3.2.0), create `<child>` as a [remote child](glossary.md#remote-child) instead; flags below. |
+| `narad topic detach <parent> <child>` | Detach a child. The child and its messages remain. A remote child's stub is deleted instead (from v3.2.0), refused while records of the parent are unshipped unless `--force` abandons them. |
+| `narad topic children <parent>` | List a parent's children with how far each is behind. With `--partitions` (from v3.2.0), one row per parent partition for each remote child. |
+| `narad topic pause <parent> <child>` (v3.2.0) | Stop a remote child sending; `--reason <text>`, at most 256 bytes, shows in the listing. |
+| `narad topic resume <parent> <child>` (v3.2.0) | Check the target from every node, then let a paused remote child send. `--accept-target` accepts a target topic that was recreated (`target_replaced`). |
+| `narad topic skip <parent> <child> --partition <p> --offset <o>` (v3.2.0) | Let a remote child drop the one record it is stuck on (`rejected_record` or `record_too_large`). |
+| `narad topic wait <parent> <child>` (v3.2.0) | Poll the listing until a remote child has shipped everything (`--lag-zero`) or the parent's consumers passed its start (`--source-drained`); flags below. |
 
 Flags of `narad topic add`:
 
@@ -119,7 +119,7 @@ Flags of `narad topic edit`:
 
 The per-partition caps have no `edit` flag; change them with [change a topic](http-api.md#alter-topic).
 
-Flags of `narad topic attach` with `--remote` (unreleased):
+Flags of `narad topic attach` with `--remote` (v3.2.0):
 
 | Flag | Meaning |
 |---|---|
@@ -132,7 +132,7 @@ Flags of `narad topic attach` with `--remote` (unreleased):
 
 `--remote-topic`, `--from`, `--lanes` and `--dry-run` without `--remote` are refused.
 
-Flags of `narad topic wait` (unreleased):
+Flags of `narad topic wait` (v3.2.0):
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -220,7 +220,7 @@ Manage users. Every command needs the `admin` grant ([Manage users and grants](.
 
 ## narad remote {#remote}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 Manage [remotes](glossary.md#remote), the other clusters this one may send remote children to. Every command needs the `admin` grant and a cluster with security on ([Manage remotes](../operate/remotes.md)).
 

@@ -6,7 +6,7 @@ description: "Move producers and consumers to the recovery cluster when the clus
 
 Move producers and consumers to the recovery cluster when the cluster in use, or its region, is lost.
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 Before you start: a remote child from the cluster in use, `a`, to the recovery cluster, `b`, set up as in [Set up disaster recovery](disaster-recovery.md), and `a`'s metrics stored outside its region.
 

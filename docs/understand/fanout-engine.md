@@ -106,7 +106,7 @@ There is no cheap fix: the reader cannot know what the committing node's clock r
 
 ## Remote children {#remote-children}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 A [remote child](../reference/glossary.md#remote-child) is a fan-out child with no partitions and a `remote` link. Its cursors are the ones on this page, placed, epoched, anchored and moved the same way; what differs is the commit. Instead of bucketing a slab by child partition, the cursor hands it to a sender that splits it into lanes by key and sends each lane in order through the target cluster's batch produce, and the cursor advances only once the target has answered `202` for every record. When the sender cannot keep a slab's records in memory across a wait, the cursor reads the slab again from its unadvanced position: duplicates on the target, never a gap. The start point can also be the parent's consumer frontier or its oldest record, and the children listing gains each link's state and recovery point. [Remote replication](remote-children.md) describes the sender, its failure states and its checks.
 
@@ -151,4 +151,4 @@ For a delay child, every read carries `MaxCommittedAt = now − delay`. The read
 - [Metastore and Raft](metastore-and-raft.md): where links, epochs and attach points are stored.
 - [Fan out and delay messages](../build/fanout-and-delay.md): attach children and create delay children from a client.
 - [Metrics reference](../reference/metrics.md#fan-out): the fan-out lag and loss metrics.
-- [Remote replication](remote-children.md): the remote child's sender (unreleased).
+- [Remote replication](remote-children.md): the remote child's sender (from v3.2.0).

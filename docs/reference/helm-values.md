@@ -122,7 +122,7 @@ narad:
 | `security.existingSecret`<br>default `""` | The Secret holding the credentials; empty means `<name>-security`. See [Secrets](#secrets). |
 | `security.adminPasswordKey`<br>default `admin-password` | The key of the root admin's password in that Secret. |
 | `security.clusterSecretKey`<br>default `cluster-secret` | The key of the node-to-node secret in that Secret. |
-| `security.clusterSecretPreviousKey` (unreleased)<br>default `cluster-secret-previous` | The key, in that Secret, of the previous cluster secret during a rotation, passed as [`NARAD_CLUSTER_SECRET_PREVIOUS`](configuration.md#logging-and-security) when present. See [Secrets](#secrets). |
+| `security.clusterSecretPreviousKey` (v3.2.0)<br>default `cluster-secret-previous` | The key, in that Secret, of the previous cluster secret during a rotation, passed as [`NARAD_CLUSTER_SECRET_PREVIOUS`](configuration.md#logging-and-security) when present. See [Secrets](#secrets). |
 | `security.clusterTLS.enabled`<br>default `false` | Mutual TLS on Raft. Turn it on for production; see [Raft TLS certificates](../operate/raft-tls.md). |
 | `security.clusterTLS.secretName`<br>default `narad-cluster-tls` | The Secret holding the Raft CA and node certificate. |
 | `security.clusterTLS.mountPath`<br>default `/etc/narad/cluster-tls` | Where that Secret is mounted. |
@@ -149,7 +149,7 @@ Kubelet probes come from the pod's own node, which a NetworkPolicy does not bloc
 
 ### Remotes {#remotes}
 
-**Unreleased:** in master, not in v3.1.0.
+**New in v3.2.0.**
 
 The node bounds of [remote replication](../operate/remotes.md), passed as environment variables. An admin cannot widen them through the API; widening one is a values change and a rollout. Every pod needs egress to each remote's ingress on its port, not only the pods that own parent partitions: the attach, resume and test checks run on every member. With `security.enabled: false`, a render with any of them off its default fails (`remotes settings require security.enabled`), as the node itself would refuse to start: `allowedHosts`, `allowAddresses` or `apiHopEncrypted` set, `allowedPorts` other than `[443]`, or `maxHeldBytes` other than `268435456`, `0` included.
 
@@ -277,7 +277,7 @@ The chart reads credentials from a Secret named `<name>-security` (`narad-securi
 | Key | Required | Meaning |
 |---|---|---|
 | `cluster-secret` | yes, with `security.enabled` | The secret nodes prove to each other on the node-to-node port ([`NARAD_CLUSTER_SECRET`](configuration.md#logging-and-security)). A pod does not start without it. |
-| `cluster-secret-previous` (unreleased) | no | Only during a cluster secret rotation: the old secret, passed as [`NARAD_CLUSTER_SECRET_PREVIOUS`](configuration.md#logging-and-security), which only opens stored remote passwords until `narad remote reencrypt` has run. Remove the key afterwards ([Rotate the cluster secret](../operate/remotes.md#rotate-cluster-secret)). |
+| `cluster-secret-previous` (v3.2.0) | no | Only during a cluster secret rotation: the old secret, passed as [`NARAD_CLUSTER_SECRET_PREVIOUS`](configuration.md#logging-and-security), which only opens stored remote passwords until `narad remote reencrypt` has run. Remove the key afterwards ([Rotate the cluster secret](../operate/remotes.md#rotate-cluster-secret)). |
 | `admin-password` | no | The root admin's password ([`NARAD_ADMIN_PASSWORD`](configuration.md#logging-and-security)). Left out, the node that creates the root admin generates one and writes it to `/var/lib/narad/admin-password` on its own volume (from v3.1.0; it used to be logged once). See [Manage the root user](../operate/users.md#root-admin). |
 
 ```sh title="Command"
@@ -286,7 +286,7 @@ kubectl create secret generic narad-security \
   --from-literal=admin-password="$(openssl rand -base64 24)"
 ```
 
-A cluster that holds [remotes](glossary.md#remote) (unreleased) keeps their passwords in its metadata, encrypted under a key derived from `cluster-secret`, so this Secret and a pod's volume together open them. Keep the Secret out of namespace backups (for Velero, label it `velero.io/exclude-from-backup=true`), and grant `pods/exec` and `pods/attach` on the namespace only to operators who may hold both ([operating conditions](../operate/remotes.md#operating-conditions)).
+A cluster that holds [remotes](glossary.md#remote) (from v3.2.0) keeps their passwords in its metadata, encrypted under a key derived from `cluster-secret`, so this Secret and a pod's volume together open them. Keep the Secret out of namespace backups (for Velero, label it `velero.io/exclude-from-backup=true`), and grant `pods/exec` and `pods/attach` on the namespace only to operators who may hold both ([operating conditions](../operate/remotes.md#operating-conditions)).
 
 The Raft TLS Secret (`security.clusterTLS.secretName`) is described in [Raft TLS certificates](../operate/raft-tls.md).
 
@@ -311,8 +311,8 @@ The chart passes these to every pod. Anything else goes through `extraEnv`.
 | `metrics.enabled` | [`NARAD_HTTP_METRICS_ADDR`](configuration.md#http) `=:<metrics port>` |
 | `security.enabled` | [`NARAD_SECURITY_ENABLED`](configuration.md#logging-and-security) |
 | `security.allowInsecureCluster` | `NARAD_SECURITY_ALLOW_INSECURE_CLUSTER`, only with security off |
-| the Secret's keys | `NARAD_CLUSTER_SECRET`, `NARAD_ADMIN_PASSWORD` and (unreleased) `NARAD_CLUSTER_SECRET_PREVIOUS`, only with security on; the last two only when their key is present |
-| `remotes.*` (unreleased) | the five [`NARAD_REMOTES_*`](configuration.md#remotes) variables; `allowedHosts`, `allowAddresses` and `apiHopEncrypted` only when set |
+| the Secret's keys | `NARAD_CLUSTER_SECRET`, `NARAD_ADMIN_PASSWORD` and (from v3.2.0) `NARAD_CLUSTER_SECRET_PREVIOUS`, only with security on; the last two only when their key is present |
+| `remotes.*` (v3.2.0) | the five [`NARAD_REMOTES_*`](configuration.md#remotes) variables; `allowedHosts`, `allowAddresses` and `apiHopEncrypted` only when set |
 | `security.allowLegacyClusterAuth` | `NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH` |
 | `security.allowPlaintextRaft`, `networkPolicy.enabled` | `NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT`, only while `clusterTLS` is off and either is set |
 | `security.clusterTLS.*` | the three `NARAD_CLUSTER_TLS_*_FILE` variables, when enabled |
