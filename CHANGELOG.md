@@ -10,6 +10,9 @@ summarized more briefly than the 1.x and later entries.
 
 ## [Unreleased]
 
+### Fixed
+- Code-scanning hardening: partition directory paths refuse a topic name that is not a single path element, as topic directories already did; a batch produce body that does not decode no longer echoes the request's `Content-Encoding` in the error (it names `zstd or gzip`); the leader audit line sizes no allocation from request data; and a remote dial parses its port at 16 bits, refusing one above 65535 instead of wrapping it onto another port, while `remotes.allowed_ports` entries outside 1..65535 are refused when the guard is built.
+
 ## [3.2.0] - 2026-10-07
 
 ### Added
