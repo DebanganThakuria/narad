@@ -170,9 +170,17 @@ func (w *moveWorker) finish() {
 			if w.movedBack {
 				// Staging holds the install this worker moved back; if
 				// its flip committed after all, it is the partition.
-				dir, derr := r.partitionDir(w.topic, w.partition)
+				// The path error goes on the line only when there is
+				// one: an empty error field reads as a second failure.
+				var args []any
+				if dir, derr := r.partitionDir(w.topic, w.partition); derr != nil {
+					args = append(args, "partition_dir_err", derr)
+				} else {
+					args = append(args, "partition_dir", dir)
+				}
+				args = append(args, "err", err)
 				w.setAsideStaging("move: set aside the staging copy this move moved back, since the partition's owner cannot be read; it may hold the partition's records. Operator action required",
-					"partition_dir", dir, "partition_dir_err", derr, "err", err)
+					args...)
 				return
 			}
 			r.logger.Warn("move: could not read the partition's owner; keeping the staging copy", "topic", w.topic, "partition", w.partition, "staging", w.staging, "err", err)

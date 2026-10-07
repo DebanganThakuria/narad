@@ -8,6 +8,7 @@ package cluster
 // from staying frozen or the worker from wedging while it does.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -750,6 +752,34 @@ func TestMoveWorkerSetsAsideAnOwnedStagingCopyOnlyWhenItMayHoldTheRecords(t *tes
 				t.Fatalf("the copy set aside recovers next offset %d, want 3", n)
 			}
 		})
+	}
+}
+
+// The error line for a moved-back install set aside while the owner
+// cannot be read names the partition's path and the lookup error, and
+// carries no path error field when the path formed fine: an empty error
+// field on the line asking an operator to act reads as a second failure.
+func TestMoveWorkerMovedBackSetAsideLineHasNoEmptyPathError(t *testing.T) {
+	store := &fakeMoveStore{assignErr: errors.New("metastore unavailable")}
+	dataDir := t.TempDir()
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	r := NewMoveRunner(store, "narad-dst", dataDir, movePeerFake{}, nil, nil, logger, MoveConfig{})
+	w := &moveWorker{r: r, topic: "orders", partition: 0, source: "narad-src", staging: r.stagingDir("orders", 0), movedBack: true}
+	buildSourcePartition(t, w.staging, 1)
+	w.finish()
+	out := logs.String()
+	if !strings.Contains(out, "moved back") {
+		t.Fatalf("no set-aside line logged:\n%s", out)
+	}
+	if strings.Contains(out, "partition_dir_err") {
+		t.Errorf("the set-aside line carries a path error although the path formed:\n%s", out)
+	}
+	if !strings.Contains(out, "partition_dir="+topicPartitionDirT(t, dataDir, "orders", 0)) {
+		t.Errorf("the set-aside line does not name the partition's path:\n%s", out)
+	}
+	if !strings.Contains(out, "metastore unavailable") {
+		t.Errorf("the set-aside line does not carry the lookup error:\n%s", out)
 	}
 }
 
