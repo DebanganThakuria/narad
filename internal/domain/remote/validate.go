@@ -2,6 +2,7 @@ package remote
 
 import (
 	"bytes"
+	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -54,8 +55,8 @@ func ValidatePassword(s Secret) error {
 	return nil
 }
 
-// ValidateCAPEM checks a CA bundle: 1 to 16 PEM certificates, at most
-// 64 KiB, nothing else in it. "" (no CA: the system roots) is valid.
+// ValidateCAPEM checks a CA bundle: 1 to 16 PEM certificates, each one
+// parsable, at most 64 KiB, nothing else in it. "" (no CA: the system roots) is valid.
 func ValidateCAPEM(caPEM string) error {
 	if caPEM == "" {
 		return nil
@@ -73,6 +74,12 @@ func ValidateCAPEM(caPEM string) error {
 		}
 		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
 			return errors.New("ca_pem must hold only CERTIFICATE blocks")
+		}
+		// Every node parses the bundle to build its client: a block
+		// that frames as PEM but holds no certificate (one cut short in
+		// a copy) is refused here, before the password is sealed to it.
+		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+			return errors.New("ca_pem must hold parsable certificates")
 		}
 		n++
 	}

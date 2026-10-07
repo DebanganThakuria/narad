@@ -69,6 +69,16 @@ func TestValidateCAPEMAndTrustAnchor(t *testing.T) {
 			t.Fatalf("bundle of %d bytes accepted", len(bad))
 		}
 	}
+	// A certificate cut short in a copy still frames as PEM (its base64
+	// decodes) but is no certificate: refused here, not sealed with the
+	// password and left to fail on every node.
+	block, _ := pem.Decode([]byte(one))
+	cut := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: block.Bytes[:len(block.Bytes)/2]}))
+	for _, bad := range []string{cut, one + cut} {
+		if err := ValidateCAPEM(bad); err == nil || !strings.Contains(err.Error(), "parsable") {
+			t.Fatalf("bundle with a truncated certificate: %v, want refused as unparsable", err)
+		}
+	}
 	// The anchor follows the certificates, not their PEM formatting.
 	a1, _ := TrustAnchor(one)
 	a2, _ := TrustAnchor("\n\n" + strings.ReplaceAll(one, "\n", "\r\n") + "\n")
