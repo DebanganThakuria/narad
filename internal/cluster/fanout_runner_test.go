@@ -226,7 +226,7 @@ func TestFanoutRunnerFansOutWithReKeyingAndNoBackfill(t *testing.T) {
 	// (commit-before-advance), so poll briefly.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		cur, ok, err := storage.ReadFanoutCursor(storage.TopicPartitionDir(env.dataDir, "parent", 0), "child")
+		cur, ok, err := storage.ReadFanoutCursor(topicPartitionDirT(t, env.dataDir, "parent", 0), "child")
 		if err != nil {
 			t.Fatalf("ReadFanoutCursor(parent/0): %v", err)
 		}
@@ -278,7 +278,7 @@ func TestFanoutRunnerDetachStopsAndCleansUp(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	for p := range 3 {
-		dir := storage.TopicPartitionDir(env.dataDir, "parent", p)
+		dir := topicPartitionDirT(t, env.dataDir, "parent", p)
 		if _, ok, _ := storage.ReadFanoutCursor(dir, "child"); ok {
 			t.Fatalf("cursor file for parent/%d survived detach", p)
 		}
@@ -391,7 +391,7 @@ func waitForCursorFiles(t *testing.T, env *fanoutTestEnv, epoch string, want int
 	for time.Now().Before(deadline) {
 		found := 0
 		for p := range 3 {
-			dir := storage.TopicPartitionDir(env.dataDir, "parent", p)
+			dir := topicPartitionDirT(t, env.dataDir, "parent", p)
 			if cur, ok, _ := storage.ReadFanoutCursor(dir, "child"); ok && cur.Epoch == epoch {
 				found++
 			}
@@ -496,7 +496,7 @@ func TestFanoutRunnerDelayChildDrainsInDueOrder(t *testing.T) {
 // move while the given child link existed, the way the move runner does.
 func writeMoveMarker(t *testing.T, env *fanoutTestEnv, partitionIdx int, child, epoch string) string {
 	t.Helper()
-	dir := storage.TopicPartitionDir(env.dataDir, "parent", partitionIdx)
+	dir := topicPartitionDirT(t, env.dataDir, "parent", partitionIdx)
 	if err := messaging.WriteMoveMarker(dir, messaging.MoveMarker{
 		Source: "node-old", HighWatermark: 5, InstalledAtUnixMs: time.Now().UnixMilli(),
 		Children: map[string]string{child: epoch},
@@ -574,11 +574,11 @@ func TestFanoutLostCursorAfterMoveAnchorsAtOldestNotTail(t *testing.T) {
 	if got := env.childTotal(t); got != 5 {
 		t.Fatalf("child received %d records, want exactly the 5 from partition 0's backlog and none from partition 1's", got)
 	}
-	cur, ok, err := storage.ReadFanoutCursor(storage.TopicPartitionDir(env.dataDir, "parent", 0), "child")
+	cur, ok, err := storage.ReadFanoutCursor(topicPartitionDirT(t, env.dataDir, "parent", 0), "child")
 	if err != nil || !ok || cur.NextOffset != 5 {
 		t.Fatalf("partition 0 cursor = %+v (ok %v, err %v), want next 5 after draining the backlog", cur, ok, err)
 	}
-	cur, ok, err = storage.ReadFanoutCursor(storage.TopicPartitionDir(env.dataDir, "parent", 1), "child")
+	cur, ok, err = storage.ReadFanoutCursor(topicPartitionDirT(t, env.dataDir, "parent", 1), "child")
 	if err != nil || !ok || cur.NextOffset != 4 {
 		t.Fatalf("partition 1 cursor = %+v (ok %v, err %v), want tail-anchored at 4 (fresh attach for this epoch)", cur, ok, err)
 	}

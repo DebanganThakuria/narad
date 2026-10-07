@@ -11,7 +11,6 @@ import (
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
-	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
 // assignmentFakeMetastore layers partition-assignment lookups on top of
@@ -73,7 +72,7 @@ func TestGetTopicDetails_DoesNotOpenUnownedPartitionLogs(t *testing.T) {
 		if _, ok := manager.logs.Peek(testTopicName, p); ok {
 			t.Fatalf("GetTopicDetails() opened a log for partition %d not owned by this node", p)
 		}
-		dir := storage.TopicPartitionDir(manager.dataDir, testTopicName, p)
+		dir := topicPartitionDirT(t, manager.dataDir, testTopicName, p)
 		if _, statErr := os.Stat(dir); !errors.Is(statErr, os.ErrNotExist) {
 			t.Fatalf("partition %d dir stat error = %v, want not exists", p, statErr)
 		}

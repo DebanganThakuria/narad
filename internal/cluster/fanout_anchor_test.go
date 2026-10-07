@@ -103,7 +103,7 @@ func TestFanoutRunnerNewParentPartitionDeliversRecordsBeforeCursorStart(t *testi
 // waitChildTotal can still see the pre-commit position.
 func waitForCursorAt(t *testing.T, env *fanoutTestEnv, p int, epoch string, next int64) {
 	t.Helper()
-	dir := storage.TopicPartitionDir(env.dataDir, "parent", p)
+	dir := topicPartitionDirT(t, env.dataDir, "parent", p)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		cur, ok, err := storage.ReadFanoutCursor(dir, "child")

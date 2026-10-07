@@ -240,6 +240,12 @@ func (e *Engine) prepareHandoff(ctx context.Context, topicName string, partition
 	if err != nil {
 		return PartitionTransferInfo{}, err
 	}
+	// Formed before the freeze is armed, so a name that forms no
+	// directory leaves nothing frozen behind.
+	dir, err := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
+	if err != nil {
+		return PartitionTransferInfo{}, err
+	}
 	token, err := e.armHandoffFreeze(topicName, partition, freezeTTL, requireToken)
 	if err != nil {
 		return PartitionTransferInfo{}, err
@@ -275,7 +281,6 @@ func (e *Engine) prepareHandoff(ctx context.Context, topicName string, partition
 	// finish, so the HWM reported is final: nothing can advance it
 	// afterwards while the freeze holds, because every commit checks the
 	// gate again once it holds this lock.
-	dir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
 	var info PartitionTransferInfo
 	err = e.logs.WithProduceLock(topicName, partition, func(log *storage.Log) error {
 		var ierr error

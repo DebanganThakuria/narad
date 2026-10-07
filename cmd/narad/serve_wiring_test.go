@@ -96,7 +96,7 @@ func (stubMetastore) Close() error { return nil }
 func TestLazyShardRecoversCommittedOffsetFromDisk(t *testing.T) {
 	dataDir := t.TempDir()
 	for partition, offset := range map[int]int64{0: 3, 1: 9} {
-		partitionDir := storage.TopicPartitionDir(dataDir, "orders", partition)
+		partitionDir := topicPartitionDirT(t, dataDir, "orders", partition)
 		if err := storage.WriteConsumerOffset(partitionDir, offset); err != nil {
 			t.Fatalf("WriteConsumerOffset(%d) error = %v", partition, err)
 		}
@@ -105,7 +105,7 @@ func TestLazyShardRecoversCommittedOffsetFromDisk(t *testing.T) {
 		return consumer.Caps{MaxInFlight: 16, MaxAckedAhead: 16}, nil
 	}, nil)
 	inFlight.SetCommittedRecovery(func(topicName string, partition int) (int64, bool) {
-		committed, ok, err := storage.ReadConsumerOffset(storage.TopicPartitionDir(dataDir, topicName, partition))
+		committed, ok, err := storage.ReadConsumerOffset(topicPartitionDirT(t, dataDir, topicName, partition))
 		if err != nil {
 			return 0, false
 		}
@@ -454,7 +454,7 @@ func TestServeKeepsTheColdWalkToOwnedPartitions(t *testing.T) {
 		if err := bc.logs.ClosePartition("orders", p); err != nil {
 			t.Fatal(err)
 		}
-		dir := storage.TopicPartitionDir(cfg.Storage.DataDir, "orders", p)
+		dir := topicPartitionDirT(t, cfg.Storage.DataDir, "orders", p)
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			t.Fatal(err)

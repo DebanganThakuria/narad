@@ -170,8 +170,9 @@ func (w *moveWorker) finish() {
 			if w.movedBack {
 				// Staging holds the install this worker moved back; if
 				// its flip committed after all, it is the partition.
+				dir, derr := r.partitionDir(w.topic, w.partition)
 				w.setAsideStaging("move: set aside the staging copy this move moved back, since the partition's owner cannot be read; it may hold the partition's records. Operator action required",
-					"partition_dir", r.partitionDir(w.topic, w.partition), "err", err)
+					"partition_dir", dir, "partition_dir_err", derr, "err", err)
 				return
 			}
 			r.logger.Warn("move: could not read the partition's owner; keeping the staging copy", "topic", w.topic, "partition", w.partition, "staging", w.staging, "err", err)
@@ -182,7 +183,13 @@ func (w *moveWorker) finish() {
 		if _, err := os.Stat(w.staging); err != nil {
 			return
 		}
-		dir := r.partitionDir(w.topic, w.partition)
+		dir, derr := r.partitionDir(w.topic, w.partition)
+		if derr != nil {
+			// Nothing to compare the copy with: keep it.
+			w.setAsideStaging("move: set aside the staging copy of a partition this node owns; the partition's path cannot be formed. Operator action required",
+				"err", derr)
+			return
+		}
 		if w.ownedStagingIsRedundant(dir) {
 			r.logger.Info("move: the partition flipped to this node under an earlier attempt's install; removing this attempt's staging copy",
 				"topic", w.topic, "partition", w.partition, "staging", w.staging, "partition_dir", dir)

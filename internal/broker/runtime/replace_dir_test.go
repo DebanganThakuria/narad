@@ -51,7 +51,7 @@ func TestReplacePartitionDirClosesOpenLogAndServesTheCopy(t *testing.T) {
 		t.Fatalf("close staged: %v", err)
 	}
 
-	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	dir := topicPartitionDirT(t, dataDir, "orders", 0)
 	if err := logs.ReplacePartitionDir("orders", 0, func() error {
 		if err := os.RemoveAll(dir); err != nil {
 			return err

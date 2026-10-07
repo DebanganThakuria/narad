@@ -172,7 +172,7 @@ func TestCleanUpStoppedCursorFileEpochGuard(t *testing.T) {
 			logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 			cursors: map[fanoutCursorKey]*fanoutCursorHandle{},
 		}
-		dir := storage.TopicPartitionDir(dataDir, "parent", 0)
+		dir := topicPartitionDirT(t, dataDir, "parent", 0)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("mkdir partition dir: %v", err)
 		}

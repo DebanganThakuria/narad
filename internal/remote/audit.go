@@ -28,6 +28,11 @@ const (
 	OutcomeRefused   = "refused"
 )
 
+// leaderAuditFixedAttrs is the most fields LeaderAudit writes before
+// the caller's attrs: component, event, actor, request_id, target,
+// outcome and class.
+const leaderAuditFixedAttrs = 7
+
 // LeaderAudit writes the authoritative audit line after a Raft apply,
 // exactly one per proposal: component=audit, event, actor, request_id,
 // target, outcome ("committed" or "refused"), class, then attrs. Lines
@@ -38,7 +43,9 @@ func LeaderAudit(log *slog.Logger, ev AuditEvent) {
 	if log == nil {
 		return
 	}
-	attrs := make([]slog.Attr, 0, 7+len(ev.Attrs))
+	// Sized for the fixed fields only: the caller's attrs are appended
+	// (one growth at most), so no size is computed from their length.
+	attrs := make([]slog.Attr, 0, leaderAuditFixedAttrs)
 	attrs = append(attrs,
 		slog.String("component", "audit"),
 		slog.String("event", ev.Event),

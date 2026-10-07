@@ -28,7 +28,12 @@ import (
 )
 
 func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
-	partitionDir := storage.TopicPartitionDir(r.dataDir, key.parent, key.partition)
+	partitionDir, err := storage.TopicPartitionDir(r.dataDir, key.parent, key.partition)
+	if err != nil {
+		r.logger.Error("fanout: cursor not started: the parent's partition path cannot be formed",
+			"parent", key.parent, "partition", key.partition, "child", key.child, "err", err)
+		return
+	}
 	delayMs := key.delayMs
 
 	next := topic.FanoutTailOffset

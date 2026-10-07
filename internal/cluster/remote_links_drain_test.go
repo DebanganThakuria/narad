@@ -106,7 +106,7 @@ func TestRemoteLinksDeleteNeverReusesAnEarlierBacklogAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	rigWait(t, "the second child's cursor file", 10*time.Second, func() bool {
-		_, ok, _ := storage.ReadFanoutCursor(storage.TopicPartitionDir(s.dataDir, "orders", 0), "orders-to-c")
+		_, ok, _ := storage.ReadFanoutCursor(topicPartitionDirT(t, s.dataDir, "orders", 0), "orders-to-c")
 		return ok
 	})
 	if res := s.write(t, nodewire.RemoteSubDetach, map[string]any{"parent": "orders", "child": "orders-to-b", "expect_remote": true, "force": true}); res.Status != http.StatusNoContent {
@@ -159,7 +159,7 @@ func TestRemoteLinksDeleteNeverSharesACheckThatStartedBeforeIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	rigWait(t, "the second child's cursor file", 10*time.Second, func() bool {
-		_, ok, _ := storage.ReadFanoutCursor(storage.TopicPartitionDir(s.dataDir, "orders", 0), "orders-to-c")
+		_, ok, _ := storage.ReadFanoutCursor(topicPartitionDirT(t, s.dataDir, "orders", 0), "orders-to-c")
 		return ok
 	})
 	rg.target.faults.set("down")

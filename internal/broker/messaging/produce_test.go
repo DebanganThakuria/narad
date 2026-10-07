@@ -373,7 +373,7 @@ func TestProduceFailsWhenHighWatermarkCannotPersist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open log: %v", err)
 	}
-	hwmPath := partitionHWMPath(dataDir, "orders", 0)
+	hwmPath := partitionHWMPath(t, dataDir, "orders", 0)
 	if err := os.Remove(hwmPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Remove(hwm): %v", err)
 	}

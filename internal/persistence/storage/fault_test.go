@@ -882,7 +882,7 @@ func TestFaultRenameFails(t *testing.T) {
 	if err := WriteTopicIncarnation(topicDir, "0123456789abcdef"); err != nil {
 		t.Fatal(err)
 	}
-	partitionDir := TopicPartitionDir(dataDir, "orders", 0)
+	partitionDir := topicPartitionDirT(t, dataDir, "orders", 0)
 	if err := os.MkdirAll(partitionDir, 0o700); err != nil {
 		t.Fatal(err)
 	}

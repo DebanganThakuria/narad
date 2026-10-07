@@ -402,7 +402,10 @@ func (g *Logs) openGuarded(topicName string, idx int, walk bool) (l *storage.Log
 		opts.Metrics = g.metrics.StorageRecorder(topicName, idx)
 	}
 
-	partitionDir := storage.TopicPartitionDir(g.dataDir, topicName, idx)
+	partitionDir, err := storage.TopicPartitionDir(g.dataDir, topicName, idx)
+	if err != nil {
+		return nil, nil, err
+	}
 	l, err = storage.NewLog(partitionDir, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("broker/runtime: open partition log %s: %w", partitionDir, err)
@@ -489,7 +492,11 @@ func (g *Logs) PeekHighWatermark(topicName string, idx int) (int64, bool) {
 	if l, ok := g.Peek(topicName, idx); ok {
 		return l.HighWatermark(), true
 	}
-	hwm, ok, err := storage.ReadPersistedHighWatermark(storage.TopicPartitionDir(g.dataDir, topicName, idx))
+	dir, err := storage.TopicPartitionDir(g.dataDir, topicName, idx)
+	if err != nil {
+		return 0, false
+	}
+	hwm, ok, err := storage.ReadPersistedHighWatermark(dir)
 	if err != nil || !ok {
 		return 0, false
 	}

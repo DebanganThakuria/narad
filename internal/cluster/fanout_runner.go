@@ -443,13 +443,17 @@ func (r *FanoutRunner) cleanUpStoppedCursor(key fanoutCursorKey, byName map[stri
 	if ok && child.IsChild() && child.Parent == key.parent && child.AttachEpoch == key.epoch {
 		return // link still live; cursor stopped for another reason
 	}
-	dir := storage.TopicPartitionDir(r.dataDir, key.parent, key.partition)
 	// The offset file is shared by every attachment of (parent, partition,
 	// child); only the attachment that owns its contents may destroy it. A
 	// cursor spawned from a stale replica carries a dead epoch — if the
 	// file on disk holds a different (live) epoch, deleting it here would
 	// erase the real cursor's resume point.
-	cur, found, err := storage.ReadFanoutCursor(dir, key.child)
+	dir, err := storage.TopicPartitionDir(r.dataDir, key.parent, key.partition)
+	var cur storage.FanoutCursor
+	var found bool
+	if err == nil {
+		cur, found, err = storage.ReadFanoutCursor(dir, key.child)
+	}
 	switch {
 	case err != nil:
 		r.logger.Warn("fanout: read cursor file before cleanup; keeping it", "parent", key.parent, "partition", key.partition, "child", key.child, "err", err)
@@ -486,7 +490,11 @@ func (r *FanoutRunner) sweepOrphanCursorFiles(ctx context.Context, byName map[st
 			if owned, _ := r.ownsPartition(t.Name, p); !owned {
 				continue
 			}
-			dir := storage.TopicPartitionDir(r.dataDir, t.Name, p)
+			dir, err := storage.TopicPartitionDir(r.dataDir, t.Name, p)
+			if err != nil {
+				r.logger.Warn("fanout: sweep cursor files", "topic", t.Name, "partition", p, "err", err)
+				continue
+			}
 			children, err := storage.ListFanoutCursorChildren(dir)
 			if err != nil {
 				r.logger.Warn("fanout: sweep cursor files", "topic", t.Name, "partition", p, "err", err)

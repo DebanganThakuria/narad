@@ -209,7 +209,12 @@ func newEnv(t testing.TB, opts envOpts) *env {
 		committer = runtime.NewConsumerOffsetCommitter(dataDir, 10*time.Millisecond, log)
 		offsets = consumer.NewInFlight(capsResolver(ms), committer.Commit)
 		offsets.SetCommittedRecovery(func(topicName string, partition int) (int64, bool) {
-			committed, ok, err := storage.ReadConsumerOffset(storage.TopicPartitionDir(dataDir, topicName, partition))
+			dir, err := storage.TopicPartitionDir(dataDir, topicName, partition)
+			if err != nil {
+				t.Errorf("consumer offset recovery %s/%d: %v", topicName, partition, err)
+				return 0, false
+			}
+			committed, ok, err := storage.ReadConsumerOffset(dir)
 			if err != nil {
 				t.Errorf("consumer offset recovery %s/%d: %v", topicName, partition, err)
 				return 0, false
@@ -217,7 +222,12 @@ func newEnv(t testing.TB, opts envOpts) *env {
 			return committed, ok
 		})
 		offsets.SetAheadRecovery(func(topicName string, partition int) (int64, []int64, bool) {
-			rec, ok, err := storage.ReadConsumerAhead(storage.TopicPartitionDir(dataDir, topicName, partition))
+			dir, err := storage.TopicPartitionDir(dataDir, topicName, partition)
+			if err != nil {
+				t.Errorf("consumer ahead recovery %s/%d: %v", topicName, partition, err)
+				return 0, nil, false
+			}
+			rec, ok, err := storage.ReadConsumerAhead(dir)
 			if err != nil {
 				t.Errorf("consumer ahead recovery %s/%d: %v", topicName, partition, err)
 				return 0, nil, false

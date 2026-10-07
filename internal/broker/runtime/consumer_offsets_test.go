@@ -22,7 +22,7 @@ func TestConsumerOffsetCommitterFlushesLatestOffsetOnClose(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	got, ok, err := storage.ReadConsumerOffset(storage.TopicPartitionDir(dataDir, "orders", 0))
+	got, ok, err := storage.ReadConsumerOffset(topicPartitionDirT(t, dataDir, "orders", 0))
 	if err != nil {
 		t.Fatalf("ReadConsumerOffset() error = %v", err)
 	}
@@ -45,7 +45,7 @@ func TestConsumerOffsetCommitterCanPersistOffsetZero(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	got, ok, err := storage.ReadConsumerOffset(storage.TopicPartitionDir(dataDir, "orders", 0))
+	got, ok, err := storage.ReadConsumerOffset(topicPartitionDirT(t, dataDir, "orders", 0))
 	if err != nil {
 		t.Fatalf("ReadConsumerOffset() error = %v", err)
 	}
@@ -77,7 +77,7 @@ func TestConsumerOffsetCommitterDoesNotRecreatePurgedPartitionDir(t *testing.T) 
 
 func mustCreatePartitionDir(t *testing.T, dataDir, topic string, partition int) string {
 	t.Helper()
-	partitionDir := storage.TopicPartitionDir(dataDir, topic, partition)
+	partitionDir := topicPartitionDirT(t, dataDir, topic, partition)
 	if err := os.MkdirAll(partitionDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
@@ -99,7 +99,7 @@ func (s *fakeAheadSource) source(string, int) (int64, []int64, uint64, bool) {
 func TestConsumerOffsetCommitterPersistsAckedAheadWithTheFrontier(t *testing.T) {
 	dataDir := t.TempDir()
 	mustCreatePartitionDir(t, dataDir, "orders", 0)
-	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	dir := topicPartitionDirT(t, dataDir, "orders", 0)
 	committer := manualOffsetCommitter(dataDir)
 	src := &fakeAheadSource{committed: 4, offsets: []int64{6, 9}, version: 1}
 	committer.SetAheadSource(src.source)
@@ -175,7 +175,7 @@ func TestConsumerOffsetCommitterInOrderFrontierRidesConsumerAhead(t *testing.T) 
 func TestConsumerOffsetCommitterForgetRewritesAfterReplacement(t *testing.T) {
 	dataDir := t.TempDir()
 	mustCreatePartitionDir(t, dataDir, "orders", 0)
-	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	dir := topicPartitionDirT(t, dataDir, "orders", 0)
 	committer := manualOffsetCommitter(dataDir)
 	src := &fakeAheadSource{committed: 3, offsets: []int64{5}, version: 1}
 	committer.SetAheadSource(src.source)
@@ -226,7 +226,7 @@ func mustModTime(t *testing.T, dir, name string) time.Time {
 func TestConsumerOffsetCommitterResumesFromTheFileAfterRestart(t *testing.T) {
 	dataDir := t.TempDir()
 	mustCreatePartitionDir(t, dataDir, "orders", 0)
-	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	dir := topicPartitionDirT(t, dataDir, "orders", 0)
 	future := uint64(time.Now().Add(time.Hour).UnixNano()) // a previous process with a faster clock
 	if err := storage.WriteConsumerAhead(dir, 1, future, 2, []int64{5}); err != nil {
 		t.Fatal(err)

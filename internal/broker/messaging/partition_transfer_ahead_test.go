@@ -67,7 +67,7 @@ func TestPartitionTransferInfoFallsBackToAheadFile(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	dataDir := t.TempDir()
-	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	dir := topicPartitionDirT(t, dataDir, "orders", 0)
 	// Eight committed records, so the frontier below sits under the
 	// boundary (a listing clamps one that does not).
 	src, err := storage.NewLog(dir, storage.Options{})

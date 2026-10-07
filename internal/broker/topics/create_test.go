@@ -150,7 +150,7 @@ func TestDerivedFileNamesFitAtTheNameCap(t *testing.T) {
 		}
 	}
 
-	partitionDir := storage.TopicPartitionDir(dataDir, "parent", 0)
+	partitionDir := topicPartitionDirT(t, dataDir, "parent", 0)
 	if err := storage.WriteFanoutCursorCreating(partitionDir, name, storage.FanoutCursor{Epoch: "e1", NextOffset: 0}); err != nil {
 		t.Fatalf("first fan-out cursor write for a %d-byte child name: %v", len(name), err)
 	}
@@ -194,7 +194,7 @@ func TestFanoutChildNamesUpTo230BytesAttach(t *testing.T) {
 	if err := validateFanoutChildName(longest + "c"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("a 231-byte child name: err = %v, want ErrInvalid", err)
 	}
-	partitionDir := storage.TopicPartitionDir(t.TempDir(), "parent", 0)
+	partitionDir := topicPartitionDirT(t, t.TempDir(), "parent", 0)
 	if err := storage.WriteFanoutCursorCreating(partitionDir, longest, storage.FanoutCursor{Epoch: "e1", NextOffset: 0}); err != nil {
 		t.Fatalf("fan-out cursor write for a 230-byte child name: %v", err)
 	}

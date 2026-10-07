@@ -592,7 +592,11 @@ func (d *dispatcher) consumable(topicName string, scan []int) int {
 		// that came back empty and this topic a claimDeadline of silence.
 		next, inFlight, ackedAhead, ok := d.engine.offsets.Reservable(topicName, p)
 		if !ok {
-			next, ackedAhead = persistedFrontier(storage.TopicPartitionDir(d.engine.logs.DataDir(), topicName, p))
+			dir, err := storage.TopicPartitionDir(d.engine.logs.DataDir(), topicName, p)
+			if err != nil {
+				continue
+			}
+			next, ackedAhead = persistedFrontier(dir)
 		}
 		free := tail - next - int64(inFlight+ackedAhead)
 		if free > 0 {

@@ -198,6 +198,37 @@ func TestRemoteBatchCompressedBodies(t *testing.T) {
 	}
 }
 
+// An error answer never carries the request's Content-Encoding back: a
+// body that does not decode names the accepted encodings, so it reads
+// the same whatever the header said, and an unknown encoding is refused
+// without repeating it.
+func TestRemoteBatchErrorsDoNotEchoTheContentEncoding(t *testing.T) {
+	h := ProduceBatch(newTestSet(&recordingBatchProducer{fakeBroker: &fakeBroker{}}, nil), nil)
+	answers := map[string]string{}
+	for _, enc := range []string{"zstd", "gzip"} {
+		res := postBatchWith(t, h, []byte("not compressed at all"), enc, 0)
+		if res.Code != http.StatusBadRequest {
+			t.Fatalf("%s garbage: status %d (%s), want 400", enc, res.Code, res.Body)
+		}
+		answers[enc] = errorBodyOf(t, res)
+	}
+	if answers["zstd"] != answers["gzip"] {
+		t.Fatalf("the decode failure depends on the header: zstd %q, gzip %q", answers["zstd"], answers["gzip"])
+	}
+	if want := "invalid json: body does not decode as its Content-Encoding (zstd or gzip)"; answers["zstd"] != want {
+		t.Fatalf("decode failure = %q, want %q", answers["zstd"], want)
+	}
+	for _, enc := range []string{"br", "<script>alert(1)</script>", "x-narad-unknown"} {
+		res := postBatchWith(t, h, batchOf(1, `{"k":"v"}`), enc, 0)
+		if res.Code != http.StatusUnsupportedMediaType {
+			t.Fatalf("encoding %q: status %d, want 415", enc, res.Code)
+		}
+		if strings.Contains(res.Body.String(), enc) {
+			t.Fatalf("encoding %q is echoed in the error body %q", enc, res.Body)
+		}
+	}
+}
+
 // A compression bomb costs no more than a plain body at the cap: the
 // decoder stops at 16 MiB and answers 413.
 func TestRemoteBatchCompressionBombIsCapped(t *testing.T) {

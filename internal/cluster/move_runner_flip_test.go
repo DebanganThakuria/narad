@@ -235,14 +235,14 @@ func TestMoveKeepsThePartitionWhenTheFlipReplyIsLost(t *testing.T) {
 			src := NewMoveRunner(followerView{store}, "narad-src", srcData, peer, srcEngine, nil, discardLogger(), MoveConfig{})
 			src.sweepStaleCopies(ctx)
 
-			dstDir := storage.TopicPartitionDir(dstData, "orders", 0)
+			dstDir := topicPartitionDirT(t, dstData, "orders", 0)
 			_, statErr := os.Stat(dstDir)
 			_, marked, _ := messaging.ReadMoveMarker(dstDir)
 			next := int64(-1)
 			if l, err := dstLogs.Get("orders", 0); err == nil {
 				next = l.NextOffset()
 			}
-			_, srcErr := os.Stat(storage.TopicPartitionDir(srcData, "orders", 0))
+			_, srcErr := os.Stat(topicPartitionDirT(t, srcData, "orders", 0))
 			t.Logf("dst dir err=%v marker=%v next=%d; src copy err after the sweep=%v", statErr, marked, next, srcErr)
 			if statErr != nil || !marked || next != 10 {
 				t.Fatalf("DATA LOSS: narad-dst owns orders/0 but its copy is gone (dir err %v, marker %v, next offset %d; 10 records were committed)", statErr, marked, next)
@@ -276,7 +276,7 @@ func (s *commitThenFailStore) CompleteMove(_ context.Context, topicName string, 
 
 func requireInstalledCopy(t *testing.T, dataDir string, wantHWM int64, payloads map[int64][]byte) {
 	t.Helper()
-	log, err := storage.NewLog(storage.TopicPartitionDir(dataDir, "orders", 0), storage.Options{})
+	log, err := storage.NewLog(topicPartitionDirT(t, dataDir, "orders", 0), storage.Options{})
 	if err != nil {
 		t.Fatalf("open the installed copy: %v", err)
 	}
@@ -562,7 +562,7 @@ func TestMoveRunnerWaitsOutTheSettleWindowBeforeUndoingAnInstall(t *testing.T) {
 	if len(replaces) != 1 {
 		t.Errorf("partition directory replaced %d times, want only the install", len(replaces))
 	}
-	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	dir := topicPartitionDirT(t, dataDir, "orders", 0)
 	if _, err := os.Stat(dir); err != nil {
 		_, serr := os.Stat(r.stagingDir("orders", 0))
 		t.Fatalf("DATA LOSS: narad-dst owns orders/0 but nothing is under its path (%v); staging stat: %v", err, serr)
@@ -611,7 +611,7 @@ func TestMoveRunnerRemovesItsStagingWhenTheTopicIsGone(t *testing.T) {
 	if ctx.Err() != nil {
 		t.Fatal("the worker kept running after the leader confirmed the topic is gone")
 	}
-	if segs, _ := storage.ListPartitionSegments(storage.TopicPartitionDir(dataDir, "orders", 0)); len(segs) != 0 {
+	if segs, _ := storage.ListPartitionSegments(topicPartitionDirT(t, dataDir, "orders", 0)); len(segs) != 0 {
 		t.Fatalf("install left at the partition's path: %d segments", len(segs))
 	}
 	if _, err := os.Stat(r.stagingDir("orders", 0)); !errors.Is(err, os.ErrNotExist) {
@@ -661,7 +661,7 @@ func TestMoveRunnerDropsARecopyWhenAnEarlierWorkersInstallFlipped(t *testing.T) 
 	}
 	cancelA()
 	<-doneA
-	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	dir := topicPartitionDirT(t, dataDir, "orders", 0)
 	if m, ok, err := messaging.ReadMoveMarker(dir); err != nil || !ok || m.Source != "narad-src" {
 		t.Fatalf("setup: worker A's install is not at the partition's path (marker %+v, found %v, err %v)", m, ok, err)
 	}
@@ -718,7 +718,7 @@ func TestMoveWorkerSetsAsideAnOwnedStagingCopyOnlyWhenItMayHoldTheRecords(t *tes
 			r := NewMoveRunner(store, "narad-dst", dataDir, movePeerFake{}, nil, nil, nil, MoveConfig{})
 			w := &moveWorker{r: r, topic: "orders", partition: 0, source: "narad-src", staging: r.stagingDir("orders", 0), movedBack: tc.movedBack}
 			buildSourcePartition(t, w.staging, 3)
-			dir := r.partitionDir("orders", 0)
+			dir := topicPartitionDirT(t, dataDir, "orders", 0)
 			if tc.pathLog {
 				buildSourcePartition(t, dir, 1)
 			}
@@ -947,7 +947,7 @@ func TestMoveRunnerUndoesAnInstallOnlyOnAReadStartedAfterTheSettleWindow(t *test
 	dataDir := t.TempDir()
 	r := NewMoveRunner(store, "narad-dst", dataDir, peer, installer, nil, nil, MoveConfig{})
 	r.now = clock.Now
-	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	dir := topicPartitionDirT(t, dataDir, "orders", 0)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1243,7 +1243,7 @@ func TestMoveRunnerFlipsAPendingInstallAsForcePromoteWhenTheSourceDies(t *testin
 func TestRollbackLeavesASuccessorThatReusedTheInstallsInode(t *testing.T) {
 	dataDir := t.TempDir()
 	r := NewMoveRunner(&fakeMoveStore{}, "narad-dst", dataDir, movePeerFake{}, nil, nil, nil, MoveConfig{})
-	dir := r.partitionDir("orders", 0)
+	dir := topicPartitionDirT(t, dataDir, "orders", 0)
 	marker := messaging.MoveMarker{Source: "narad-src", HighWatermark: 10, InstalledAtUnixMs: 1, DurableAtUnixMs: 1}
 
 	for _, tc := range []struct {
@@ -1384,7 +1384,7 @@ func TestMoveRunnerRollbackLeavesARecreatedTopicsPartitionAlone(t *testing.T) {
 					produce()
 				case "replaced":
 					if hookErr = logs.ReplacePartitionDir("orders", 0, func() error {
-						return os.RemoveAll(storage.TopicPartitionDir(dataDir, "orders", 0))
+						return os.RemoveAll(topicPartitionDirT(t, dataDir, "orders", 0))
 					}); hookErr != nil {
 						return
 					}
@@ -1417,7 +1417,7 @@ func TestMoveRunnerRollbackLeavesARecreatedTopicsPartitionAlone(t *testing.T) {
 			if id, marked, _ := storage.ReadTopicIncarnation(topicDirT(t, dataDir, "orders")); !marked || id != tc.wantMarker {
 				t.Fatalf("topic marker %q (marked %v), want %s", id, marked, tc.wantMarker)
 			}
-			l, err := storage.NewLog(storage.TopicPartitionDir(dataDir, "orders", 0), storage.Options{})
+			l, err := storage.NewLog(topicPartitionDirT(t, dataDir, "orders", 0), storage.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}

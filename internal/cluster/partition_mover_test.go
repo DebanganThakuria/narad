@@ -703,7 +703,7 @@ func TestMoveNeverPromotesARewrittenUncommittedTail(t *testing.T) {
 			{Topic: "orders", TopicID: rec.ID, Key: "k11", TargetPartition: 0, Payload: []byte(payload)},
 		}
 	}
-	hwmFile := filepath.Join(storage.TopicPartitionDir(srcData, "orders", 0), "hwm")
+	hwmFile := filepath.Join(topicPartitionDirT(t, srcData, "orders", 0), "hwm")
 	ran := false
 	restore := syncfile.SetFaultHook(func(op syncfile.Op, path string) error {
 		if op != syncfile.OpOpen || path != hwmFile {

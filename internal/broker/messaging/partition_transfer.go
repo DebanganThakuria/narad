@@ -163,7 +163,10 @@ func (e *Engine) PartitionTransferInfo(ctx context.Context, topicName string, pa
 	} else if !ok {
 		return PartitionTransferInfo{}, fmt.Errorf("%w: %s", runtime.ErrStaleTopicIncarnation, topicName)
 	}
-	dir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
+	dir, err := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
+	if err != nil {
+		return PartitionTransferInfo{}, err
+	}
 	info, err := e.transferInfoAt(dir, topicName, partition, func() (int64, error) {
 		return e.transferHighWatermark(dir, topicName, partition)
 	}, func(base, hwm int64) (int64, bool) {
@@ -410,6 +413,9 @@ func (e *Engine) ReadPartitionSegment(ctx context.Context, topicName string, par
 			length = min(length, pos-at)
 		}
 	}
-	dir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
+	dir, err := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
+	if err != nil {
+		return nil, err
+	}
 	return storage.ReadSegmentRange(dir, baseOffset, at, length)
 }

@@ -26,3 +26,14 @@ func staleTopicDirT(tb testing.TB, dataDir, topicName, id string) string {
 	}
 	return dir
 }
+
+// topicPartitionDirT is storage.TopicPartitionDir for a topic name the
+// test knows is valid.
+func topicPartitionDirT(tb testing.TB, dataDir, topicName string, partition int) string {
+	tb.Helper()
+	dir, err := storage.TopicPartitionDir(dataDir, topicName, partition)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return dir
+}

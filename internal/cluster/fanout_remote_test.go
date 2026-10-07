@@ -611,7 +611,7 @@ func TestRemoteChildCursorTravelsWithAPartitionMove(t *testing.T) {
 	rigWait(t, "the persisted cursor", 10*time.Second, func() bool { return rg.src.cursorOffset(t, 0) == 300 })
 	rg.src.stop()
 
-	files, err := storage.ListFanoutCursorFiles(storage.TopicPartitionDir(rg.src.dataDir, "orders", 0))
+	files, err := storage.ListFanoutCursorFiles(topicPartitionDirT(t, rg.src.dataDir, "orders", 0))
 	if err != nil {
 		t.Fatal(err)
 	}

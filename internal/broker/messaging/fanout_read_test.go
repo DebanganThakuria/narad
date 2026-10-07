@@ -313,7 +313,7 @@ func TestFanoutCursorStatsDoesNotOpenClosedLogs(t *testing.T) {
 	ms.topics["parent"] = topic.Topic{Name: "parent", Partitions: 2, Role: topic.RoleParent, Children: []string{"child"}}
 	e := newTestEngine(t, ms, nil, nil)
 	commitFanoutFixture(t, e, "parent", 0, 5)
-	dir := storage.TopicPartitionDir(e.logs.DataDir(), "parent", 0)
+	dir := topicPartitionDirT(t, e.logs.DataDir(), "parent", 0)
 	if err := storage.WriteFanoutCursorIfPartitionDirExists(dir, "child", storage.FanoutCursor{Epoch: "e", NextOffset: 2}); err != nil {
 		t.Fatalf("WriteFanoutCursor: %v", err)
 	}

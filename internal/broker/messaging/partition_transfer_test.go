@@ -247,7 +247,7 @@ func TestPartitionTransferInfoCarriesFanoutCursorSidecars(t *testing.T) {
 	if _, err := e.CommitAcceptedProduceBatch(ctx, []ingress.ProduceRecord{{Topic: "orders", TargetPartition: 0, Key: "k", Payload: []byte("x")}}); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	dir := storage.TopicPartitionDir(e.logs.DataDir(), "orders", 0)
+	dir := topicPartitionDirT(t, e.logs.DataDir(), "orders", 0)
 	if err := storage.WriteFanoutCursorIfPartitionDirExists(dir, "audit-child", storage.FanoutCursor{Epoch: "abc", NextOffset: 10}); err != nil {
 		t.Fatalf("write cursor: %v", err)
 	}
@@ -500,7 +500,7 @@ func committedWithHiddenFrame(t *testing.T, e *Engine) (storage.SegmentInfo, int
 	if err := log.Sync(); err != nil {
 		t.Fatal(err)
 	}
-	dir := storage.TopicPartitionDir(e.logs.DataDir(), "orders", 0)
+	dir := topicPartitionDirT(t, e.logs.DataDir(), "orders", 0)
 	segs, err := storage.ListPartitionSegments(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -592,7 +592,7 @@ func TestTransferInfoReportsSegmentTimes(t *testing.T) {
 	if _, err := e.CommitAcceptedProduceBatch(ctx, []ingress.ProduceRecord{{Topic: "orders", Key: "k", TargetPartition: 0, Payload: []byte("x")}}); err != nil {
 		t.Fatal(err)
 	}
-	dir := storage.TopicPartitionDir(e.logs.DataDir(), "orders", 0)
+	dir := topicPartitionDirT(t, e.logs.DataDir(), "orders", 0)
 	old := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
 	segs, err := storage.ListPartitionSegments(dir)
 	if err != nil || len(segs) == 0 {

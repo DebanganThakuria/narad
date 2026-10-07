@@ -28,7 +28,7 @@ func coldTestLogs(t *testing.T, ms *runtimeFakeMetastore) *Logs {
 // disk and once reopened, its last write looks older than by.
 func ageSegments(t *testing.T, g *Logs, topicName string, idx int, by time.Duration) {
 	t.Helper()
-	dir := storage.TopicPartitionDir(g.dataDir, topicName, idx)
+	dir := topicPartitionDirT(t, g.dataDir, topicName, idx)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
@@ -45,7 +45,7 @@ func ageSegments(t *testing.T, g *Logs, topicName string, idx int, by time.Durat
 
 func segmentFiles(t *testing.T, g *Logs, topicName string, idx int) []string {
 	t.Helper()
-	dir := storage.TopicPartitionDir(g.dataDir, topicName, idx)
+	dir := topicPartitionDirT(t, g.dataDir, topicName, idx)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
@@ -319,7 +319,7 @@ func TestColdRetentionReportsUnreadablePartitionDir(t *testing.T) {
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, RetentionMs: int64(time.Hour / time.Millisecond)}
 	g := coldTestLogs(t, ms)
 	dueClosedPartition(t, g, "orders")
-	dir := storage.TopicPartitionDir(g.dataDir, "orders", 0)
+	dir := topicPartitionDirT(t, g.dataDir, "orders", 0)
 	if err := os.Chmod(dir, 0o000); err != nil {
 		t.Fatalf("Chmod: %v", err)
 	}
@@ -540,7 +540,7 @@ func TestColdWalkNeverRecreatesAReclaimedPartition(t *testing.T) {
 		t.Fatalf("ClosePartition: %v", err)
 	}
 	ageSegments(t, g, "orders", 1, 2*time.Hour)
-	dir := storage.TopicPartitionDir(g.DataDir(), "orders", 1)
+	dir := topicPartitionDirT(t, g.DataDir(), "orders", 1)
 
 	inGuard := make(chan struct{})
 	reclaimed := make(chan error, 1)

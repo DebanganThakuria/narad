@@ -58,7 +58,7 @@ func TestConsumeHoldingARetiredLogNeverSkipsTheSuccessor(t *testing.T) {
 			ctx := context.Background()
 			store := newTestStore(t)
 			dataDir := t.TempDir()
-			partDir := storage.TopicPartitionDir(dataDir, "orders", 0)
+			partDir := topicPartitionDirT(t, dataDir, "orders", 0)
 			mk := func(id string) topic.Topic {
 				return topic.Topic{Name: "orders", ID: id, Partitions: 1, VisibilityTimeoutMs: 60_000, RetentionMs: 1}
 			}
@@ -89,11 +89,11 @@ func TestConsumeHoldingARetiredLogNeverSkipsTheSuccessor(t *testing.T) {
 				return consumer.Caps{MaxInFlight: 1000, MaxAckedAhead: 1000}, nil
 			}, committer.Commit)
 			offsets.SetCommittedRecovery(func(topicName string, p int) (int64, bool) {
-				committed, ok, err := storage.ReadConsumerOffset(storage.TopicPartitionDir(dataDir, topicName, p))
+				committed, ok, err := storage.ReadConsumerOffset(topicPartitionDirT(t, dataDir, topicName, p))
 				return committed, ok && err == nil
 			})
 			offsets.SetAheadRecovery(func(topicName string, p int) (int64, []int64, bool) {
-				rec, ok, err := storage.ReadConsumerAhead(storage.TopicPartitionDir(dataDir, topicName, p))
+				rec, ok, err := storage.ReadConsumerAhead(topicPartitionDirT(t, dataDir, topicName, p))
 				return rec.Committed, rec.Offsets, ok && err == nil
 			})
 			committer.SetAheadSource(offsets.AheadSnapshot)

@@ -54,7 +54,7 @@ func TestReclaimMovedPartitionGuards(t *testing.T) {
 	engine := newClusterTestEngine(t, store, fixedPartitionManager{picked: 0})
 	dataDir := engine.logs.DataDir()
 	mkPartition := func(p int) string {
-		dir := storage.TopicPartitionDir(dataDir, "orders", p)
+		dir := topicPartitionDirT(t, dataDir, "orders", p)
 		log, err := storage.NewLog(dir, storage.Options{})
 		if err != nil {
 			t.Fatalf("NewLog(p%d): %v", p, err)
@@ -120,7 +120,7 @@ func TestReclaimQuarantinesCopyAheadOfPromotedHWM(t *testing.T) {
 	engine := newClusterTestEngine(t, store, fixedPartitionManager{picked: 0})
 	dataDir := engine.logs.DataDir()
 	mkPartition := func(p, n int) string {
-		dir := storage.TopicPartitionDir(dataDir, "orders", p)
+		dir := topicPartitionDirT(t, dataDir, "orders", p)
 		log, err := storage.NewLog(dir, storage.Options{})
 		if err != nil {
 			t.Fatalf("NewLog(p%d): %v", p, err)
@@ -231,7 +231,7 @@ func TestReclaimSetsAsideACopyTheOwnerCannotVouchFor(t *testing.T) {
 		slog.New(slog.NewTextHandler(&logged, nil)), "node-self")
 	dataDir := logs.DataDir()
 	mkPartition := func(topicName string, p, n int) string {
-		dir := storage.TopicPartitionDir(dataDir, topicName, p)
+		dir := topicPartitionDirT(t, dataDir, topicName, p)
 		log, err := storage.NewLog(dir, storage.Options{})
 		if err != nil {
 			t.Fatalf("NewLog(%s/p%d): %v", topicName, p, err)
@@ -386,7 +386,7 @@ func requireSuccessorKeepsItsRecords(t *testing.T, logs *runtime.Logs, dataDir s
 		t.Logf("close: %v", err)
 	}
 	id, marked, _ := storage.ReadTopicIncarnation(topicDirT(t, dataDir, "orders"))
-	l, err := storage.NewLog(storage.TopicPartitionDir(dataDir, "orders", 0), storage.Options{})
+	l, err := storage.NewLog(topicPartitionDirT(t, dataDir, "orders", 0), storage.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
