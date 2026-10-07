@@ -190,7 +190,9 @@ func readBatchBody(s *handlers.Set, w http.ResponseWriter, r *http.Request, hold
 		s.WriteError(w, http.StatusRequestEntityTooLarge, "request body too large")
 		return nil, false
 	case err != nil:
-		s.WriteError(w, http.StatusBadRequest, "invalid json: body does not decode as "+encoding)
+		// The answer names the accepted encodings, never the header
+		// value: nothing the client sent is reflected back.
+		s.WriteError(w, http.StatusBadRequest, "invalid json: body does not decode as its Content-Encoding (zstd or gzip)")
 		return nil, false
 	}
 	return plain, true
