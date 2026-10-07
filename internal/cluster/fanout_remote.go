@@ -1238,6 +1238,7 @@ func (s *remoteSender) checkTarget(ctx, wait context.Context, c *remoteCursor, e
 		done := make(chan struct{})
 		lc.inflight = done
 		lc.forceCheck.Store(false)
+		closedAtStart := rs.gate.Closed()
 		lc.mu.Unlock()
 
 		cctx, cancel := context.WithTimeout(ctx, requestTimeout(e))
@@ -1261,8 +1262,11 @@ func (s *remoteSender) checkTarget(ctx, wait context.Context, c *remoteCursor, e
 			// closed that is the next probe (paced by the gate), so the
 			// probe that reopens it is checked first; beside an open
 			// gate the link's other sends wait a while before asking.
+			// A check that started while the gate was closed is no
+			// retry even if the gate reopened meanwhile: the reopen
+			// check is still owed.
 			lc.erred, lc.erredAt, lc.retryAt = key, time.Now(), time.Time{}
-			if !rs.gate.Closed() {
+			if !closedAtStart && !rs.gate.Closed() {
 				lc.retryAt = lc.erredAt.Add(min(interval, sink.GateMaxBackoff))
 			}
 		}

@@ -261,3 +261,60 @@ func TestRemoteLinkThrottledCheckHoldsTheGateForTheTargetsRetryAfter(t *testing.
 		t.Fatal("the gate's next probe fell due before the target's Retry-After")
 	}
 }
+
+// The reopen check owed by a closed gate is owed whenever the gate
+// reopens, also while that check is in flight: a check that started
+// while the gate was closed and errors after a chunk sent before the
+// close reopened it is not the open gate's retry, so the next lane
+// checks again before it sends rather than going on the old verdict.
+func TestRemoteLinkReopenCheckIsStillOwedWhenTheGateReopensWhileItErrs(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{partitions: 1}})
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitDelivered(t, rg.src.produce(t, 0, 5, 2, 0), 15*time.Second)
+	rg.waitState(t, 0, topic.RemoteStateRunning, 10*time.Second)
+
+	ctx := context.Background()
+	cur := rg.src.runner.remoteCursorFor("orders", 0, "orders-to-b")
+	if cur == nil {
+		t.Fatal("no remote cursor")
+	}
+	s := rg.src.runner.sender()
+	e, rs, state := s.entry("b")
+	if state != "" {
+		t.Fatalf("lookup state %q", state)
+	}
+	stub, err := rg.src.store.GetTopic(ctx, "orders-to-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur.forceTargetCheck()
+	if ok, _, _ := s.checkTarget(ctx, ctx, cur, e, rs, stub); !ok {
+		t.Fatal("the first check stopped sending")
+	}
+
+	// The gate closes. The check its new epoch owes starts while it is
+	// closed; before the target hangs up on it, a chunk sent before the
+	// close is accepted and the gate opens at the same epoch.
+	defer rg.target.faults.set("")
+	rs.gate.Failed(sink.Verdict{Action: sink.ActRetry, State: topic.RemoteStateUnavailable}, true)
+	reopen := func(batch bool) {
+		if !batch {
+			rs.gate.Succeeded(false)
+		}
+	}
+	rg.target.faults.onReset.Store(&reopen)
+	rg.target.faults.set("reset")
+	s.checkTarget(ctx, ctx, cur, e, rs, stub)
+	rg.target.faults.onReset.Store(nil)
+	if rs.gate.Closed() {
+		t.Fatal("the gate did not reopen during the check")
+	}
+
+	// Another cluster now answers the name. The next lane checks before
+	// it sends.
+	rg.target.faults.set("otherID")
+	if ok, _, _ := s.checkTarget(ctx, ctx, cur, e, rs, stub); ok {
+		t.Fatal("a lane went on sending on the old verdict while the reopen check was owed")
+	}
+}
