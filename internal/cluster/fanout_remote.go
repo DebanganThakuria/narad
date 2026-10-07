@@ -1176,9 +1176,10 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 // sending on a loop or a replaced target. The schedule and the verdict are
 // the link's, shared by its cursors on this node, and one check is in
 // flight per link. lc.mu is never held across the request: a cursor
-// that finds the check not due, or merely due on its interval while
-// another cursor's check is in flight, reads the published verdict at
-// once. One that needs a fresh verdict (a forced check, a new entry,
+// that finds the check not due, or merely due on its interval or as the
+// retry of an errored check (beside an open gate) while another
+// cursor's check is in flight, reads the published verdict at once. One
+// that needs a fresh verdict (a forced check, a new entry,
 // a reopened gate, a new recorded target) waits for the check in
 // flight, then runs its own if that one did not cover it; it waits no
 // longer than wait lives. The request itself runs under ctx.
@@ -1203,8 +1204,15 @@ func (s *remoteSender) checkTarget(ctx, wait context.Context, c *remoteCursor, e
 			return c.targetVerdict() == "", res, false
 		}
 		if done := lc.inflight; done != nil {
+			// Beside an open gate, a check in flight for a key that
+			// already erred is the link's retry: a lane that finds it
+			// sends on the last verdict, as it did before the retry
+			// fell due, instead of waiting out a target that keeps
+			// failing its listing. While the gate is closed the probe
+			// that reopens it is still checked first.
+			retry := !force && lc.erred == key && !rs.gate.Closed()
 			lc.mu.Unlock()
-			if !fresh {
+			if !fresh || retry {
 				return c.targetVerdict() == "", res, false
 			}
 			if waited.IsZero() {
