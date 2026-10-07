@@ -88,7 +88,8 @@ type rigFaults struct {
 	// cluster behind the same name would, after slowDelay; chunks
 	// still land),
 	// "nolisting" (the children listing answers 503 HTML; chunks
-	// still land), "throttled" (429 with retryAfter as Retry-After).
+	// still land), "throttled" (429 with retryAfter as Retry-After,
+	// after slowDelay).
 	mode atomic.Value
 	// onReset, when set, is told of each request mode "reset" is about
 	// to hang up on, and whether it is a batch.
@@ -133,6 +134,7 @@ func (f *rigFaults) wrap(next http.Handler) http.Handler {
 			_, _ = io.WriteString(w, "<html>down</html>")
 			return
 		case "throttled":
+			time.Sleep(f.slowDelay)
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Retry-After", f.retryAfter)
 			w.WriteHeader(http.StatusTooManyRequests)

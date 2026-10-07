@@ -1116,20 +1116,21 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 		// The check is a request like a chunk: it runs under sendCtx, so
 		// a sibling's re-read never cuts it off before the target
 		// answers and its answer is always recorded.
-		ok, res, ran := s.checkTarget(sh.sendCtx, ctx, sh.cur, entry, rs, stub)
-		if v, outcome := res.GateVerdict(); ran && probe && outcome == sink.CheckFailed && v.Action == sink.ActGate {
-			// The check went out as the gate's probe and the remote
-			// refused it as a whole (a wrong password, a throttle, a
-			// TLS failure): that is the probe's answer, as for a
-			// quiet cursor. Sending the chunk behind it would cost a
-			// wrong password two failed logins per backoff. The lane
+		ok, res, _ := s.checkTarget(sh.sendCtx, ctx, sh.cur, entry, rs, stub)
+		if v, outcome := res.GateVerdict(); probe && outcome == sink.CheckFailed && v.Action == sink.ActGate {
+			// The check went out as the gate's probe (or the probe
+			// waited for another lane's check of the same key) and the
+			// remote refused it as a whole (a wrong password, a
+			// throttle, a TLS failure): that is the probe's answer, as
+			// for a quiet cursor. Sending the chunk behind it would cost
+			// a wrong password two failed logins per backoff. The lane
 			// holds its records and waits for the next probe, which
-			// checks again first. A transient failure (unavailable,
-			// an edge) says nothing about produce: the chunk goes
-			// out behind it, so a target that takes chunks while its
-			// listing fails is not held for as long as the listing
-			// fails. Its key is still owed a check, so once the
-			// chunk reopens the gate the next lane checks first.
+			// checks again first. A transient failure (unavailable, an
+			// edge) says nothing about produce: the chunk goes out
+			// behind it, so a target that takes chunks while its listing
+			// fails is not held for as long as the listing fails. Its
+			// key is still owed a check, so once the chunk reopens the
+			// gate the next lane checks first.
 			if rs.superseded(entry) {
 				// The answer is to a credential since replaced: the
 				// lane checks again with the new one.
@@ -1176,19 +1177,22 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 
 // checkTarget runs the link's runtime target check when it is due and
 // reports whether sending may go on, the check's result and whether it
-// ran. A check that errors never stops sending, but neither does it
-// count as the check that was due: the next send asks again (beside an
-// open gate, once a short retry has passed). One that answers stops
-// sending on a loop or a replaced target. The schedule and the verdict are
-// the link's, shared by its cursors on this node, and one check is in
-// flight per link. lc.mu is never held across the request: a cursor
-// that finds the check not due, or merely due on its interval or as the
-// retry of an errored check (beside an open gate) while another
-// cursor's check is in flight, reads the published verdict at once. One
-// that needs a fresh verdict (a forced check, a new entry,
-// a reopened gate, a new recorded target) waits for the check in
-// flight, then runs its own if that one did not cover it; it waits no
-// longer than wait lives. The request itself runs under ctx.
+// ran. The result is the zero value when no check answered this caller;
+// one that waited for another cursor's check that then errored gets
+// that check's result, with ran false. A check that errors never stops
+// sending, but neither does it count as the check that was due: the
+// next send asks again (beside an open gate, once a short retry has
+// passed). One that answers stops sending on a loop or a replaced
+// target. The schedule and the verdict are the link's, shared by its
+// cursors on this node, and one check is in flight per link. lc.mu is
+// never held across the request: a cursor that finds the check not due,
+// or merely due on its interval or as the retry of an errored check
+// (beside an open gate) while another cursor's check is in flight,
+// reads the published verdict at once. One that needs a fresh verdict
+// (a forced check, a new entry, a reopened gate, a new recorded target)
+// waits for the check in flight, then runs its own if that one did not
+// cover it; it waits no longer than wait lives. The request itself runs
+// under ctx.
 func (s *remoteSender) checkTarget(ctx, wait context.Context, c *remoteCursor, e *remote.Entry, rs *remoteState, stub topic.Topic) (ok bool, res sink.TargetResult, ran bool) {
 	lc := c.check
 	var waited time.Time
@@ -1199,11 +1203,17 @@ func (s *remoteSender) checkTarget(ctx, wait context.Context, c *remoteCursor, e
 		force := lc.forceCheck.Load()
 		fresh := force || lc.checked != key
 		due := fresh || !now.Before(lc.nextCheck)
-		if due && !force && lc.erred == key && (now.Before(lc.retryAt) || (!waited.IsZero() && !lc.erredAt.Before(waited))) {
+		inherit := !waited.IsZero() && !lc.erredAt.Before(waited)
+		if due && !force && lc.erred == key && (now.Before(lc.retryAt) || inherit) {
 			// A check for the same key errored a moment ago beside an
 			// open gate, or while this caller waited for it: go on the
-			// last verdict rather than ask again at once.
+			// last verdict rather than ask again at once. A caller
+			// that waited for it gets its answer as its own, so a
+			// probe holds its chunk behind a refusal it waited on.
 			fresh, due = false, false
+			if inherit {
+				res = lc.erredRes
+			}
 		}
 		if !due {
 			lc.mu.Unlock()
@@ -1265,7 +1275,7 @@ func (s *remoteSender) checkTarget(ctx, wait context.Context, c *remoteCursor, e
 			// A check that started while the gate was closed is no
 			// retry even if the gate reopened meanwhile: the reopen
 			// check is still owed.
-			lc.erred, lc.erredAt, lc.retryAt = key, time.Now(), time.Time{}
+			lc.erred, lc.erredAt, lc.erredRes, lc.retryAt = key, time.Now(), res, time.Time{}
 			if !closedAtStart && !rs.gate.Closed() {
 				lc.retryAt = lc.erredAt.Add(min(interval, sink.GateMaxBackoff))
 			}

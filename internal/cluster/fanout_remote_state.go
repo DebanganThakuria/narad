@@ -120,9 +120,10 @@ type linkCheck struct {
 	// remote's entry changed (a new credential or URL), after its gate
 	// reopened, after the recorded target changed, and every check
 	// interval. A check that errors covers nothing: erred (the key of
-	// the last check that errored, ending at erredAt) and retryAt only
-	// spare the callers that waited for it, and beside an open gate the
-	// link's other sends until retryAt, a new check for the same key.
+	// the last check that errored, ending at erredAt with erredRes) and
+	// retryAt only spare the callers that waited for it (which get
+	// erredRes as their answer), and beside an open gate the link's
+	// other sends until retryAt, a new check for the same key.
 	// While the gate is closed, or was when the check started, they
 	// spare no later send and retryAt stays zero, so the first send
 	// after the gate reopens (a probe,
@@ -132,6 +133,7 @@ type linkCheck struct {
 	nextCheck time.Time
 	erred     checkKey
 	erredAt   time.Time
+	erredRes  sink.TargetResult
 	retryAt   time.Time
 	// inflight, while a check runs, is closed when it ends.
 	inflight chan struct{}
