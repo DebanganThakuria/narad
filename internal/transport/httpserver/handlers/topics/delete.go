@@ -72,6 +72,13 @@ func Delete(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 		if linked {
+			// A remote-linked delete needs security on, as a stub's does
+			// (authorizeStubDelete): a node with no identity never
+			// abandons a link's unshipped records.
+			if _, ok := handlers.Identity(r); !ok {
+				s.WriteError(w, http.StatusForbidden, "remotes require security")
+				return
+			}
 			if s.Deps.Remote.Writer == nil {
 				s.WriteError(w, http.StatusNotImplemented, "remote children are not available on this node")
 				return

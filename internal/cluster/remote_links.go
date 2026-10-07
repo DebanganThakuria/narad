@@ -178,7 +178,7 @@ var remoteNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
 // ServeWrite implements LinkLeader.
 func (l *RemoteLinks) ServeWrite(ctx context.Context, req nodewire.RemoteWriteRequest) nodewire.Response {
-	ctx, refusal := l.actorContext(ctx, req.Actor)
+	ctx, refusal := l.actorContext(ctx, req)
 	if refusal != nil {
 		return *refusal
 	}
@@ -195,14 +195,28 @@ func (l *RemoteLinks) ServeWrite(ctx context.Context, req nodewire.RemoteWriteRe
 	return errorResponse(http.StatusBadRequest, "unsupported remote write")
 }
 
+// remoteWriteEvents names each remote child write's audit event.
+var remoteWriteEvents = map[string]string{
+	nodewire.RemoteSubAttach: "remote_child.create", nodewire.RemoteSubPause: "remote_child.pause",
+	nodewire.RemoteSubResume: "remote_child.resume", nodewire.RemoteSubSkip: "remote_child.skip",
+	nodewire.RemoteSubDetach: "remote_child.delete", nodewire.RemoteSubTopicDelete: "topic.delete",
+}
+
 // actorContext is the context a remote child write runs under
-// (leaderActorContext). Without an actor (security off on the ingress)
-// the write runs with no identity.
-func (l *RemoteLinks) actorContext(ctx context.Context, actor string) (context.Context, *nodewire.Response) {
-	if actor == "" {
-		return ctx, nil
+// (leaderActorContext). A write that names no caller came from an
+// ingress with security off, which no remote write is legitimate from
+// (every ingress path needs a caller): it is refused (403, with a
+// refused audit line of class denied), so a security-off member never
+// deletes a parent with remote children, nor anything else here.
+func (l *RemoteLinks) actorContext(ctx context.Context, req nodewire.RemoteWriteRequest) (context.Context, *nodewire.Response) {
+	if req.Actor == "" {
+		if event, ok := remoteWriteEvents[req.SubOp]; ok {
+			l.audit(event, req, "", "refused", "denied")
+		}
+		res := errorResponse(http.StatusForbidden, "caller required: remotes need security on")
+		return nil, &res
 	}
-	return leaderActorContext(ctx, l.d.Store, l.d.Log, actor)
+	return leaderActorContext(ctx, l.d.Store, l.d.Log, req.Actor)
 }
 
 // leaderActorContext resolves the actor the ingress named as this node,
@@ -232,8 +246,7 @@ func leaderActorContext(ctx context.Context, store *metastore.Store, log *slog.L
 
 // requireAdmin refuses (403) a request identity that is not an admin:
 // attach, pause, resume and skip lend or steer the remote's credential.
-// No identity (security off) passes; the ingress refuses those writes
-// without security already.
+// No identity passes; actorContext refuses a write without one first.
 func requireAdmin(ctx context.Context) *nodewire.Response {
 	if id, ok := security.IdentityFrom(ctx); ok && !id.IsAdmin() {
 		res := errorResponse(http.StatusForbidden, "admin privileges required")
@@ -517,10 +530,7 @@ func (l *RemoteLinks) setState(ctx context.Context, req nodewire.RemoteWriteRequ
 	if err := decodeBody(req.Body, &b); err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid remote child request")
 	}
-	event := map[string]string{
-		nodewire.RemoteSubPause: "remote_child.pause", nodewire.RemoteSubResume: "remote_child.resume",
-		nodewire.RemoteSubSkip: "remote_child.skip",
-	}[req.SubOp]
+	event := remoteWriteEvents[req.SubOp]
 	target := b.Parent + "/" + b.Child
 	if res := requireAdmin(ctx); res != nil {
 		l.audit(event, req, target, "refused", "denied")

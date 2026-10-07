@@ -561,6 +561,35 @@ func TestRawDeletesOfRemoteLinkedTopicsAreRefused(t *testing.T) {
 	}
 }
 
+// A remote write that names no caller (an ingress with security off)
+// is refused before anything runs, a forced delete of a parent with
+// remote children included: remotes need security on.
+func TestRemoteLinksRefuseAWriteThatNamesNoCaller(t *testing.T) {
+	s := linksRig(t)
+	if res := s.write(t, nodewire.RemoteSubAttach, map[string]any{"parent": "orders", "child": "orders-to-b", "remote": "b"}); res.Status != http.StatusCreated {
+		t.Fatalf("attach: %d %s", res.Status, res.Body)
+	}
+	audit := s.auditLog()
+	raw, _ := json.Marshal(map[string]any{"topic": "orders", "force": true, "expect_remote": true})
+	res, err := s.plane.RemoteWrite(context.Background(), nodewire.RemoteWriteRequest{
+		SubOp: nodewire.RemoteSubTopicDelete, RequestID: "req-anon", Body: raw,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != http.StatusForbidden || !strings.Contains(string(res.Body), "security") {
+		t.Fatalf("delete with no caller: %d %s, want 403", res.Status, res.Body)
+	}
+	for _, name := range []string{"orders", "orders-to-b"} {
+		if _, err := s.store.GetTopic(context.Background(), name); err != nil {
+			t.Fatalf("%s gone after a refused delete: %v", name, err)
+		}
+	}
+	if lines := audit.lines(`"event":"topic.delete"`); len(lines) != 1 || !strings.Contains(lines[0], `"outcome":"refused"`) || !strings.Contains(lines[0], `"class":"denied"`) {
+		t.Fatalf("audit = %v, want one refused topic.delete line", lines)
+	}
+}
+
 // An attach a member's check throttle refused answers 429 with the
 // retry hint the ingress turns into Retry-After, blind or not.
 func TestThrottledAttachCheckCarriesARetryHint(t *testing.T) {

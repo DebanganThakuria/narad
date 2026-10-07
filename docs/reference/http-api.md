@@ -522,7 +522,7 @@ same refusal, with its body, is in
 | [`204`](status-codes.md#status-204) | Deleted. |
 | [`400`](status-codes.md#status-400) | Unreleased. `force` is not `true` or `false`. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
-| [`403`](status-codes.md#status-403) | Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic. For a remote child's stub (unreleased), the caller is neither an `admin` nor the parent's owner, or security is off. |
+| [`403`](status-codes.md#status-403) | Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic. For a remote child's stub (unreleased), the caller is neither an `admin` nor the parent's owner, or security is off. For a parent with remote children (unreleased), security is off (`remotes require security`). |
 | [`404`](status-codes.md#status-404) | The topic does not exist, also after the answering node caught up with the leader. |
 | [`409`](status-codes.md#status-409) | New in v3.1.0. The topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was deleted. Read the topic again before deleting it. Unreleased, for a parent with remote children or a stub without `force`, records of the parent are not yet on the remote (the body carries `lag_messages`, `lag_complete` and `dispatch_backlog`), or the leader found a remote child the answering node did not know of yet; retry. |
 | [`412`](status-codes.md#status-412) | Unreleased. The cluster leader runs a release without remote children; finish the upgrade. |

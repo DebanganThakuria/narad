@@ -329,6 +329,22 @@ func TestStubDeleteAuthorization(t *testing.T) {
 	}
 }
 
+// Deleting a parent with remote children needs security on, as deleting
+// its stubs does: a node with no identity refuses it and forwards
+// nothing, force or not.
+func TestParentWithRemoteChildrenDeleteNeedsSecurity(t *testing.T) {
+	w := &recordingWriter{res: nodewire.Response{Status: http.StatusNoContent}}
+	s := remoteSet(remoteBroker(), w)
+	for _, path := range []string{"/", "/?force=true"} {
+		if res := del(t, Delete(s), path, nil, "topic", "orders"); res.Code != http.StatusForbidden || !strings.Contains(res.Body.String(), "security") {
+			t.Fatalf("delete %s with no identity: %d %s, want 403", path, res.Code, res.Body)
+		}
+	}
+	if n := w.count(); n != 0 {
+		t.Fatalf("%d remote writes forwarded for a caller with no identity", n)
+	}
+}
+
 // A plain topic delete and a local detach take the topic path, as they
 // do without remote children: no remote write. A missing topic is 404.
 // A stub's delete goes to the leader as a remote write, and a leader
