@@ -1116,7 +1116,25 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 		// The check is a request like a chunk: it runs under sendCtx, so
 		// a sibling's re-read never cuts it off before the target
 		// answers and its answer is always recorded.
-		if ok, _, _ := s.checkTarget(sh.sendCtx, ctx, sh.cur, entry, rs, stub); !ok {
+		ok, res, ran := s.checkTarget(sh.sendCtx, ctx, sh.cur, entry, rs, stub)
+		if v, outcome := res.GateVerdict(); ran && probe && outcome == sink.CheckFailed {
+			// The check went out as the gate's probe and the remote
+			// failed it: that is the probe's answer, as for a quiet
+			// cursor. Sending the chunk behind it would cost a wrong
+			// password two failed logins per backoff, and a dead
+			// target two requests. The lane holds its records and
+			// waits for the next probe, which checks again first.
+			if rs.superseded(entry) {
+				// The answer is to a credential since replaced: the
+				// lane checks again with the new one.
+				rs.gate.Released()
+			} else {
+				rs.gateFailed(v, true)
+				sh.cur.setLane(lane.idx, v.State)
+			}
+			continue
+		}
+		if !ok {
 			release()
 			if ctx.Err() != nil {
 				return

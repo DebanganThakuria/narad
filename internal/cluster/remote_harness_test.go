@@ -90,6 +90,9 @@ type rigFaults struct {
 	// onReset, when set, is told of each request mode "reset" is about
 	// to hang up on, and whether it is a batch.
 	onReset atomic.Pointer[func(batch bool)]
+	// posted counts batch requests that reached the target at all,
+	// whatever the mode answered them.
+	posted atomic.Int64
 	// batches counts batch requests that reached the real router and
 	// were accepted.
 	accepted atomic.Int64
@@ -114,6 +117,9 @@ func (f *rigFaults) wrap(next http.Handler) http.Handler {
 		batch := strings.HasSuffix(r.URL.Path, "/produce/batch")
 		if strings.HasSuffix(r.URL.Path, "/children") {
 			f.listings.Add(1)
+		}
+		if batch {
+			f.posted.Add(1)
 		}
 		switch f.get() {
 		case "down":

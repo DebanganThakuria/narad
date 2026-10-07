@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -340,17 +341,15 @@ func TestRemoteChildErroredCheckLeavesTheReopenCheckDue(t *testing.T) {
 	rg.target.awaitDispatched(t, 10*time.Second)
 	landed := len(rg.target.records(t, "orders"))
 
-	// The target goes down. The first check after the gate closed
-	// errors, and so does the probe sent after it; while that probe is
-	// answered, another cluster takes over the name.
-	var sawCheck atomic.Bool
+	// The target goes down. The first check after the gate closed (the
+	// probe's) errors; a moment later (after the transport's retry of
+	// the GET has errored too), another cluster takes over the name.
+	var swapping sync.Once
 	swap := func(batch bool) {
 		if !batch {
-			sawCheck.Store(true)
-			return
-		}
-		if sawCheck.Load() {
-			rg.target.faults.set("otherID")
+			swapping.Do(func() {
+				time.AfterFunc(100*time.Millisecond, func() { rg.target.faults.set("otherID") })
+			})
 		}
 	}
 	rg.target.faults.onReset.Store(&swap)
@@ -363,6 +362,33 @@ func TestRemoteChildErroredCheckLeavesTheReopenCheckDue(t *testing.T) {
 	rg.target.awaitDispatched(t, 10*time.Second)
 	if n := len(rg.target.records(t, "orders")) - landed; n != 0 {
 		t.Fatalf("%d records landed in another cluster before any check of it", n)
+	}
+}
+
+// While the remote's gate is closed, a probe whose target check fails
+// is answered by that check: the lane sends no chunk behind it. A wrong
+// password then costs the target one failed login per node per backoff,
+// and a dead target one request per probe, not two.
+func TestRemoteChildProbeAnsweredByAFailedCheckSendsNoChunk(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{partitions: 1}})
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitDelivered(t, rg.src.produce(t, 0, 5, 1, 0), 15*time.Second)
+	rg.target.awaitDispatched(t, 10*time.Second)
+
+	rs := rg.src.runner.sender().remoteState("b")
+	rg.target.faults.set("down")
+	rg.src.produce(t, 0, 5, 1, 100)
+	rigWait(t, "the gate to close", 15*time.Second, rs.gate.Closed)
+	// Chunks already in flight when it closed are answered by now.
+	time.Sleep(200 * time.Millisecond)
+	posted, listings := rg.target.faults.posted.Load(), rg.target.faults.listings.Load()
+	time.Sleep(4 * time.Second)
+	if n := rg.target.faults.listings.Load() - listings; n == 0 {
+		t.Fatal("no probe reached the target in 4s")
+	}
+	if n := rg.target.faults.posted.Load() - posted; n != 0 {
+		t.Fatalf("%d chunks went out behind failed target checks while the gate was closed", n)
 	}
 }
 
