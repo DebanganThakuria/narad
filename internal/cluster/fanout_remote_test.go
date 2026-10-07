@@ -328,6 +328,44 @@ func TestRemoteChildTargetReplaced(t *testing.T) {
 	rg.waitDelivered(t, want, 15*time.Second)
 }
 
+// A target check that errors while the remote's gate is closed is not
+// the check the reopening gate owes: when the remote's name then answers
+// from another cluster, the next probe checks it first and nothing lands
+// there.
+func TestRemoteChildErroredCheckLeavesTheReopenCheckDue(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{stallRetry: 300 * time.Millisecond}})
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitDelivered(t, rg.src.produce(t, 0, 5, 1, 0), 15*time.Second)
+	rg.target.awaitDispatched(t, 10*time.Second)
+	landed := len(rg.target.records(t, "orders"))
+
+	// The target goes down. The first check after the gate closed
+	// errors, and so does the probe sent after it; while that probe is
+	// answered, another cluster takes over the name.
+	var sawCheck atomic.Bool
+	swap := func(batch bool) {
+		if !batch {
+			sawCheck.Store(true)
+			return
+		}
+		if sawCheck.Load() {
+			rg.target.faults.set("otherID")
+		}
+	}
+	rg.target.faults.onReset.Store(&swap)
+	rg.target.faults.set("reset")
+	rg.src.produce(t, 0, 5, 1, 100)
+	rigWait(t, "target_replaced or a record in the other cluster", 20*time.Second, func() bool {
+		snap, ok := rg.src.cursorState(0)
+		return (ok && snap.state == topic.RemoteStateTargetReplaced) || len(rg.target.records(t, "orders")) > landed
+	})
+	rg.target.awaitDispatched(t, 10*time.Second)
+	if n := len(rg.target.records(t, "orders")) - landed; n != 0 {
+		t.Fatalf("%d records landed in another cluster before any check of it", n)
+	}
+}
+
 // A target topic with a remote child of its own stops the link: no
 // loops, no chains.
 func TestRemoteChildTargetWithRemoteChildren(t *testing.T) {

@@ -115,16 +115,21 @@ type linkCheck struct {
 	forceCheck atomic.Bool
 
 	mu sync.Mutex
-	// checkedEntry (weak: it only tells whether the entry changed, and
-	// must not keep a dropped remote's header and clients reachable),
-	// checkedGateEpoch, checkedTargetID and nextCheck
-	// decide when the next check is due: at start, after the remote's
-	// entry changed (a new credential or URL), after its gate reopened,
-	// after the recorded target changed, and every check interval.
-	checkedEntry     weak.Pointer[remote.Entry]
-	checkedGateEpoch uint64
-	checkedTargetID  string
-	nextCheck        time.Time
+	// checked (what the last check that reached the target was for) and
+	// nextCheck decide when the next check is due: at start, after the
+	// remote's entry changed (a new credential or URL), after its gate
+	// reopened, after the recorded target changed, and every check
+	// interval. A check that errors covers nothing: erred (the key of
+	// the last check that errored, ending at erredAt) and retryAt only
+	// spare the callers that waited for it, and beside an open gate the
+	// link's other sends until retryAt, a new check for the same key.
+	// While the gate is closed they spare no later send, so the probe
+	// that reopens it is always checked first.
+	checked   checkKey
+	nextCheck time.Time
+	erred     checkKey
+	erredAt   time.Time
+	retryAt   time.Time
 	// inflight, while a check runs, is closed when it ends.
 	inflight chan struct{}
 
@@ -136,6 +141,16 @@ type linkCheck struct {
 	targetState string
 	verifiedMs  int64
 	failedClass string
+}
+
+// checkKey is what a target check was for: the remote's entry (weak:
+// it only tells whether the entry changed, and must not keep a dropped
+// remote's header and clients reachable), its gate's epoch and the
+// link's recorded target ID.
+type checkKey struct {
+	entry     weak.Pointer[remote.Entry]
+	gateEpoch uint64
+	targetID  string
 }
 
 // verdict is the last successful check's state and time.

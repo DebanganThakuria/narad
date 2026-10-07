@@ -83,8 +83,13 @@ type rigFaults struct {
 	// mode: "" (pass), "down" (503 HTML), "edge403" (HTML 403),
 	// "reset" (hang up without answering), "slow" (sleep then pass),
 	// "nobatch" (the batch route answers Go's 404), "v310" (the
-	// children listing as v3.1.0 answers it: no parent_id, no remote).
+	// children listing as v3.1.0 answers it: no parent_id, no remote),
+	// "otherID" (the listing names another topic ID, as a different
+	// cluster behind the same name would; chunks still land).
 	mode atomic.Value
+	// onReset, when set, is told of each request mode "reset" is about
+	// to hang up on, and whether it is a batch.
+	onReset atomic.Pointer[func(batch bool)]
 	// batches counts batch requests that reached the real router and
 	// were accepted.
 	accepted atomic.Int64
@@ -122,6 +127,9 @@ func (f *rigFaults) wrap(next http.Handler) http.Handler {
 			_, _ = io.WriteString(w, "<h1>Forbidden by policy</h1>")
 			return
 		case "reset":
+			if fn := f.onReset.Load(); fn != nil {
+				(*fn)(batch)
+			}
 			if hj, ok := w.(http.Hijacker); ok {
 				if c, _, err := hj.Hijack(); err == nil {
 					_ = c.Close()
@@ -153,7 +161,12 @@ func (f *rigFaults) wrap(next http.Handler) http.Handler {
 			time.Sleep(f.slowDelay)
 		case "v310":
 			if strings.HasSuffix(r.URL.Path, "/children") && r.Method == http.MethodGet {
-				serveAsV310Listing(w, r, next)
+				serveListingEdited(w, r, next, asV310Listing)
+				return
+			}
+		case "otherID":
+			if strings.HasSuffix(r.URL.Path, "/children") && r.Method == http.MethodGet {
+				serveListingEdited(w, r, next, func(listing map[string]any) { listing["parent_id"] = "another-clusters-id" })
 				return
 			}
 		}
@@ -176,22 +189,28 @@ func (f *rigFaults) wrap(next http.Handler) http.Handler {
 	})
 }
 
-// serveAsV310Listing answers a children listing without the fields
-// v3.1.0 does not serve: the top-level parent_id and each child's remote.
-func serveAsV310Listing(w http.ResponseWriter, r *http.Request, next http.Handler) {
+// asV310Listing strips a children listing of the fields v3.1.0 does not
+// serve: the top-level parent_id and each child's remote.
+func asV310Listing(listing map[string]any) {
+	delete(listing, "parent_id")
+	if children, ok := listing["children"].([]any); ok {
+		for _, c := range children {
+			if m, ok := c.(map[string]any); ok {
+				delete(m, "remote")
+			}
+		}
+	}
+}
+
+// serveListingEdited answers a children listing as the target does,
+// edited by edit when it is a 200.
+func serveListingEdited(w http.ResponseWriter, r *http.Request, next http.Handler, edit func(map[string]any)) {
 	rec := httptest.NewRecorder()
 	next.ServeHTTP(rec, r)
 	body := rec.Body.Bytes()
 	var listing map[string]any
 	if rec.Code == http.StatusOK && json.Unmarshal(body, &listing) == nil {
-		delete(listing, "parent_id")
-		if children, ok := listing["children"].([]any); ok {
-			for _, c := range children {
-				if m, ok := c.(map[string]any); ok {
-					delete(m, "remote")
-				}
-			}
-		}
+		edit(listing)
 		body, _ = json.Marshal(listing)
 	}
 	for k, v := range rec.Header() {

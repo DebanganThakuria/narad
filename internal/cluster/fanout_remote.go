@@ -1151,8 +1151,10 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 
 // checkTarget runs the link's runtime target check when it is due and
 // reports whether sending may go on, the check's result and whether it
-// ran. A check that errors never stops sending; one that answers stops
-// it on a loop or a replaced target. The schedule and the verdict are
+// ran. A check that errors never stops sending, but neither does it
+// count as the check that was due: the next send asks again (beside an
+// open gate, once a short retry has passed). One that answers stops
+// sending on a loop or a replaced target. The schedule and the verdict are
 // the link's, shared by its cursors on this node, and one check is in
 // flight per link. lc.mu is never held across the request: a cursor
 // that finds the check not due, or merely due on its interval while
@@ -1163,13 +1165,21 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 // longer than wait lives. The request itself runs under ctx.
 func (s *remoteSender) checkTarget(ctx, wait context.Context, c *remoteCursor, e *remote.Entry, rs *remoteState, stub topic.Topic) (ok bool, res sink.TargetResult, ran bool) {
 	lc := c.check
+	var waited time.Time
 	for {
 		lc.mu.Lock()
 		now := time.Now()
-		epoch := rs.gate.Epoch()
-		fresh := lc.forceCheck.Load() || lc.checkedEntry != weak.Make(e) || lc.checkedGateEpoch != epoch ||
-			lc.checkedTargetID != stub.Remote.TargetID
-		if !fresh && now.Before(lc.nextCheck) {
+		key := checkKey{entry: weak.Make(e), gateEpoch: rs.gate.Epoch(), targetID: stub.Remote.TargetID}
+		force := lc.forceCheck.Load()
+		fresh := force || lc.checked != key
+		due := fresh || !now.Before(lc.nextCheck)
+		if due && !force && lc.erred == key && (now.Before(lc.retryAt) || (!waited.IsZero() && !lc.erredAt.Before(waited))) {
+			// A check for the same key errored a moment ago beside an
+			// open gate, or while this caller waited for it: go on the
+			// last verdict rather than ask again at once.
+			fresh, due = false, false
+		}
+		if !due {
 			lc.mu.Unlock()
 			return c.targetVerdict() == "", res, false
 		}
@@ -1177,6 +1187,9 @@ func (s *remoteSender) checkTarget(ctx, wait context.Context, c *remoteCursor, e
 			lc.mu.Unlock()
 			if !fresh {
 				return c.targetVerdict() == "", res, false
+			}
+			if waited.IsZero() {
+				waited = now
 			}
 			select {
 			case <-done:
@@ -1203,17 +1216,29 @@ func (s *remoteSender) checkTarget(ctx, wait context.Context, c *remoteCursor, e
 			lc.mu.Unlock()
 			return false, res, false
 		}
-		lc.checkedEntry, lc.checkedGateEpoch, lc.checkedTargetID = weak.Make(e), epoch, stub.Remote.TargetID
-		lc.nextCheck = now.Add(sink.CheckInterval(e.Limits().CheckIntervalMs))
+		interval := sink.CheckInterval(e.Limits().CheckIntervalMs)
+		if _, outcome := res.GateVerdict(); outcome == sink.CheckReached {
+			lc.checked, lc.nextCheck = key, now.Add(interval)
+		} else {
+			// The target was not reached, so the check covers nothing:
+			// the next send after a pause asks again. While the gate is
+			// closed that is the next probe (paced by the gate), so the
+			// probe that reopens it is checked first; beside an open
+			// gate the link's other sends wait a while before asking.
+			lc.erred, lc.erredAt, lc.retryAt = key, time.Now(), time.Time{}
+			if !rs.gate.Closed() {
+				lc.retryAt = lc.erredAt.Add(min(interval, sink.GateMaxBackoff))
+			}
+		}
 		lc.record(res, now)
 		lc.mu.Unlock()
 		break
 	}
-	key := c.key
+	ck := c.key
 	if res.Verified {
 		c.setIdleCheck("")
 	} else if rl := s.r.remoteMetrics(); rl != nil {
-		rl.CheckFailuresTotal.WithLabelValues(key.parent, key.child).Inc()
+		rl.CheckFailuresTotal.WithLabelValues(ck.parent, ck.child).Inc()
 		rl.ErrorsTotal.WithLabelValues(rs.name, res.Class).Inc()
 	}
 	return c.targetVerdict() == "", res, true
