@@ -106,7 +106,7 @@ func agedOpenLog(t *testing.T, g *Logs) *storage.Log {
 	if err := g.CloseTopic(followTopic); err != nil {
 		t.Fatalf("CloseTopic: %v", err)
 	}
-	dir := storage.TopicPartitionDir(g.DataDir(), followTopic, 0)
+	dir := topicPartitionDirT(t, g.DataDir(), followTopic, 0)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)

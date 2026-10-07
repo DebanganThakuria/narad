@@ -77,7 +77,7 @@ func TestEvictedLogReopensWithDurableState(t *testing.T) {
 
 	// The durable HWM file must be exact for a cleanly closed log —
 	// this is what the fan-out closed-path check relies on.
-	dir := storage.TopicPartitionDir(g.DataDir(), "orders", 0)
+	dir := topicPartitionDirT(t, g.DataDir(), "orders", 0)
 	hwm, found, err := storage.ReadPersistedHighWatermark(dir)
 	if err != nil || !found || hwm != 1 {
 		t.Fatalf("ReadPersistedHighWatermark = (%d, %v, %v), want (1, true, nil)", hwm, found, err)

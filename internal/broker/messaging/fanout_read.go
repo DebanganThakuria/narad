@@ -140,7 +140,10 @@ func (e *Engine) FanoutCursorStats(ctx context.Context, parent string) ([]topic.
 		if !e.isLocalOwner(parent, p) {
 			continue
 		}
-		dir := storage.TopicPartitionDir(e.logs.DataDir(), parent, p)
+		dir, err := storage.TopicPartitionDir(e.logs.DataDir(), parent, p)
+		if err != nil {
+			return nil, err
+		}
 		var hwm int64
 		if log, open := e.logs.Peek(parent, p); open {
 			hwm = log.HighWatermark()
@@ -210,7 +213,10 @@ func (e *Engine) ConsumerAckFrontier(ctx context.Context, topicName string, part
 	if !e.isLocalOwner(topicName, partition) {
 		return 0, ErrNotPartitionOwner
 	}
-	dir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
+	dir, err := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
+	if err != nil {
+		return 0, err
+	}
 	var hwm, oldest int64
 	if log, open := e.logs.Peek(topicName, partition); open {
 		hwm, oldest = log.HighWatermark(), log.OldestOffset()
@@ -347,7 +353,12 @@ func (e *Engine) fanoutSlabWhileClosed(ctx context.Context, topicName string, pa
 	if opts.FromOffset == topic.FanoutTailOffset {
 		return topic.FanoutSlab{}, false, nil
 	}
-	partitionDir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
+	partitionDir, err := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
+	if err != nil {
+		// Served, with the refusal: opening the log would refuse the
+		// name too, less clearly.
+		return topic.FanoutSlab{}, true, err
+	}
 	hwm, known, err := closedHighWatermark(partitionDir)
 	if err != nil || !known {
 		return topic.FanoutSlab{}, false, nil

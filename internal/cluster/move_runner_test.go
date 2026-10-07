@@ -355,7 +355,7 @@ func TestMoveRunnerCompletesMove(t *testing.T) {
 	}
 	// The partition is installed at its real location and recovers to the
 	// source's HWM with byte-identical records.
-	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	dir := topicPartitionDirT(t, dataDir, "orders", 0)
 	log, err := storage.NewLog(dir, storage.Options{})
 	if err != nil {
 		t.Fatalf("recover installed partition: %v", err)
@@ -401,7 +401,7 @@ func TestMoveRunnerRollsBackOnConfirmedFlipReject(t *testing.T) {
 	if ctx.Err() != nil {
 		t.Fatal("the worker kept running after the leader confirmed the flip was rejected")
 	}
-	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	dir := topicPartitionDirT(t, dataDir, "orders", 0)
 	if segs, _ := storage.ListPartitionSegments(dir); len(segs) != 0 {
 		t.Fatalf("install not rolled back: %d segments remain at %s", len(segs), dir)
 	}
@@ -446,7 +446,7 @@ func TestMoveRunnerForcePromotesDeadSource(t *testing.T) {
 		t.Fatalf("moves_total{force_promoted} = %v, want 1", got)
 	}
 	// The promoted copy recovers to the source's last-known HWM, records intact.
-	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	dir := topicPartitionDirT(t, dataDir, "orders", 0)
 	log, err := storage.NewLog(dir, storage.Options{})
 	if err != nil {
 		t.Fatalf("recover promoted partition: %v", err)
@@ -492,7 +492,7 @@ func TestMoveRunnerForcePromoteRefusesBehindCopy(t *testing.T) {
 	if len(store.completeArgs) != 0 {
 		t.Fatalf("force-promote flipped without ever reaching the source: %v", store.completeArgs)
 	}
-	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	dir := topicPartitionDirT(t, dataDir, "orders", 0)
 	if segs, _ := storage.ListPartitionSegments(dir); len(segs) != 0 {
 		t.Fatalf("a partition was installed despite a refused force-promote: %d segments", len(segs))
 	}
@@ -689,7 +689,7 @@ func TestMoveRunnerWritesMoveMarker(t *testing.T) {
 	r.Reconcile(context.Background())
 	r.wg.Wait()
 
-	marker, ok, err := messaging.ReadMoveMarker(storage.TopicPartitionDir(dataDir, "orders", 0))
+	marker, ok, err := messaging.ReadMoveMarker(topicPartitionDirT(t, dataDir, "orders", 0))
 	if err != nil || !ok {
 		t.Fatalf("installed partition has no move marker (ok %v, err %v)", ok, err)
 	}
@@ -744,7 +744,7 @@ func TestMoveRunnerMakesTheCopyDurableBeforeTheFlip(t *testing.T) {
 	}
 
 	staging := filepath.Clean(r.stagingDir("orders", 0))
-	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	dir := topicPartitionDirT(t, dataDir, "orders", 0)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -1063,7 +1063,7 @@ func TestMoveCompletesForAPartitionWithToleratedSealedDamage(t *testing.T) {
 	if !flipped {
 		t.Fatal("the worker ended without flipping the move")
 	}
-	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	dir := topicPartitionDirT(t, dataDir, "orders", 0)
 	for _, seg := range segs {
 		name := fmt.Sprintf("%020d.log", seg.BaseOffset)
 		want, err := os.ReadFile(filepath.Join(src, name))

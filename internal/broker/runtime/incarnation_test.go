@@ -209,7 +209,7 @@ func TestUnmarkedTopicDirIsAdoptedOnOpen(t *testing.T) {
 	ms := newRuntimeFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", ID: "cccccccccccccccc", Partitions: 1}
 	dataDir := t.TempDir()
-	pre, err := storage.NewLog(storage.TopicPartitionDir(dataDir, "orders", 0), storage.Options{FlushInterval: time.Millisecond})
+	pre, err := storage.NewLog(topicPartitionDirT(t, dataDir, "orders", 0), storage.Options{FlushInterval: time.Millisecond})
 	if err != nil {
 		t.Fatalf("NewLog: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestPurgeLegacyAndUnmarked(t *testing.T) {
 	}
 
 	// Unmarked directory, purge names an incarnation.
-	if err := os.MkdirAll(storage.TopicPartitionDir(dataDir, "legacy", 0), 0o755); err != nil {
+	if err := os.MkdirAll(topicPartitionDirT(t, dataDir, "legacy", 0), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 	purged, err = logs.PurgeTopic("legacy", "0000000000000008")
@@ -361,7 +361,7 @@ func TestPurgeAndGetDoNotInterleave(t *testing.T) {
 	dataDir := t.TempDir()
 	logs := NewLogs(dataDir, storage.Options{FlushInterval: time.Millisecond}, ms, nil)
 	defer logs.CloseAll()
-	partitionDir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	partitionDir := topicPartitionDirT(t, dataDir, "orders", 0)
 
 	for i := range 200 {
 		if _, err := logs.Get("orders", 0); err != nil {
@@ -527,11 +527,19 @@ func wireConsumerState(dataDir string, store *metastore.Store, committer *Consum
 		return consumer.Caps{MaxInFlight: 1 << 10, MaxAckedAhead: 1 << 10}, nil
 	}, onCommit)
 	offsets.SetCommittedRecovery(func(name string, p int) (int64, bool) {
-		committed, ok, err := storage.ReadConsumerOffset(storage.TopicPartitionDir(dataDir, name, p))
+		dir, err := storage.TopicPartitionDir(dataDir, name, p)
+		if err != nil {
+			return 0, false
+		}
+		committed, ok, err := storage.ReadConsumerOffset(dir)
 		return committed, ok && err == nil
 	})
 	offsets.SetAheadRecovery(func(name string, p int) (int64, []int64, bool) {
-		rec, ok, err := storage.ReadConsumerAhead(storage.TopicPartitionDir(dataDir, name, p))
+		dir, err := storage.TopicPartitionDir(dataDir, name, p)
+		if err != nil {
+			return 0, nil, false
+		}
+		rec, ok, err := storage.ReadConsumerAhead(dir)
 		return rec.Committed, rec.Offsets, ok && err == nil
 	})
 	committer.SetAheadSource(offsets.AheadSnapshot)
@@ -581,7 +589,7 @@ func seedAckedIncarnation(t *testing.T, store *metastore.Store, dataDir string) 
 		t.Fatal(err)
 	}
 	_ = logs.CloseAll()
-	if got := persistedFrontier(storage.TopicPartitionDir(dataDir, "orders", 0)); got != 19 {
+	if got := persistedFrontier(topicPartitionDirT(t, dataDir, "orders", 0)); got != 19 {
 		t.Fatalf("setup: persisted frontier %d, want 19", got)
 	}
 }
@@ -705,7 +713,7 @@ func TestPurgeLeavesNoLeftoverASuccessorCouldAdopt(t *testing.T) {
 			ctx := context.Background()
 			store := newIncarnationStore(t)
 			dataDir := t.TempDir()
-			partDir := storage.TopicPartitionDir(dataDir, "orders", 0)
+			partDir := topicPartitionDirT(t, dataDir, "orders", 0)
 			seedAckedIncarnation(t, store, dataDir)
 
 			logs := NewLogs(dataDir, storage.Options{FlushInterval: time.Millisecond}, store, nil)

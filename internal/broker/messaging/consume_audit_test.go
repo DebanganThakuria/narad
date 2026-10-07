@@ -90,7 +90,7 @@ func TestQueueConsumeSkipsFrontierToOldestRetainedOffset(t *testing.T) {
 	if err := logs1.CloseAll(); err != nil {
 		t.Fatalf("CloseAll: %v", err)
 	}
-	partitionDir := storage.TopicPartitionDir(dataDir, topicName, 0)
+	partitionDir := topicPartitionDirT(t, dataDir, topicName, 0)
 	segs, err := storage.ListPartitionSegments(partitionDir)
 	if err != nil {
 		t.Fatalf("ListPartitionSegments: %v", err)

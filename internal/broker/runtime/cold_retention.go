@@ -418,7 +418,11 @@ func (g *Logs) openForWalk(topicName string, idx int) (*storage.Log, *logEntry, 
 	if g.isOpen(keyOf(topicName, idx)) {
 		return nil, nil, errColdWalkRaced
 	}
-	if _, err := os.Stat(storage.TopicPartitionDir(g.dataDir, topicName, idx)); err != nil {
+	dir, err := storage.TopicPartitionDir(g.dataDir, topicName, idx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := os.Stat(dir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil, errColdWalkRaced
 		}

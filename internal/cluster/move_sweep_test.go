@@ -61,7 +61,7 @@ func sweepTestRunner(t *testing.T, store *fakeMoveStore, rec *fakeReclaimer) (*M
 
 func mkLocalPartitionDir(t *testing.T, dataDir string) string {
 	t.Helper()
-	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	dir := topicPartitionDirT(t, dataDir, "orders", 0)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestMoveSweepPassesPromotedHWMToReclaim(t *testing.T) {
 	ownerDir := t.TempDir()
 	ownerHWM, _ := buildSourcePartition(t, ownerDir, 5)
 	localData := t.TempDir()
-	buildSourcePartition(t, storage.TopicPartitionDir(localData, "orders", 0), 5)
+	buildSourcePartition(t, topicPartitionDirT(t, localData, "orders", 0), 5)
 	rec = &fakeReclaimer{}
 	r = NewMoveRunner(store, "narad-dst", localData, movePeerFake{dirFetcher: dirFetcher{dir: ownerDir, hwm: ownerHWM}}, rec, nil, nil, MoveConfig{})
 	r.sweepStaleCopies(context.Background())
@@ -323,7 +323,7 @@ func orphanTestRunner(t *testing.T, store *fakeMoveStore, peer movePeerFake) (*M
 // stamped with incarnation id unless it is empty.
 func mkTopicDirWithData(t *testing.T, dataDir, name, id string) string {
 	t.Helper()
-	part := storage.TopicPartitionDir(dataDir, name, 0)
+	part := topicPartitionDirT(t, dataDir, name, 0)
 	if err := os.MkdirAll(part, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -502,8 +502,8 @@ narad_orphan_topic_dirs 1
 func TestStaleCopySweepRefreshesTheQuarantineInventory(t *testing.T) {
 	r, dataDir, rec := orphanTestRunner(t, &fakeMoveStore{}, movePeerFake{})
 	mkTopicDirWithData(t, dataDir, "live", "9999999999999999")
-	set := storage.TopicPartitionDir(dataDir, "live", 0) + messaging.QuarantineSuffix
-	if err := os.Rename(storage.TopicPartitionDir(dataDir, "live", 0), set); err != nil {
+	set := topicPartitionDirT(t, dataDir, "live", 0) + messaging.QuarantineSuffix
+	if err := os.Rename(topicPartitionDirT(t, dataDir, "live", 0), set); err != nil {
 		t.Fatal(err)
 	}
 	r.sweepStaleCopies(context.Background())

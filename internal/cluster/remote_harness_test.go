@@ -696,7 +696,7 @@ func (s *rigSource) cursorState(p int) (remoteCursorSnapshot, bool) {
 // cursorOffset reads the persisted cursor of the stub on partition p.
 func (s *rigSource) cursorOffset(tb testing.TB, p int) int64 {
 	tb.Helper()
-	cur, ok, err := storage.ReadFanoutCursor(storage.TopicPartitionDir(s.dataDir, "orders", p), "orders-to-b")
+	cur, ok, err := storage.ReadFanoutCursor(topicPartitionDirT(tb, s.dataDir, "orders", p), "orders-to-b")
 	if err != nil || !ok {
 		return -1
 	}

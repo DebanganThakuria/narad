@@ -52,3 +52,35 @@ func TestQuarantineTopicDirMovesNothingForAnUnsafeName(t *testing.T) {
 		t.Fatalf("the directory outside the topics directory was moved: %v", err)
 	}
 }
+
+// A partition directory is built from the same topic name, so it gets
+// the same check: a name that is not one path element forms no path at
+// all, and every name topic creation accepts maps to the directory it
+// always did.
+func TestTopicPartitionDirRefusesANameThatIsNotOnePathElement(t *testing.T) {
+	dataDir := t.TempDir()
+	for _, name := range []string{"", ".", "..", "../x", "a/b", `a\b`, "/etc", "orders/../../x"} {
+		if dir, err := TopicPartitionDir(dataDir, name, 0); !errors.Is(err, ErrUnsafeTopicName) {
+			t.Errorf("TopicPartitionDir(%q) = %q, %v; want ErrUnsafeTopicName", name, dir, err)
+		}
+	}
+
+	for _, name := range []string{"orders", "a..b", "x.stale-y", "v1.2_payments-captured", "..a", "a.."} {
+		want := filepath.Join(dataDir, "topics", name, "p00007")
+		dir, err := TopicPartitionDir(dataDir, name, 7)
+		if err != nil || dir != want {
+			t.Errorf("TopicPartitionDir(%q, 7) = %q, %v; want %q", name, dir, err, want)
+		}
+	}
+}
+
+// topicPartitionDirT is TopicPartitionDir for a topic name the test
+// knows is valid.
+func topicPartitionDirT(tb testing.TB, dataDir, topicName string, partition int) string {
+	tb.Helper()
+	dir, err := TopicPartitionDir(dataDir, topicName, partition)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return dir
+}

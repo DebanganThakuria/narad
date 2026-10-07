@@ -178,6 +178,7 @@ type engineNode struct {
 	engine  *messaging.Engine
 	store   *metastore.Store
 	dataDir string
+	partDir string // orders/0's directory
 }
 
 // newEngineNode starts a node selfID whose replica has orders/0 owned by
@@ -222,10 +223,10 @@ func newEngineNodeWithSegments(t *testing.T, selfID, owner, target string, segme
 	}, nil)
 	engine := messaging.NewEngine(store, schema.NewAlwaysValid(), fixedPartitionManager{picked: 0},
 		offsets, logs, nil, nil, discardLogger(), selfID)
-	return &engineNode{engine: engine, store: store, dataDir: dataDir}
+	return &engineNode{engine: engine, store: store, dataDir: dataDir, partDir: topicPartitionDirT(t, dataDir, "orders", 0)}
 }
 
-func (n *engineNode) dir() string { return storage.TopicPartitionDir(n.dataDir, "orders", 0) }
+func (n *engineNode) dir() string { return n.partDir }
 
 // flip records, in this node's replica, the move of orders/0 to target.
 func (n *engineNode) flip(t *testing.T, owner, target string) {

@@ -75,7 +75,7 @@ func TestWriteConsumerOffsetReplacesExistingValue(t *testing.T) {
 }
 
 func TestWriteConsumerOffsetCreatesPartitionDir(t *testing.T) {
-	partitionDir := TopicPartitionDir(t.TempDir(), "orders", 0)
+	partitionDir := topicPartitionDirT(t, t.TempDir(), "orders", 0)
 	if err := WriteConsumerOffset(partitionDir, 3); err != nil {
 		t.Fatalf("WriteConsumerOffset() error = %v", err)
 	}
@@ -88,7 +88,7 @@ func TestWriteConsumerOffsetCreatesPartitionDir(t *testing.T) {
 }
 
 func TestWriteOffsetFileInPlaceDoesNotCreateDir(t *testing.T) {
-	partitionDir := TopicPartitionDir(t.TempDir(), "orders", 0)
+	partitionDir := topicPartitionDirT(t, t.TempDir(), "orders", 0)
 	err := writeOffsetFileInPlace(partitionDir, consumerOffsetFileName, 11)
 	if !errors.Is(err, ErrPartitionDirMissing) {
 		t.Fatalf("writeOffsetFileInPlace() error = %v, want %v", err, ErrPartitionDirMissing)

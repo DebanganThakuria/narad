@@ -55,7 +55,7 @@ func TestProduceUncommittedVisibilityStaysHiddenAcrossRestart(t *testing.T) {
 	if _, err := log.Append(storage.EncodeKeyedRecord("", 1, []byte(`{"id":1}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
-	hwmPath := partitionHWMPath(dataDir, "orders", 0)
+	hwmPath := partitionHWMPath(t, dataDir, "orders", 0)
 	if err := os.WriteFile(hwmPath, []byte{0, 0, 0, 0, 0, 0, 0, 0}, 0o644); err != nil {
 		t.Fatalf("WriteFile(hwm): %v", err)
 	}
@@ -132,7 +132,7 @@ func TestCorruptCommittedConsumeOffsetFallsBackToBeginning(t *testing.T) {
 	if err := engine.Ack(context.Background(), "orders", decodeHandleForTest(t, first.ReceiptHandle)); err != nil {
 		t.Fatalf("Ack() error = %v", err)
 	}
-	partitionDir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	partitionDir := topicPartitionDirT(t, dataDir, "orders", 0)
 	if err := os.WriteFile(filepath.Join(partitionDir, "consumer.offset"), []byte{1, 2, 3}, 0o644); err != nil {
 		t.Fatalf("WriteFile(consumer.offset) error = %v", err)
 	}

@@ -294,7 +294,12 @@ func (s *Snapshotter) topicPartitionSnapshot(topicName string, marker *topicMark
 		return liveSnapshot(log, idx, next, inFlight, ackedAhead), true
 	}
 
-	e := s.coldEntry(topicName, idx)
+	e, err := s.coldEntry(topicName, idx)
+	if err != nil {
+		// A name that forms no partition directory has no files to
+		// report (and no log either: opening one refuses the name).
+		return metrics.PartitionSnapshot{}, false
+	}
 	if open {
 		// The files change while the log is open: read them afresh once
 		// it closes.
@@ -324,21 +329,25 @@ func (s *Snapshotter) topicPartitionSnapshot(topicName string, marker *topicMark
 
 // coldEntry returns the partition's cached reading, creating an empty
 // one, and marks it visited by this poll. Caller holds coldMu.
-func (s *Snapshotter) coldEntry(topicName string, idx int) *coldPartition {
+func (s *Snapshotter) coldEntry(topicName string, idx int) (*coldPartition, error) {
 	key := coldKey{topic: topicName, partition: idx}
 	e := s.cold[key]
 	if e == nil {
+		dir, err := storage.TopicPartitionDir(s.logs.DataDir(), topicName, idx)
+		if err != nil {
+			return nil, err
+		}
 		if s.cold == nil {
 			s.cold = make(map[coldKey]*coldPartition)
 		}
 		e = &coldPartition{
-			dir:   storage.TopicPartitionDir(s.logs.DataDir(), topicName, idx),
+			dir:   dir,
 			phase: coldPhase(topicName, idx),
 		}
 		s.cold[key] = e
 	}
 	e.seen = s.polls
-	return e
+	return e, nil
 }
 
 // persistedNext returns the next offset to deliver according to the

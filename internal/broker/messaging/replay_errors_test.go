@@ -65,7 +65,7 @@ func TestReplayReapedOffsetIsGoneNotServerError(t *testing.T) {
 
 	// Simulate the retention reaper: remove the two oldest sealed
 	// segment files, exactly as deleteSegmentLocked does on disk.
-	partitionDir := storage.TopicPartitionDir(dataDir, topicName, 0)
+	partitionDir := topicPartitionDirT(t, dataDir, topicName, 0)
 	segs, err := filepath.Glob(filepath.Join(partitionDir, "*.log"))
 	if err != nil || len(segs) < 3 {
 		t.Fatalf("segment files = %v (err %v), want >= 3 so two can be reaped", segs, err)

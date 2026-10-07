@@ -152,7 +152,10 @@ func (e *Engine) ReclaimMovedPartitionGuarded(ctx context.Context, topicName str
 // copy ahead of guard.PromotedHWM, remove it otherwise. Caller holds the
 // topic's guard with the log closed.
 func (e *Engine) reclaimPartitionDirGuarded(topicName string, partition int, owner string, guard ReclaimGuard) error {
-	dir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
+	dir, err := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
+	if err != nil {
+		return fmt.Errorf("reclaim refused: %w", err)
+	}
 	if guard.SetAside != "" {
 		// Not recovered first: a copy the owner cannot vouch for is set
 		// aside whatever it holds, a damaged one included.

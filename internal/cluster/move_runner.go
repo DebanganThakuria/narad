@@ -883,7 +883,10 @@ func (r *MoveRunner) leaderAddr() (string, error) {
 // records and consumer state. A marker gone altogether is a purge: the
 // copy would land in an unmarked directory the successor adopts.
 func (r *MoveRunner) install(topicName string, partition int, staging, expectID string, retention time.Duration) (os.FileInfo, error) {
-	dir := r.partitionDir(topicName, partition)
+	dir, err := r.partitionDir(topicName, partition)
+	if err != nil {
+		return nil, err
+	}
 	var installed os.FileInfo
 	swap := func() error {
 		if err := r.checkTopicIncarnation(topicName, expectID); err != nil {
@@ -989,7 +992,10 @@ func (r *MoveRunner) setAsideLiveCopy(topicName string, partition int, dir strin
 // one is gone. restored reports that staging holds the copy again, byte
 // for byte what the session staged, so the session can resume from it.
 func (r *MoveRunner) rollbackInstall(topicName string, partition int, expectID string, installed os.FileInfo, marker messaging.MoveMarker, staging string) (restored bool, err error) {
-	dir := r.partitionDir(topicName, partition)
+	dir, err := r.partitionDir(topicName, partition)
+	if err != nil {
+		return false, err
+	}
 	err = r.replacePartitionDir(topicName, partition, func() error {
 		if err := r.checkTopicIncarnation(topicName, expectID); err != nil {
 			r.logger.Info("move: installed copy no longer under the partition's path; left for the sweep",
@@ -1071,7 +1077,7 @@ type partitionInstaller interface {
 	InstallPartitionDir(topicName string, partition int, swap func() error) error
 }
 
-func (r *MoveRunner) partitionDir(topicName string, partition int) string {
+func (r *MoveRunner) partitionDir(topicName string, partition int) (string, error) {
 	return storage.TopicPartitionDir(r.dataDir, topicName, partition)
 }
 

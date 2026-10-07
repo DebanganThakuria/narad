@@ -79,7 +79,11 @@ func (r *MoveRunner) sweepStaleCopies(ctx context.Context) {
 			if a.OwnerID == "" || a.OwnerID == r.selfID || a.TargetID == r.selfID {
 				continue // unassigned, ours, or becoming ours — never touch
 			}
-			dir := storage.TopicPartitionDir(r.dataDir, t.Name, a.Partition)
+			dir, err := storage.TopicPartitionDir(r.dataDir, t.Name, a.Partition)
+			if err != nil {
+				r.logger.Warn("move: stale-copy sweep skips a partition whose path cannot be formed", "topic", t.Name, "partition", a.Partition, "err", err)
+				continue
+			}
 			if _, err := os.Stat(dir); err != nil {
 				continue // no local copy; nothing to reclaim
 			}
@@ -99,7 +103,7 @@ func (r *MoveRunner) sweepStaleCopies(ctx context.Context) {
 			if !ok {
 				continue
 			}
-			err := r.reclaim(ctx, t.Name, a.Partition, guard)
+			err = r.reclaim(ctx, t.Name, a.Partition, guard)
 			if errors.Is(err, messaging.ErrPartitionQuarantined) {
 				if guard.SetAside != "" {
 					r.logger.Error("move: stale partition copy QUARANTINED, not deleted: the new owner cannot vouch for it; operator action required",

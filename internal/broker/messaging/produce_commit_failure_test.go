@@ -57,7 +57,7 @@ func TestCommitAcceptedProduceBatchRetryAfterFailureDeliversOnce(t *testing.T) {
 	// The second batch fills the segment. With the directory read-only
 	// the roll it wants after the commit is deferred (the batch is
 	// committed regardless), and the next batch's roll fails.
-	partitionDir := storage.TopicPartitionDir(dataDir, topicName, 0)
+	partitionDir := topicPartitionDirT(t, dataDir, topicName, 0)
 	if err := os.Chmod(partitionDir, 0o500); err != nil {
 		t.Fatal(err)
 	}

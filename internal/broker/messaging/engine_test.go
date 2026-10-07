@@ -292,14 +292,14 @@ func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetasto
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 		return consumer.Caps{MaxInFlight: 10, MaxAckedAhead: 10}, nil
 	}, func(topic string, partition int, offset int64) {
-		partitionDir := storage.TopicPartitionDir(dataDir, topic, partition)
+		partitionDir := topicPartitionDirT(t, dataDir, topic, partition)
 		if err := storage.WriteConsumerOffset(partitionDir, offset); err != nil {
 			panic(err)
 		}
 	})
 	for topicName, cfg := range ms.topics {
 		for partition := 0; partition < cfg.Partitions; partition++ {
-			partitionDir := storage.TopicPartitionDir(dataDir, topicName, partition)
+			partitionDir := topicPartitionDirT(t, dataDir, topicName, partition)
 			committed, ok, err := storage.ReadConsumerOffset(partitionDir)
 			if err != nil || !ok {
 				continue
@@ -323,8 +323,9 @@ func decodeHandleForTest(t *testing.T, receiptHandle string) consumer.Handle {
 	return h
 }
 
-func partitionHWMPath(dataDir, topicName string, partition int) string {
-	return filepath.Join(storage.TopicPartitionDir(dataDir, topicName, partition), "hwm")
+func partitionHWMPath(tb testing.TB, dataDir, topicName string, partition int) string {
+	tb.Helper()
+	return filepath.Join(topicPartitionDirT(tb, dataDir, topicName, partition), "hwm")
 }
 
 func TestGetTopicMapsNotFound(t *testing.T) {

@@ -75,7 +75,11 @@ func buildBroker(
 	// assignment-driven scan would skip partitions this node owns,
 	// leaving their shards to start at -1 and re-deliver whole logs.
 	offsets.SetCommittedRecovery(func(topicName string, partition int) (int64, bool) {
-		dir := storage.TopicPartitionDir(cfg.Storage.DataDir, topicName, partition)
+		dir, err := storage.TopicPartitionDir(cfg.Storage.DataDir, topicName, partition)
+		if err != nil {
+			log.Error("consumer offset recovery refused the topic name", "topic", topicName, "partition", partition, "err", err)
+			return 0, false
+		}
 		committed, ok, err := storage.ReadConsumerOffset(dir)
 		if err != nil {
 			log.Error("consumer offset recovery failed; starting from log start", "topic", topicName, "partition", partition, "err", err)
@@ -86,7 +90,11 @@ func buildBroker(
 	// The acked-ahead set recovers from the same directory; a damaged
 	// or missing file only means those acks redeliver once.
 	offsets.SetAheadRecovery(func(topicName string, partition int) (int64, []int64, bool) {
-		dir := storage.TopicPartitionDir(cfg.Storage.DataDir, topicName, partition)
+		dir, err := storage.TopicPartitionDir(cfg.Storage.DataDir, topicName, partition)
+		if err != nil {
+			log.Error("consumer acked-ahead recovery refused the topic name", "topic", topicName, "partition", partition, "err", err)
+			return 0, nil, false
+		}
 		rec, ok, err := storage.ReadConsumerAhead(dir)
 		if err != nil {
 			log.Error("consumer acked-ahead recovery failed; acked-ahead messages will redeliver", "topic", topicName, "partition", partition, "err", err)

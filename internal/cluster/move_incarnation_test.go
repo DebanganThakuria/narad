@@ -66,7 +66,7 @@ func TestMoveRunnerRefusesCopyOfAnotherIncarnation(t *testing.T) {
 	if len(store.completeArgs) != 0 {
 		t.Fatalf("flip proposed for a copy of another incarnation: %v", store.completeArgs)
 	}
-	if _, err := os.Stat(storage.TopicPartitionDir(dataDir, "orders", 0)); !os.IsNotExist(err) {
+	if _, err := os.Stat(topicPartitionDirT(t, dataDir, "orders", 0)); !os.IsNotExist(err) {
 		t.Fatalf("partition of another incarnation was installed (stat err %v)", err)
 	}
 }
@@ -106,7 +106,7 @@ func TestMoveRunnerInstallStampsIncarnation(t *testing.T) {
 	}
 	// The old incarnation's directory was set aside (and, this node
 	// being its own leader, its quarantine reclaimed in the same pass).
-	log, err := storage.NewLog(storage.TopicPartitionDir(dataDir, "orders", 0), storage.Options{})
+	log, err := storage.NewLog(topicPartitionDirT(t, dataDir, "orders", 0), storage.Options{})
 	if err != nil {
 		t.Fatalf("recover installed partition: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestMoveSweepSetsAsideDirOfDeletedIncarnation(t *testing.T) {
 		if rec.count() != 0 {
 			t.Fatalf("reclaim called %d times for a directory of another incarnation", rec.count())
 		}
-		if _, err := os.Stat(storage.TopicPartitionDir(dataDir, "orders", 0)); err != nil {
+		if _, err := os.Stat(topicPartitionDirT(t, dataDir, "orders", 0)); err != nil {
 			t.Fatalf("directory moved without leader confirmation: %v", err)
 		}
 	})
@@ -339,7 +339,7 @@ func TestMoveInstallLeavesASuccessorOpenedBeforeTheInstall(t *testing.T) {
 		t.Logf("close: %v", err)
 	}
 	id, marked, _ := storage.ReadTopicIncarnation(topicDirT(t, dataDir, "orders"))
-	l, err := storage.NewLog(storage.TopicPartitionDir(dataDir, "orders", 0), storage.Options{})
+	l, err := storage.NewLog(topicPartitionDirT(t, dataDir, "orders", 0), storage.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

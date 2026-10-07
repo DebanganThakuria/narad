@@ -72,7 +72,7 @@ func TestQueueConsumeSkipsCorruptFrameEndToEnd(t *testing.T) {
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 		return consumer.Caps{MaxInFlight: 10, MaxAckedAhead: 10}, nil
 	}, func(topic string, partition int, offset int64) {
-		dir := storage.TopicPartitionDir(dataDir, topic, partition)
+		dir := topicPartitionDirT(t, dataDir, topic, partition)
 		if err := storage.WriteConsumerOffset(dir, offset); err != nil {
 			t.Errorf("WriteConsumerOffset: %v", err)
 		}
@@ -119,7 +119,7 @@ func TestQueueConsumeSkipsCorruptFrameEndToEnd(t *testing.T) {
 
 	// The advanced frontier is persisted: the committed consumer offset is 2,
 	// so a restart resumes past the poison record (never re-attempts it).
-	dir := storage.TopicPartitionDir(dataDir, topicName, 0)
+	dir := topicPartitionDirT(t, dataDir, topicName, 0)
 	committed, ok, err := storage.ReadConsumerOffset(dir)
 	if err != nil || !ok {
 		t.Fatalf("ReadConsumerOffset: ok=%v err=%v", ok, err)
@@ -204,7 +204,7 @@ func counterTotal(t *testing.T, reg *prometheus.Registry, name string) float64 {
 // partition's segment file, corrupting the frame that contains it.
 func corruptRecordPayloadOnDisk(t *testing.T, dataDir, topicName string, partition int, marker []byte) {
 	t.Helper()
-	dir := storage.TopicPartitionDir(dataDir, topicName, partition)
+	dir := topicPartitionDirT(t, dataDir, topicName, partition)
 	segs, _ := filepath.Glob(filepath.Join(dir, "*.log"))
 	if len(segs) == 0 {
 		t.Fatalf("no segment file in %s", dir)

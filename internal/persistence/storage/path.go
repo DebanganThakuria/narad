@@ -9,9 +9,15 @@ import (
 
 // TopicPartitionDir returns the directory holding one partition's log:
 // <dataDir>/topics/<topic>/p<NNNNN>. The zero-padded partition number
-// keeps lexicographic and numeric ordering identical.
-func TopicPartitionDir(dataDir, topicName string, partition int) string {
-	return filepath.Join(dataDir, "topics", topicName, fmt.Sprintf("p%05d", partition))
+// keeps lexicographic and numeric ordering identical. A topic name that
+// is not a single path element is refused with ErrUnsafeTopicName, as
+// TopicDir refuses it, so no caller can form a path outside the topics
+// directory.
+func TopicPartitionDir(dataDir, topicName string, partition int) (string, error) {
+	if !filepath.IsLocal(topicName) || !singlePathElem(topicName) {
+		return "", unsafeTopicName(topicName)
+	}
+	return filepath.Join(dataDir, "topics", topicName, fmt.Sprintf("p%05d", partition)), nil
 }
 
 // ParsePartitionDirName reverses TopicPartitionDir's p<NNNNN> naming. It

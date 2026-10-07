@@ -138,7 +138,11 @@ func (m *Manager) partitionStats(name string, i int, dirIsOurs bool) (topic.Part
 	if !owned || !dirIsOurs {
 		return stats, nil
 	}
-	dirStats, err := storage.StatPartitionDir(storage.TopicPartitionDir(m.logs.DataDir(), name, i))
+	dir, err := storage.TopicPartitionDir(m.logs.DataDir(), name, i)
+	if err != nil {
+		return topic.PartitionStats{}, err
+	}
+	dirStats, err := storage.StatPartitionDir(dir)
 	if err != nil {
 		return topic.PartitionStats{}, err
 	}

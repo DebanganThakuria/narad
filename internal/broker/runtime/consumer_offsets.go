@@ -571,7 +571,13 @@ func (c *ConsumerOffsetCommitter) prime(wants []offsetWant, hasSource bool, errs
 		}
 		st := c.parts[w.key]
 		if st == nil {
-			st = c.newPart(w.key)
+			var err error
+			if st, err = c.newPart(w.key); err != nil {
+				// A name that forms no partition directory never will:
+				// report it and do not requeue the commit.
+				errs.add(w.key, "dir", err)
+				continue
+			}
 			c.parts[w.key] = st
 		}
 		w.st = st
@@ -598,7 +604,11 @@ func (c *ConsumerOffsetCommitter) prime(wants []offsetWant, hasSource bool, errs
 	return primes, nil
 }
 
-func (c *ConsumerOffsetCommitter) newPart(key offsetCommitKey) *offsetPart {
+func (c *ConsumerOffsetCommitter) newPart(key offsetCommitKey) (*offsetPart, error) {
+	dir, err := storage.TopicPartitionDir(c.dataDir, key.topic, key.partition)
+	if err != nil {
+		return nil, err
+	}
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(key.topic))
 	_, _ = h.Write([]byte(strconv.Itoa(key.partition)))
@@ -608,12 +618,12 @@ func (c *ConsumerOffsetCommitter) newPart(key offsetCommitKey) *offsetPart {
 	}
 	return &offsetPart{
 		key:     key,
-		dir:     storage.TopicPartitionDir(c.dataDir, key.topic, key.partition),
+		dir:     dir,
 		phase:   phase,
 		anchor:  -1,
 		durable: -1,
 		level:   -1,
-	}
+	}, nil
 }
 
 // primeLocked opens a partition's consumer.ahead for the first time
