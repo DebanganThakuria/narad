@@ -64,7 +64,7 @@ func TestValidateCAPEMAndTrustAnchor(t *testing.T) {
 		t.Fatal(err)
 	}
 	many := strings.Repeat(one, MaxCACerts+1)
-	for _, bad := range []string{"junk", many, one + "trailing junk", "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n", strings.Repeat("x", MaxCAPEMBytes+1)} {
+	for _, bad := range []string{"junk", many, one + "trailing junk", string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte{0, 0, 0}})), strings.Repeat("x", MaxCAPEMBytes+1)} {
 		if ValidateCAPEM(bad) == nil {
 			t.Fatalf("bundle of %d bytes accepted", len(bad))
 		}

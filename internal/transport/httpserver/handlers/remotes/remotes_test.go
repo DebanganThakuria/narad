@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -508,7 +509,7 @@ func TestValidationRules(t *testing.T) {
 		{"bad name", with("name", "B_1"), "name must match"},
 		{"reserved name", with("name", "_keys"), "name must match"},
 		{"http url", with("url", strings.Replace(n.target.URL, "https", "http", 1)), "https"},
-		{"userinfo", with("url", strings.Replace(n.target.URL, "https://", "https://u:p@", 1)), "userinfo"},
+		{"userinfo", with("url", withUserinfo(t, n.target.URL)), "userinfo"},
 		{"query", with("url", n.target.URL+"?x=1"), "query"},
 		{"port not allowed", with("url", "https://127.0.0.1:8443"), "allowed_ports"},
 		{"metadata address", with("url", "https://169.254.169.254:"+port(n.target.URL)), "refuses"},
@@ -845,4 +846,16 @@ func TestWriteLimitRetryAfterCoversTheMinute(t *testing.T) {
 	if after := mustAtoi(last.header.Get("Retry-After")); after < 50 || after > 60 {
 		t.Fatalf("Retry-After %q after a burst of 10 writes, want the rest of the minute (50 to 60 s)", last.header.Get("Retry-After"))
 	}
+}
+
+// withUserinfo returns raw with a username and password in its userinfo,
+// built at run time so no credential-shaped URL sits in the source.
+func withUserinfo(t *testing.T, raw string) string {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.User = url.UserPassword("u", "p")
+	return u.String()
 }

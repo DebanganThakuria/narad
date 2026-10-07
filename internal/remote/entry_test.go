@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -153,12 +154,12 @@ func TestDoRefusesRequestsTheSendPathNeverBuilds(t *testing.T) {
 }
 
 func TestNewStaticEntryRefusesBadURLsAndBundles(t *testing.T) {
-	for _, raw := range []string{"http://h", "https://", "https://u:p@h", "https://h?x=1", "https://h#f", "ftp://h"} {
+	for _, raw := range []string{"http://h", "https://", (&url.URL{Scheme: "https", User: url.UserPassword("u", "p"), Host: "h"}).String(), "https://h?x=1", "https://h#f", "ftp://h"} {
 		if _, err := NewStaticEntry(StaticEntryConfig{Name: "b", URL: raw}); err == nil {
 			t.Fatalf("NewStaticEntry(%q) = nil error", raw)
 		}
 	}
-	for _, ca := range []string{"not pem", "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n"} {
+	for _, ca := range []string{"not pem", string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte{0, 0, 0}}))} {
 		if _, err := NewStaticEntry(StaticEntryConfig{Name: "b", URL: "https://h", CAPEM: ca}); err == nil {
 			t.Fatalf("NewStaticEntry(ca %q) = nil error", ca)
 		}

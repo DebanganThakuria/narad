@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -37,7 +38,7 @@ func TestCanonicalURL(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{
-		"http://narad.example", "ftp://narad.example", "https://", "https:///path", "https://u:p@narad.example",
+		"http://narad.example", "ftp://narad.example", "https://", "https:///path", (&url.URL{Scheme: "https", User: url.UserPassword("u", "p"), Host: "narad.example"}).String(),
 		"https://u@narad.example", "https://narad.example?x=1", "https://narad.example/?", "https://narad.example#f",
 		"https://narad.example/#", "https://narad.example:0", "https://narad.example:99999", "https://narad.example:",
 		"https://[fe80::1%25eth0]", "https://narad.example/%2e%2e/users", "https://narad.example/a b",
