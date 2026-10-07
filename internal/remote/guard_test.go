@@ -382,3 +382,29 @@ func TestPoolOpensMaxInFlightConnections(t *testing.T) {
 		t.Fatalf("connections opened = %d, want 16", n)
 	}
 }
+
+// A port is 16 bits. The guard refuses a port list entry outside
+// 1..65535 at build time, and a dial address whose port does not fit is
+// refused as a port, never wrapped to another port: 65979 would
+// otherwise dial 443.
+func TestGuardRefusesAnOutOfRangePort(t *testing.T) {
+	for _, p := range []int{0, -1, 65536, 443 + 65536} {
+		if _, err := NewGuard(GuardConfig{AllowedPorts: []int{p}}); err == nil {
+			t.Errorf("NewGuard(AllowedPorts: %d) = nil error, want a refusal", p)
+		}
+	}
+
+	g, err := NewGuard(GuardConfig{AllowedPorts: []int{443}, AllowAddresses: []string{"127.0.0.0/8"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A list that slipped past the check must still not wrap.
+	g.ports = append(g.ports, 443+65536)
+	dial := g.Dialer("b")
+	for _, port := range []string{"65979", "70000", "-1", "99999999999999999999"} {
+		_, err := dial(context.Background(), "tcp", net.JoinHostPort("127.0.0.1", port))
+		if reason, ok := DestinationRefused(err); !ok || reason != RefusedPort {
+			t.Errorf("dial port %s: %v, want refused as a port", port, err)
+		}
+	}
+}

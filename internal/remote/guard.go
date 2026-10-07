@@ -112,12 +112,18 @@ type Guard struct {
 	metrics *metrics.RemoteMetrics
 }
 
-// NewGuard builds the guard. An allowlist entry or an allow_addresses
-// entry that does not parse is an error, which fails startup.
+// NewGuard builds the guard. A port outside 1..65535, or an allowlist
+// entry or an allow_addresses entry that does not parse, is an error,
+// which fails startup.
 func NewGuard(cfg GuardConfig) (*Guard, error) {
 	allow, err := NewHostAllowlist(cfg.AllowedHosts)
 	if err != nil {
 		return nil, err
+	}
+	for _, p := range cfg.AllowedPorts {
+		if p < 1 || p > 65535 {
+			return nil, fmt.Errorf("remotes.allowed_ports: %d is not a port (1..65535)", p)
+		}
 	}
 	g := &Guard{allow: allow, ports: slices.Clone(cfg.AllowedPorts), lookup: cfg.Lookup, metrics: cfg.Metrics}
 	if len(g.ports) == 0 {
@@ -214,8 +220,14 @@ func (g *Guard) dial(ctx context.Context, d *net.Dialer, network, addr string) (
 	if err != nil {
 		return nil, &DestinationError{Reason: RefusedAddress}
 	}
-	port, err := strconv.Atoi(portText)
-	if err != nil || !slices.Contains(g.ports, port) {
+	// Parsed at 16 bits: a port that does not fit is refused, never
+	// wrapped onto another port by the conversion below.
+	port16, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil {
+		return nil, &DestinationError{Reason: RefusedPort}
+	}
+	port := int(port16)
+	if !slices.Contains(g.ports, port) {
 		return nil, &DestinationError{Reason: RefusedPort}
 	}
 	c, isIPErr := canonicalDialHost(host)
@@ -235,7 +247,7 @@ func (g *Guard) dial(ctx context.Context, d *net.Dialer, network, addr string) (
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		conn, err := d.DialContext(ctx, network, netip.AddrPortFrom(a, uint16(port)).String())
+		conn, err := d.DialContext(ctx, network, netip.AddrPortFrom(a, uint16(port16)).String())
 		if err == nil {
 			return conn, nil
 		}
