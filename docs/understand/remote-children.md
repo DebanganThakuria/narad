@@ -66,7 +66,7 @@ flowchart LR
 | Narad's `404` | Stall. | `target_missing` |
 | Go's bare `404` from the batch route | Read the target's children listing: a target that answers it has no batch produce (stall); otherwise something in front of it answered. | `no_batch_produce` |
 | `3xx` | Stall; redirects are never followed. | `redirect_refused` |
-| `429` | Close the gate for the target's `Retry-After`, at most 60 s. | `throttled` |
+| `429` | Close the gate for the target's `Retry-After`, at most 60 s, whether a chunk or a target check got it. | `throttled` |
 | `408`, `5xx`, a timeout, a reset, a non-Narad answer | Retry after the lane's backoff (250 ms to 2 s); the request may have landed, so its records count as resent. | `unavailable` |
 | A refused dial | Stall. | `destination_refused` |
 | A TLS failure | Close the gate. | `tls_failed` |

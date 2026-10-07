@@ -77,6 +77,10 @@ type TargetResult struct {
 	// Class is the failure class of a check that errored (it never
 	// stalls sending).
 	Class string
+	// RetryAfter is a 429's Retry-After, capped at MaxRetryAfter: a
+	// probe answered by a throttled check holds the gate that long, as
+	// a throttled chunk does.
+	RetryAfter time.Duration
 }
 
 // CheckOutcome is what a runtime target check tells the remote's gate.
@@ -102,7 +106,11 @@ func (r TargetResult) GateVerdict() (Verdict, CheckOutcome) {
 		return Verdict{}, CheckReached
 	}
 	switch r.Class {
-	case topic.RemoteStateAuthFailed, topic.RemoteStateThrottled, topic.RemoteStateTLSFailed:
+	case topic.RemoteStateThrottled:
+		v := verdict(ActGate, r.Class, 0)
+		v.RetryAfter = r.RetryAfter
+		return v, CheckFailed
+	case topic.RemoteStateAuthFailed, topic.RemoteStateTLSFailed:
 		return verdict(ActGate, r.Class, 0), CheckFailed
 	case topic.RemoteStateUnavailable, topic.RemoteClassEdge:
 		v := verdict(ActRetry, topic.RemoteStateUnavailable, 0)
@@ -143,7 +151,11 @@ func CheckTarget(ctx context.Context, e *remote.Entry, topicName, recordedTarget
 		return TargetResult{Class: topic.RemoteStateUnavailable}
 	}
 	if resp.StatusCode != http.StatusOK || !isJSON(resp) {
-		return TargetResult{Class: checkClass(resp, body)}
+		res := TargetResult{Class: checkClass(resp, body)}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			res.RetryAfter = retryAfter(resp)
+		}
+		return res
 	}
 	view, ok := parseListing(body)
 	if !ok {

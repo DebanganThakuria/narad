@@ -213,3 +213,51 @@ func TestRemoteLinkLanesWaitOnTheReopenCheckOwedAfterAnErroredProbeCheck(t *test
 	}
 	<-inflight
 }
+
+// A target check the target throttles carries its Retry-After to the
+// gate, as a throttled chunk does: a probe answered by it holds the
+// gate for the time the target asked, not a shorter jittered backoff.
+func TestRemoteLinkThrottledCheckHoldsTheGateForTheTargetsRetryAfter(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{partitions: 1}})
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitDelivered(t, rg.src.produce(t, 0, 5, 2, 0), 15*time.Second)
+	rg.waitState(t, 0, topic.RemoteStateRunning, 10*time.Second)
+
+	ctx := context.Background()
+	cur := rg.src.runner.remoteCursorFor("orders", 0, "orders-to-b")
+	if cur == nil {
+		t.Fatal("no remote cursor")
+	}
+	s := rg.src.runner.sender()
+	e, rs, state := s.entry("b")
+	if state != "" {
+		t.Fatalf("lookup state %q", state)
+	}
+	stub, err := rg.src.store.GetTopic(ctx, "orders-to-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer rg.target.faults.set("")
+	rg.target.faults.retryAfter = "5"
+	rg.target.faults.set("throttled")
+	cur.forceTargetCheck()
+	_, res, ran := s.checkTarget(ctx, ctx, cur, e, rs, stub)
+	if !ran {
+		t.Fatal("the forced check did not run")
+	}
+	v, outcome := res.GateVerdict()
+	if outcome != sink.CheckFailed || v.State != topic.RemoteStateThrottled {
+		t.Fatalf("verdict %+v (outcome %v), want a throttled failure", v, outcome)
+	}
+	if v.RetryAfter != 5*time.Second {
+		t.Fatalf("the check's verdict carries Retry-After %s, want the target's 5s", v.RetryAfter)
+	}
+	// Answered as the gate's probe, it holds the gate that long.
+	rs.gateFailed(v, true)
+	time.Sleep(2 * time.Second)
+	if !rs.gate.WouldWait() {
+		t.Fatal("the gate's next probe fell due before the target's Retry-After")
+	}
+}
