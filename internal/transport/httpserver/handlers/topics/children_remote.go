@@ -35,6 +35,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/domain/user"
+	"github.com/debanganthakuria/narad/internal/errs"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 	"github.com/debanganthakuria/narad/internal/remote"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
@@ -320,17 +321,28 @@ type undecider interface{ MarkUndecided() }
 
 // writeForwardError answers a remote write whose forward failed. A
 // leader that could not be reached may have committed the write, so the
-// audit line says unknown; an older leader refused it outright.
+// audit line says unknown; an older leader refused it outright; and a
+// write the leader committed that this node has not applied yet is
+// answered as made (handlers.Set.WriteNotAppliedHere).
 func writeForwardError(s *handlers.Set, w http.ResponseWriter, err error) {
 	if leaderTooOld(err) {
 		s.WriteError(w, http.StatusPreconditionFailed, "the cluster leader runs an older release that does not serve remote children; finish the upgrade first")
 		return
 	}
+	if errors.Is(err, errs.ErrNotAppliedHere) {
+		s.WriteNotAppliedHere(w)
+		return
+	}
 	if u, ok := w.(undecider); ok {
 		u.MarkUndecided()
 	}
+	w.Header().Set("Retry-After", forwardRetryAfter)
 	s.WriteError(w, http.StatusServiceUnavailable, "the cluster leader could not be reached; retry")
 }
+
+// forwardRetryAfter is the Retry-After, in seconds, of the 503 for a
+// remote write whose forward got no answer from the leader.
+const forwardRetryAfter = "2"
 
 // sendRemoteChildWrite forwards one remote child write to the leader and
 // answers with its reply; the caller's audit writer records the status.

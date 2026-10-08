@@ -525,7 +525,7 @@ paths:
         '501':
           description: New in v3.2.0. The answering node has no remote plane, so it cannot delete a remote-linked topic.
         '503':
-          description: The cluster has no leader to write the delete, or the answering node could not reach the leader to confirm a topic it does not have. From v3.2.0, for a remote-linked topic, also when the unshipped check could not run.
+          description: 'The cluster has no leader to write the delete, or the answering node could not reach the leader to confirm a topic it does not have. From v3.2.0, for a remote-linked topic, also when the unshipped check could not run. For a remote-linked topic, when the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again.'
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X DELETE "$NARAD/v1/topics/orders-audit"
@@ -653,7 +653,7 @@ paths:
           description: New in v3.2.0, with `remote`. Something in front of the target answered instead of it (a load balancer or a proxy), or the target answered with a redirect, which is never followed.
           x-narad-origin: forwarding
         '503':
-          description: No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry. From v3.2.0, with `remote`, also when the target or a member was unavailable during the checks.
+          description: 'No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent''s partition owners could not be asked for the attach point. Nothing was linked; retry. From v3.2.0, with `remote`, also when the target or a member was unavailable during the checks. With `remote`, when the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again.'
       x-narad-examples:
         - title: a local child
           request: |
@@ -819,7 +819,7 @@ paths:
         '501':
           description: New in v3.2.0. The answering node has no remote plane, so it cannot detach a remote child.
         '503':
-          description: The cluster has no leader to write the change, or the answering node could not reach the leader to confirm the topics. From v3.2.0, for a remote child, also when the unshipped check could not run.
+          description: 'The cluster has no leader to write the change, or the answering node could not reach the leader to confirm the topics. From v3.2.0, for a remote child, also when the unshipped check could not run. For a remote child, when the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again.'
       x-narad-examples:
         - title: a local child
           request: |
@@ -895,7 +895,7 @@ paths:
         '501':
           description: The answering node has no remote plane.
         '503':
-          description: The leader could not be reached or could not write the change; retry.
+          description: 'The leader could not be reached or could not write the change; retry. A leader that could not be reached answers with `Retry-After: 2`. When the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again.'
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST \
@@ -968,7 +968,7 @@ paths:
           description: Something in front of the target answered instead of it, or the target answered with a redirect.
           x-narad-origin: forwarding
         '503':
-          description: The leader could not be reached, or the target or a member was unavailable during the checks; retry.
+          description: 'The leader could not be reached, or the target or a member was unavailable during the checks; retry. A leader that could not be reached answers with `Retry-After: 2`. When the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again.'
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST \
@@ -1045,7 +1045,7 @@ paths:
         '501':
           description: The answering node has no remote plane.
         '503':
-          description: The leader could not be reached, could not ask the partition's owner, or could not write the change; retry.
+          description: 'The leader could not be reached, could not ask the partition''s owner, or could not write the change; retry. A leader that could not be reached answers with `Retry-After: 2`. When the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again.'
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST \
@@ -2096,7 +2096,7 @@ paths:
         '501':
           description: The answering node has no remote plane.
         '503':
-          description: The leader could not be reached, or could not write the change; the request ID in the node's audit line joins it to the leader's. Read the remote back before retrying.
+          description: 'The leader could not be reached, or could not write the change; the request ID in the node''s audit line joins it to the leader''s. Read the remote back before retrying. A leader that could not be reached answers with `Retry-After: 2`. When the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again.'
       x-narad-examples:
         - request: |
             jq -n --rawfile pw repl-password --rawfile ca narad-b-ca.pem \
@@ -2265,7 +2265,7 @@ paths:
         '501':
           description: The answering node has no remote plane.
         '503':
-          description: The leader could not be reached, or could not write the change. Read the remote back before retrying.
+          description: 'The leader could not be reached, or could not write the change. Read the remote back before retrying. A leader that could not be reached answers with `Retry-After: 2`. When the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again.'
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X PATCH "$NARAD/v1/remotes/b" \
@@ -2328,7 +2328,7 @@ paths:
         '501':
           description: The answering node has no remote plane.
         '503':
-          description: The leader could not be reached, or could not write the change. Read the remotes back before retrying.
+          description: 'The leader could not be reached, or could not write the change. Read the remotes back before retrying. A leader that could not be reached answers with `Retry-After: 2`. When the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again.'
       x-narad-examples:
         - title: in use
           request: |
@@ -2469,7 +2469,7 @@ paths:
         '501':
           description: The answering node has no remote plane.
         '503':
-          description: The leader could not be reached; it is safe to repeat.
+          description: 'The leader could not be reached; it is safe to repeat. A leader that could not be reached answers with `Retry-After: 2`. When the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again.'
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST "$NARAD/v1/cluster/reencrypt-remotes" \

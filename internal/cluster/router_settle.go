@@ -46,6 +46,29 @@ func (rt *Router) settleForwardedWrite(ctx context.Context, memberAddr string, r
 	_ = rt.store.WaitApplied(settleCtx, index)
 }
 
+// settleForwardedWriteStrict is settleForwardedWrite for a write whose
+// client must be able to read it back on this node (the remote writes:
+// a pause, resume or skip followed by the children listing). It waits
+// the same way, bounded by forwardSettleTimeout and ctx, but a probe
+// that fails or a replica that does not catch up in time is an error
+// wrapping errs.ErrNotAppliedHere instead of a silent pass. A non-2xx
+// answer changed nothing, so it needs no wait.
+func (rt *Router) settleForwardedWriteStrict(ctx context.Context, memberAddr string, res nodewire.Response) error {
+	if rt.store == nil || res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
+		return nil
+	}
+	settleCtx, cancel := context.WithTimeout(ctx, forwardSettleTimeout)
+	defer cancel()
+	index, err := rt.peer.AppliedIndex(settleCtx, memberAddr)
+	if err != nil {
+		return fmt.Errorf("%w: ask the leader for its applied index: %v", errs.ErrNotAppliedHere, err)
+	}
+	if err := rt.store.WaitApplied(settleCtx, index); err != nil {
+		return fmt.Errorf("%w: catch up with the leader: %v", errs.ErrNotAppliedHere, err)
+	}
+	return nil
+}
+
 // writeForwardedWrite is writeForwardResult for a write: it settles a
 // successful forward on the local replica before answering.
 //

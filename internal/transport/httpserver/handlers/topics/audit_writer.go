@@ -38,6 +38,9 @@ type auditWriter struct {
 	http.ResponseWriter
 	status    int
 	undecided bool
+	// unsettled: the leader committed the change, but this node answered
+	// before its replica was confirmed to have applied it.
+	unsettled bool
 }
 
 func newAuditWriter(w http.ResponseWriter) *auditWriter {
@@ -66,9 +69,16 @@ func (w *auditWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 // forward ended without a reply).
 func (w *auditWriter) MarkUndecided() { w.undecided = true }
 
+// MarkCommittedUnsettled records that the leader committed the change
+// but this node answered (503) before its replica was confirmed to have
+// applied it: the line's outcome is ok, with settled=false.
+func (w *auditWriter) MarkCommittedUnsettled() { w.unsettled = true }
+
 // outcome names what the recorded answer says about the mutation.
 func (w *auditWriter) outcome() string {
 	switch {
+	case w.unsettled:
+		return handlers.AuditOK
 	case w.undecided, w.status == 0, w.status == handlers.StatusClientClosedRequest:
 		return handlers.AuditUnknown
 	case w.status < http.StatusBadRequest:
@@ -83,6 +93,9 @@ func (w *auditWriter) outcome() string {
 
 // audit writes the mutation's audit line.
 func (w *auditWriter) audit(s *handlers.Set, r *http.Request, event, target string, extra ...any) {
+	if w.unsettled {
+		extra = append(extra, "settled", false)
+	}
 	s.AuditOutcome(r, event, target, w.outcome(), w.status, extra...)
 }
 

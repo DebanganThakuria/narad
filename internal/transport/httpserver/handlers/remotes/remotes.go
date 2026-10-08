@@ -142,10 +142,17 @@ func (c *call) write(actor, subOp string, op any) {
 	case errors.Is(err, errs.ErrRemoteFeatureGate):
 		c.fail(http.StatusPreconditionFailed, "the metastore leader runs a release without remotes; finish the upgrade first")
 		return
+	case errors.Is(err, errs.ErrNotAppliedHere):
+		// Committed on the leader, not yet applied here: answered as
+		// made, and the line says ok with settled=false.
+		c.s.WriteNotAppliedHere(c.w)
+		c.audit(http.StatusServiceUnavailable)
+		return
 	case err != nil:
 		// The write may still have committed on the leader: the outcome
 		// is unknown, and the request ID joins this line to the leader's.
 		c.aw.MarkUndecided()
+		c.w.Header().Set("Retry-After", "2")
 		c.fail(http.StatusServiceUnavailable, "the metastore leader could not be reached; retry")
 		return
 	}

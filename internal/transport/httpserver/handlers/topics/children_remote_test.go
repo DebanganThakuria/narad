@@ -642,6 +642,56 @@ func TestRemoteDetachAndDeleteAuditLinesCarryTheRequestID(t *testing.T) {
 	}
 }
 
+// A remote write the leader committed but this node could not confirm
+// it applied answers 503 with Retry-After and a message that says the
+// change is made (not that the leader could not be reached), and its
+// audit line records the change as made, marked unsettled, never as
+// failed or undecided.
+func TestRemoteWriteNotAppliedHereAnswers503WithRetryAfter(t *testing.T) {
+	w := &recordingWriter{res: nodewire.Response{Status: http.StatusOK, Body: []byte(`{}`)}, err: errs.ErrNotAppliedHere}
+	s := remoteSet(remoteBroker(), w)
+	var logs bytes.Buffer
+	s.Deps.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	s = handlers.New(s.Deps)
+	s.Deps.Remote.Writer = w
+
+	check := func(name string, res *httptest.ResponseRecorder) {
+		t.Helper()
+		if res.Code != http.StatusServiceUnavailable || res.Header().Get("Retry-After") == "" {
+			t.Fatalf("%s: %d Retry-After %q, want 503 with Retry-After", name, res.Code, res.Header().Get("Retry-After"))
+		}
+		if !strings.Contains(res.Body.String(), "committed") || strings.Contains(res.Body.String(), "could not be reached") {
+			t.Fatalf("%s: body %s, want the committed message", name, res.Body.String())
+		}
+		lines := auditLines(t, &logs)
+		if len(lines) != 1 || lines[0]["outcome"] != handlers.AuditOK || lines[0]["settled"] != false {
+			t.Fatalf("%s: audit %v, want one ok line with settled false", name, lines)
+		}
+		logs.Reset()
+	}
+	check("pause", post(t, PauseChild(s), "/", `{}`, &adminUser, "parent", "orders", "child", "orders-to-b"))
+	w.res = nodewire.Response{Status: http.StatusNoContent}
+	check("detach", del(t, DetachChild(s), "/", &adminUser, "parent", "orders", "child", "orders-to-b"))
+}
+
+// A forward that never got the leader's answer still answers 503 with
+// Retry-After, and its audit line stays undecided.
+func TestRemoteWriteLostAnswerCarriesRetryAfter(t *testing.T) {
+	w := &recordingWriter{err: context.DeadlineExceeded}
+	s := remoteSet(remoteBroker(), w)
+	var logs bytes.Buffer
+	s.Deps.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	s = handlers.New(s.Deps)
+	s.Deps.Remote.Writer = w
+	res := post(t, PauseChild(s), "/", `{}`, &adminUser, "parent", "orders", "child", "orders-to-b")
+	if res.Code != http.StatusServiceUnavailable || res.Header().Get("Retry-After") == "" {
+		t.Fatalf("lost answer: %d Retry-After %q, want 503 with Retry-After", res.Code, res.Header().Get("Retry-After"))
+	}
+	if lines := auditLines(t, &logs); len(lines) != 1 || lines[0]["outcome"] != handlers.AuditUnknown {
+		t.Fatalf("lost answer audit %v, want unknown", lines)
+	}
+}
+
 // A partition whose owner has never had a successful target check is
 // the stalest of all: once its owner has checked for longer than the
 // window, the link is unverified and has no target_verified_at, however

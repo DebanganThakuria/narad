@@ -529,7 +529,7 @@ same refusal, with its body, is in
 | [`412`](status-codes.md#status-412) | New in v3.2.0. The cluster leader runs a release without remote children; finish the upgrade. |
 | [`429`](status-codes.md#status-429) | New in v3.2.0. The leader ran an unshipped check for this parent less than 10 seconds ago; retry after `Retry-After`. |
 | [`501`](status-codes.md#status-501) | New in v3.2.0. The answering node has no remote plane, so it cannot delete a remote-linked topic. |
-| [`503`](status-codes.md#status-503) | The cluster has no leader to write the delete, or the answering node could not reach the leader to confirm a topic it does not have. From v3.2.0, for a remote-linked topic, also when the unshipped check could not run. |
+| [`503`](status-codes.md#status-503) | The cluster has no leader to write the delete, or the answering node could not reach the leader to confirm a topic it does not have. From v3.2.0, for a remote-linked topic, also when the unshipped check could not run. For a remote-linked topic, when the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" -X DELETE "$NARAD/v1/topics/orders-audit"
@@ -679,7 +679,7 @@ fields `remote_topic`, `from`, `lanes` and `dry_run` without
 | [`429`](status-codes.md#status-429) | New in v3.2.0, with `remote`. This node took 60 remote child writes in the last minute, or a check of this remote ran less than 5 seconds ago on a member; retry after `Retry-After`. |
 | [`501`](status-codes.md#status-501) | New in v3.2.0, with `remote`. The answering node, or the leader, has no remote plane. |
 | [`502`](status-codes.md#status-502) | New in v3.2.0, with `remote`. Something in front of the target answered instead of it (a load balancer or a proxy), or the target answered with a redirect, which is never followed. |
-| [`503`](status-codes.md#status-503) | No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry. From v3.2.0, with `remote`, also when the target or a member was unavailable during the checks. |
+| [`503`](status-codes.md#status-503) | No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry. From v3.2.0, with `remote`, also when the target or a member was unavailable during the checks. With `remote`, when the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again. |
 
 **Response body (`200`)**: a [Topic](#topic-object).
 
@@ -976,7 +976,7 @@ first. A new check for one parent runs at most every 10 seconds.
 | [`412`](status-codes.md#status-412) | New in v3.2.0. The cluster leader runs a release without remote children; finish the upgrade. |
 | [`429`](status-codes.md#status-429) | New in v3.2.0. The leader ran an unshipped check for this parent less than 10 seconds ago; retry after `Retry-After`. |
 | [`501`](status-codes.md#status-501) | New in v3.2.0. The answering node has no remote plane, so it cannot detach a remote child. |
-| [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, or the answering node could not reach the leader to confirm the topics. From v3.2.0, for a remote child, also when the unshipped check could not run. |
+| [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, or the answering node could not reach the leader to confirm the topics. From v3.2.0, for a remote child, also when the unshipped check could not run. For a remote child, when the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again. |
 
 ```sh title="Request: a local child"
 curl -i -u "$AUTH" -X DELETE \
@@ -1052,7 +1052,7 @@ reason.
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`429`](status-codes.md#status-429) | This node took 60 remote child writes in the last minute; retry after `Retry-After`. |
 | [`501`](status-codes.md#status-501) | The answering node has no remote plane. |
-| [`503`](status-codes.md#status-503) | The leader could not be reached or could not write the change; retry. |
+| [`503`](status-codes.md#status-503) | The leader could not be reached or could not write the change; retry. A leader that could not be reached answers with `Retry-After: 2`. When the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again. |
 
 **Response body (`200`)**: a [Topic](#topic-object).
 
@@ -1143,7 +1143,7 @@ pause, resume needs every member to answer.
 | [`429`](status-codes.md#status-429) | This node took 60 remote child writes in the last minute, or a check of this remote ran less than 5 seconds ago on a member; retry after `Retry-After`. |
 | [`501`](status-codes.md#status-501) | The answering node has no remote plane. |
 | [`502`](status-codes.md#status-502) | Something in front of the target answered instead of it, or the target answered with a redirect. |
-| [`503`](status-codes.md#status-503) | The leader could not be reached, or the target or a member was unavailable during the checks; retry. |
+| [`503`](status-codes.md#status-503) | The leader could not be reached, or the target or a member was unavailable during the checks; retry. A leader that could not be reached answers with `Retry-After: 2`. When the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again. |
 
 **Response body (`200`)**: a [Topic](#topic-object).
 
@@ -1238,7 +1238,7 @@ restart or a partition move) drops each of them again.
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`429`](status-codes.md#status-429) | This node took 60 remote child writes in the last minute; retry after `Retry-After`. |
 | [`501`](status-codes.md#status-501) | The answering node has no remote plane. |
-| [`503`](status-codes.md#status-503) | The leader could not be reached, could not ask the partition's owner, or could not write the change; retry. |
+| [`503`](status-codes.md#status-503) | The leader could not be reached, could not ask the partition's owner, or could not write the change; retry. A leader that could not be reached answers with `Retry-After: 2`. When the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again. |
 
 **Response body (`200`)**: a [Topic](#topic-object).
 
@@ -2455,7 +2455,7 @@ remote writes a minute, and a cluster holds at most 64 remotes.
 | [`429`](status-codes.md#status-429) | This node took 10 remote writes in the last minute; retry after `Retry-After`, the seconds until the oldest of them leaves the minute. |
 | [`500`](status-codes.md#status-500) | The node failed to seal the password; logged on the node. |
 | [`501`](status-codes.md#status-501) | The answering node has no remote plane. |
-| [`503`](status-codes.md#status-503) | The leader could not be reached, or could not write the change; the request ID in the node's audit line joins it to the leader's. Read the remote back before retrying. |
+| [`503`](status-codes.md#status-503) | The leader could not be reached, or could not write the change; the request ID in the node's audit line joins it to the leader's. Read the remote back before retrying. A leader that could not be reached answers with `Retry-After: 2`. When the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again. |
 
 **Response body (`201`)**
 
@@ -2823,7 +2823,7 @@ change live; a limit named with `0` or `""` is refused.
 | [`429`](status-codes.md#status-429) | This node took 10 remote writes in the last minute; retry after `Retry-After`, the seconds until the oldest of them leaves the minute. |
 | [`500`](status-codes.md#status-500) | The node failed to seal the password; logged on the node. |
 | [`501`](status-codes.md#status-501) | The answering node has no remote plane. |
-| [`503`](status-codes.md#status-503) | The leader could not be reached, or could not write the change. Read the remote back before retrying. |
+| [`503`](status-codes.md#status-503) | The leader could not be reached, or could not write the change. Read the remote back before retrying. A leader that could not be reached answers with `Retry-After: 2`. When the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again. |
 
 **Response body (`200`)**
 
@@ -2938,7 +2938,7 @@ an emergency, revoke the user on the target first
 | [`412`](status-codes.md#status-412) | A member does not apply the remote Raft entry types (the body names it), or the leader runs an older release. |
 | [`429`](status-codes.md#status-429) | This node took 10 remote writes in the last minute; retry after `Retry-After`, the seconds until the oldest of them leaves the minute. |
 | [`501`](status-codes.md#status-501) | The answering node has no remote plane. |
-| [`503`](status-codes.md#status-503) | The leader could not be reached, or could not write the change. Read the remotes back before retrying. |
+| [`503`](status-codes.md#status-503) | The leader could not be reached, or could not write the change. Read the remotes back before retrying. A leader that could not be reached answers with `Retry-After: 2`. When the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again. |
 
 ```sh title="Request: in use"
 curl -i -u "$AUTH" -X DELETE "$NARAD/v1/remotes/b"
@@ -3109,7 +3109,7 @@ Empty, or `{}`. Content types: `application/json`.
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`429`](status-codes.md#status-429) | This node took 10 remote writes in the last minute; retry after `Retry-After`, the seconds until the oldest of them leaves the minute. |
 | [`501`](status-codes.md#status-501) | The answering node has no remote plane. |
-| [`503`](status-codes.md#status-503) | The leader could not be reached; it is safe to repeat. |
+| [`503`](status-codes.md#status-503) | The leader could not be reached; it is safe to repeat. A leader that could not be reached answers with `Retry-After: 2`. When the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again. |
 
 **Response body (`200`)**
 

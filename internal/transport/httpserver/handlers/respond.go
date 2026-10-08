@@ -128,6 +128,31 @@ type undecidedMarker interface {
 	MarkUndecided()
 }
 
+// unsettledMarker is a response writer that records a change the
+// leader committed that this node has not applied yet (the audit
+// writers).
+type unsettledMarker interface {
+	MarkCommittedUnsettled()
+}
+
+// NotAppliedHereRetryAfter is the Retry-After, in seconds, of the 503
+// for a committed change this node has not applied yet: about one
+// replication round trip and the settle bound.
+const NotAppliedHereRetryAfter = "2"
+
+// WriteNotAppliedHere answers a forwarded write the leader committed
+// but this node could not confirm it applied (errs.ErrNotAppliedHere):
+// 503 with Retry-After, a fixed message that says the change is made,
+// and an audit line that records it as made but unsettled. The client
+// should read it back after the delay, not send it again.
+func (s *Set) WriteNotAppliedHere(w http.ResponseWriter) {
+	if m, ok := w.(unsettledMarker); ok {
+		m.MarkCommittedUnsettled()
+	}
+	w.Header().Set("Retry-After", NotAppliedHereRetryAfter)
+	s.WriteError(w, http.StatusServiceUnavailable, errs.ErrNotAppliedHere.Error()+": do not send it again; read it back after Retry-After, or on another node")
+}
+
 // logServerError logs 5xx responses only: 4xx errors are the client's
 // fault and would just be noise.
 func (s *Set) logServerError(status int, msg string, attrs ...slog.Attr) {

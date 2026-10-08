@@ -23,6 +23,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/cluster"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/domain/user"
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
@@ -699,6 +700,46 @@ func TestForwardedErrorBesideCommitted(t *testing.T) {
 	ingress, leader := split(n.logs.lines(t, "remote.create"))
 	if len(ingress) != 1 || len(leader) != 1 || ingress[0]["outcome"] != handlers.AuditUnknown || leader[0]["outcome"] != "committed" ||
 		ingress[0]["request_id"] != leader[0]["request_id"] {
+		t.Fatalf("ingress %v, leader %v", ingress, leader)
+	}
+}
+
+// unsettledAnswer commits the write on the leader and returns its
+// answer, but reports that this node's replica was not confirmed to
+// have applied it.
+type unsettledAnswer struct{ inner handlers.RemoteWriter }
+
+func (u unsettledAnswer) RemoteWrite(ctx context.Context, req nodewire.RemoteWriteRequest) (nodewire.Response, error) {
+	res, err := u.inner.RemoteWrite(ctx, req)
+	if err != nil {
+		return res, err
+	}
+	return res, errs.ErrNotAppliedHere
+}
+
+// A committed write this node has not applied answers 503 with
+// Retry-After and says the change is made; the ingress line records it
+// as ok and unsettled beside committed on the leader.
+func TestForwardedCommitNotAppliedHere(t *testing.T) {
+	n := newAPINode(t, apiOpts{})
+	set := handlers.New(handlers.Deps{
+		Broker: sourceBroker{}, Metastore: n.ms, Logger: slog.New(slog.NewJSONHandler(n.logs, nil)),
+		Remote: handlers.RemoteDeps{Writer: unsettledAnswer{inner: n.plane}, Service: n.svc},
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/remotes", httpremotes.Create(set))
+	r := httptest.NewRequest(http.MethodPost, "/v1/remotes", strings.NewReader(n.createBody("b", canary)))
+	r = r.WithContext(security.WithIdentity(r.Context(), *admin))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusServiceUnavailable || w.Header().Get("Retry-After") == "" || !strings.Contains(w.Body.String(), "committed") {
+		t.Fatalf("unsettled commit: %d Retry-After %q %s", w.Code, w.Header().Get("Retry-After"), w.Body.String())
+	}
+	if _, err := n.ms.GetRemote("b"); err != nil {
+		t.Fatalf("the write did not commit: %v", err)
+	}
+	ingress, leader := split(n.logs.lines(t, "remote.create"))
+	if len(ingress) != 1 || len(leader) != 1 || ingress[0]["outcome"] != handlers.AuditOK || ingress[0]["settled"] != false || leader[0]["outcome"] != "committed" {
 		t.Fatalf("ingress %v, leader %v", ingress, leader)
 	}
 }
