@@ -21,6 +21,7 @@ These docs track the master branch; the latest release is v3.2.1, what v3.2.0 ad
 - [Quickstart: send your first message](https://debanganthakuria.github.io/narad/get-started/quickstart/): Run Narad on your machine, then create a topic and produce, consume and ack one message with curl, in about five minutes.
 - [Core concepts](https://debanganthakuria.github.io/narad/get-started/concepts/): Learn the handful of ideas every Narad client uses: topics, partitions, keys, leases, acks, child topics and grants.
 - [Compare Narad with other brokers](https://debanganthakuria.github.io/narad/get-started/compare/): See how Narad compares with Kafka, NATS JetStream, RabbitMQ, SQS, Redis Streams and Pulsar, and which problems each one fits best.
+- [Get help and contribute](https://debanganthakuria.github.io/narad/get-started/community/): Ask a question, report a bug, request a feature, report a vulnerability privately, or contribute a change to Narad.
 
 ## Build
 
