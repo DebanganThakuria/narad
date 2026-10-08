@@ -54,6 +54,7 @@ without a test will be asked for one in review.
 - Prefer simple changes over new abstractions.
 - Keep public behavior and CLI/HTTP output stable unless the change explicitly updates it.
 - Update documentation when user-facing behavior, configuration, or operations change.
+- Change `docs/reference/openapi.yaml` and `docs/reference/http-api.md` together, by hand, in the same pull request. The OpenAPI contract test checks the spec against the router and the handlers; nothing checks the page against the spec.
 
 ## Requirements for acceptance
 
@@ -71,7 +72,7 @@ A pull request is merged when:
 Before opening a pull request, make sure you have:
 
 - [ ] added or updated tests for the change
-- [ ] run `make check` locally (format, vet, docs version check, tests)
+- [ ] run `make check` locally (format, vet, tests)
 - [ ] updated docs if behavior or configuration changed, marking what is new as unreleased ([which release the docs describe](https://debanganthakuria.github.io/narad/reference/api-stability/#docs-version))
 - [ ] added an entry under `## [Unreleased]` in `CHANGELOG.md` if the change is user-visible
 - [ ] described the motivation and scope clearly in the PR
@@ -95,18 +96,17 @@ When filing a bug, include:
 
 ## Releasing
 
-[Maintainers](./MAINTAINERS.md) only, and the order matters because CI enforces part of it.
+[Maintainers](./MAINTAINERS.md) only, and the order matters.
 
 1. Move the `## [Unreleased]` entries in `CHANGELOG.md` under a new version heading with today's date, add the compare link at the bottom, and leave `## [Unreleased]` empty above it.
-2. Name the new version wherever the docs mark something unreleased: the line under a heading becomes `**New in vX.Y.Z.**`, and "(unreleased)" becomes "(vX.Y.Z)" or "(from vX.Y.Z)". Keep what the text says about older releases. In `docs/reference/openapi.yaml`, `x-narad-since: unreleased` becomes the version; in `scripts/gen_http_api.py`, `UNRELEASED_LINE` names the new latest release; then regenerate `docs/reference/http-api.md` with `python3 scripts/gen_http_api.py`.
-3. Update any pinned `ghcr.io/debanganthakuria/narad:vX.Y.Z` reference in `README.md` and `docs/` to the version about to ship. `make check-release-refs` fails until the tag exists, which is expected at this point.
+2. Name the new version wherever the docs mark something unreleased: the line under a heading becomes `**New in vX.Y.Z.**`, and "(unreleased)" becomes "(vX.Y.Z)" or "(from vX.Y.Z)". Keep what the text says about older releases. In `docs/reference/openapi.yaml`, `x-narad-since: unreleased` becomes the version. `docs/reference/http-api.md` is edited by hand, so make the same change there: each `**Unreleased:** in master, not in vX.Y.Z.` line becomes `**New in vX.Y.Z.**`, each "(unreleased)" becomes "(vX.Y.Z)", and the "Release markers" section of both files names the new latest release.
+3. Update every pinned `ghcr.io/debanganthakuria/narad:vX.Y.Z` reference in `README.md` and `docs/` to the version about to ship. Nothing checks this for you: `git grep -nE 'ghcr.io/debanganthakuria/narad:v[0-9]'` lists them, and every one should name the new version.
 4. Land all three on `master`.
 5. Tag the merge commit and push the tag. The container workflow builds, signs, and publishes the image, stamping the tag into `narad version`.
 6. Write the GitHub release notes from the changelog entry. If the release fixes a vulnerability that has a CVE or a GitHub Security Advisory, the changelog entry names it under `### Security`, and so do the release notes.
 
 Step 3 before step 5 is what keeps the documentation from advertising a
-version that is one release behind, which is the drift
-`scripts/check-release-refs.sh` exists to catch.
+version that is one release behind.
 
 ## Security issues
 

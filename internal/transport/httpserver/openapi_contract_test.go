@@ -1,8 +1,8 @@
 package httpserver
 
 // The OpenAPI contract test: docs/reference/openapi.yaml against the code.
-// That file is the one spec: the docs site publishes it, and
-// scripts/gen_http_api.py renders the HTTP API reference page from it.
+// That file is the one spec: the docs site publishes it, and the HTTP API
+// reference page (docs/reference/http-api.md) is edited by hand to match.
 //
 // TestOpenAPIContractRoutes fails when router.go registers a route the
 // spec does not document, or the spec documents one the router does not

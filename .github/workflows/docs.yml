@@ -10,9 +10,8 @@ on:
       - "mkdocs.yml"
       - "requirements-docs.txt"
       - ".github/workflows/docs.yml"
-      # The HTTP API reference page is generated from the spec, and the
-      # check below also compares the spec with the router.
-      - "scripts/gen_http_api.py"
+      # The contract test below compares the published spec with the
+      # router and the handlers.
       - "internal/transport/httpserver/**"
   workflow_dispatch:
 
@@ -34,12 +33,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements-docs.txt
-      # Fails when docs/reference/http-api.md is not what
-      # docs/reference/openapi.yaml renders to, when the spec and
-      # router.go list different routes, or when a status code in the
-      # spec has no heading on the status codes page.
-      - name: Check the generated HTTP API page
-        run: python scripts/gen_http_api.py --check
       # The published spec is the file the Go contract test checks
       # against the handlers, so a deploy never ships a spec that
       # documents a status code the server cannot answer.

@@ -127,7 +127,7 @@ security fixes is in [SECURITY.md](./SECURITY.md).
 
 ```sh
 make tools-install   # gofumpt + goimports, once
-make check           # fmt-check + vet + docs version check + test
+make check           # fmt-check + vet + test
 make build           # bin/narad
 ```
 
