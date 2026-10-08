@@ -3,6 +3,7 @@ package clusterrpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -91,6 +92,37 @@ func TestRequestThatTimedOutAfterWritingIsNotMarkedNotSent(t *testing.T) {
 		client.closeWithError(errors.New("peer went away"))
 		if err := <-errc; err == nil || errors.Is(err, ErrNotSent) {
 			t.Fatalf("error = %v, want a failure that does not claim the written request was not sent", err)
+		}
+	})
+	// The pool's probe closes a connection with the error of a ping that
+	// never went out, which wraps ErrNotSent. The requests already written
+	// on that connection may have been applied, so that cause must reach
+	// them without the ErrNotSent mark, keeping its text and its timeout.
+	t.Run("stream fails with a not-sent cause while the reply is pending", func(t *testing.T) {
+		client, server := newTestStreamClient(t, 5*time.Second)
+		frames := serveFrames(server)
+		errc := make(chan error, 1)
+		go func() {
+			_, _, err := client.roundTrip(context.Background(), time.Now().Add(5*time.Second), clusterwire.StreamFrameNodeRequest, []byte("x"))
+			errc <- err
+		}()
+		<-frames
+		cause := fmt.Errorf("peer unresponsive after a request timed out: %w", notSent(context.DeadlineExceeded))
+		client.closeWithError(cause)
+		err := <-errc
+		if err == nil || errors.Is(err, ErrNotSent) {
+			t.Fatalf("error = %v, want a failure that does not claim the written request was not sent", err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("error = %v, want it to still wrap context.DeadlineExceeded", err)
+		}
+		if err.Error() != cause.Error() {
+			t.Fatalf("error text = %q, want %q", err.Error(), cause.Error())
+		}
+		// A request that tries the closed stream afterwards never went out.
+		_, _, err = client.roundTrip(context.Background(), time.Now().Add(time.Second), clusterwire.StreamFrameNodeRequest, []byte("y"))
+		if !errors.Is(err, ErrNotSent) {
+			t.Fatalf("later request error = %v, want ErrNotSent", err)
 		}
 	})
 }

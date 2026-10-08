@@ -75,6 +75,32 @@ func notSent(err error) error {
 	return fmt.Errorf("%w: %w", ErrNotSent, err)
 }
 
+// maybeSent strips the ErrNotSent mark from err, keeping its text and
+// every other error it wraps. A stream that closes fails the requests
+// already written on it, which the peer may have applied, so the cause
+// they get must not claim they were never sent, even when it came from
+// a request that was not (the pool's probe closes a connection with the
+// error of a ping that never went out).
+func maybeSent(err error) error {
+	if err == nil || !errors.Is(err, ErrNotSent) {
+		return err
+	}
+	return sentError{err: err}
+}
+
+// sentError is err without its ErrNotSent mark (see maybeSent). It has
+// no Unwrap, so errors.Is and errors.As reach err only through its own
+// Is and As, which refuse ErrNotSent.
+type sentError struct{ err error }
+
+func (e sentError) Error() string { return e.err.Error() }
+
+func (e sentError) Is(target error) bool {
+	return target != ErrNotSent && errors.Is(e.err, target)
+}
+
+func (e sentError) As(target any) bool { return errors.As(e.err, target) }
+
 // timerPool recycles the timers that bound reply and queue waits, so a
 // request carrying a timeout does not allocate one. Reuse is safe: since
 // Go 1.23, Stop and Reset guarantee that no value from before the call
@@ -483,6 +509,7 @@ func (c *streamClient) closeWithError(err error) {
 	if err == nil {
 		err = errors.New("cluster stream closed")
 	}
+	err = maybeSent(err)
 	c.closeMu.Lock()
 	if c.closeErr == nil {
 		c.closeErr = err
