@@ -543,6 +543,37 @@ func remoteStart(stub topic.Topic, p int) int64 {
 	return 0
 }
 
+// reconcileRemoteRow reads an owner's row against the link as this
+// node's replica applied it. The owner reports what its cursor last
+// saw, which trails a pause, resume or skip by the time its own replica
+// takes to apply it and its cursor takes to read the stub again
+// (fanout_remote.go remoteBeforeRead), so straight after a write the
+// rows can contradict the answer the client just got:
+//
+//   - paused while the link here is not: the resume is applied here, the
+//     owner has not caught up, so the row reads running;
+//   - running while the link here is paused: it reads paused;
+//   - blocked on a record the link here has skipped: the skip is
+//     applied here, but what the cursor meets next is not known yet, so
+//     the block goes and a row stalled on it reads unknown, which is no
+//     stall (topic wait keeps polling).
+//
+// A state that needs a fix is never changed by the pause flag.
+func reconcileRemoteRow(row *remotePartitionRow, link topic.RemoteLink) {
+	if b := row.BlockedAt; b != nil && link.Skipped(b.Partition, b.Offset) {
+		if row.State == b.State {
+			row.State = topic.RemoteStateUnknown
+		}
+		row.BlockedAt = nil
+	}
+	switch {
+	case row.State == topic.RemoteStatePaused && !link.Paused:
+		row.State = topic.RemoteStateRunning
+	case row.State == topic.RemoteStateRunning && link.Paused:
+		row.State = topic.RemoteStatePaused
+	}
+}
+
 // remoteStatus folds the owners' cursor stats of one remote child into
 // its listing entry.
 func remoteStatus(parent, stub topic.Topic, stats []topic.FanoutCursorStat, complete, admin, withPartitions bool, now time.Time) *remoteChildStatus {
@@ -568,9 +599,10 @@ func remoteStatus(parent, stub topic.Topic, stats []topic.FanoutCursorStat, comp
 			if s.State != "" {
 				row.State = s.State
 			}
+			reconcileRemoteRow(&row, *stub.Remote)
 			st.LagSeconds = max(st.LagSeconds, s.LagSeconds)
-			if s.BlockedAt != nil && (st.BlockedAt == nil || s.BlockedAt.Partition < st.BlockedAt.Partition) {
-				b := *s.BlockedAt
+			if row.BlockedAt != nil && (st.BlockedAt == nil || row.BlockedAt.Partition < st.BlockedAt.Partition) {
+				b := *row.BlockedAt
 				st.BlockedAt = &b
 			}
 			// A cursor never verified is the stalest of all: it counts

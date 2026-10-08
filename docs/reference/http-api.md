@@ -854,7 +854,7 @@ target. The states are listed in
 | `children[].remote.skip`<br>object | Per parent partition, the offsets an admin accepted to lose, ascending, at most 4000. A cursor drops a record only while it is stuck on exactly one of them. |
 | `children[].remote.created_by`<br>string | The admin who attached it; shown to admins only. |
 | `children[].paused` (v3.2.0)<br>boolean | A remote child only. `true` while it is paused. |
-| `children[].state` (v3.2.0)<br>string | A remote child only. Its worst partition's [link state](remote-children.md#link-states), `running` or `paused` when healthy; `unknown` when a partition owner did not report. |
+| `children[].state` (v3.2.0)<br>string | A remote child only. Its worst partition's [link state](remote-children.md#link-states), `running` or `paused` when healthy; `unknown` when a partition owner did not report, or when its owner is still stuck on a record this node shows as skipped. `running` and `paused` follow the pause flag as the node answering has applied it, so a read straight after a pause or resume agrees with it even while an owner has not caught up. |
 | `children[].lag_seconds` (v3.2.0)<br>number | A remote child only. Age, on the owners' clocks, of the oldest parent record not yet accepted by the remote, the worst partition's: the link's live recovery point. |
 | `children[].retention_headroom_seconds` (v3.2.0)<br>number | A remote child only. The parent's retention minus `lag_seconds`, the time left before drop-behind. Absent when the parent keeps messages forever. |
 | `children[].source_drained` (v3.2.0)<br>boolean | A remote child only. `true` once the parent's consumers have acked past the link's start offset on every partition. |

@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -495,6 +496,70 @@ func TestRemoteStatusFolding(t *testing.T) {
 	st = remoteStatus(parent, stub, []topic.FanoutCursorStat{f(0, topic.RemoteStateRunning, 5), f(1, topic.RemoteStateRunning, 5)}, true, true, false, now)
 	if st.State != topic.RemoteStateRunning || !st.Unverified {
 		t.Fatalf("running with no target check: %+v, want unverified", st)
+	}
+}
+
+// The listing follows the pause flag this node's replica applied: an
+// owner still reporting paused after the resume applied here (its own
+// replica, or its cursor's next look at the stub, lags) reads as
+// running, and an owner still reporting running after a pause applied
+// here reads as paused, on every row as well as on the link. A state
+// that needs a fix is never hidden by the flag.
+func TestRemoteStatusFollowsTheAppliedPauseFlag(t *testing.T) {
+	parent := topic.Topic{Name: "orders", Partitions: 2}
+	link := func(paused bool) topic.Topic {
+		return topic.Topic{Name: "s", Remote: &topic.RemoteLink{Name: "b", Topic: "orders", Paused: paused}, AttachOffsets: []int64{0, 0}}
+	}
+	f := func(p int, state string) topic.FanoutCursorStat {
+		return topic.FanoutCursorStat{Child: "s", Partition: p, State: state}
+	}
+	now := time.Now()
+	rowStates := func(st *remoteChildStatus) []string {
+		var out []string
+		for _, r := range st.Partitions {
+			out = append(out, r.State)
+		}
+		return out
+	}
+
+	st := remoteStatus(parent, link(false), []topic.FanoutCursorStat{f(0, topic.RemoteStateRunning), f(1, topic.RemoteStatePaused)}, true, true, true, now)
+	if st.State != topic.RemoteStateRunning || !slices.Equal(rowStates(st), []string{"running", "running"}) {
+		t.Fatalf("resumed here, one owner still paused: state %s rows %v, want running everywhere", st.State, rowStates(st))
+	}
+	st = remoteStatus(parent, link(true), []topic.FanoutCursorStat{f(0, topic.RemoteStateRunning), f(1, topic.RemoteStateRunning)}, true, true, true, now)
+	if st.State != topic.RemoteStatePaused || !slices.Equal(rowStates(st), []string{"paused", "paused"}) {
+		t.Fatalf("paused here, owners still running: state %s rows %v, want paused everywhere", st.State, rowStates(st))
+	}
+	st = remoteStatus(parent, link(true), []topic.FanoutCursorStat{f(0, topic.RemoteStateRunning), f(1, topic.RemoteStateAuthFailed)}, true, true, true, now)
+	if st.State != topic.RemoteStateAuthFailed || !slices.Equal(rowStates(st), []string{"paused", "auth_failed"}) {
+		t.Fatalf("paused here, one owner auth_failed: state %s rows %v, want auth_failed to win", st.State, rowStates(st))
+	}
+	st = remoteStatus(parent, link(false), []topic.FanoutCursorStat{f(0, topic.RemoteStateRunning), f(1, topic.RemoteStateAuthFailed)}, true, true, true, now)
+	if st.State != topic.RemoteStateAuthFailed {
+		t.Fatalf("running here, one owner auth_failed: state %s, want auth_failed", st.State)
+	}
+}
+
+// A block on a record this node's replica shows as skipped is one its
+// owner has not applied yet: what the cursor meets next is not known,
+// so the row reads unknown (no stall that stops topic wait) and the
+// block is not reported. A block on a record nobody skipped stays.
+func TestRemoteStatusDropsABlockTheStubSkipped(t *testing.T) {
+	parent := topic.Topic{Name: "orders", Partitions: 2}
+	stub := topic.Topic{Name: "s", Remote: &topic.RemoteLink{Name: "b", Topic: "orders", Skip: map[int][]int64{1: {7}}}, AttachOffsets: []int64{0, 0}}
+	blocked := func(off int64) topic.FanoutCursorStat {
+		return topic.FanoutCursorStat{Child: "s", Partition: 1, State: topic.RemoteStateRejectedRecord, BlockedAt: &topic.RemoteBlock{Partition: 1, Offset: off, State: topic.RemoteStateRejectedRecord}}
+	}
+	running := topic.FanoutCursorStat{Child: "s", Partition: 0, State: topic.RemoteStateRunning}
+	now := time.Now()
+
+	st := remoteStatus(parent, stub, []topic.FanoutCursorStat{running, blocked(7)}, true, true, true, now)
+	if st.State != topic.RemoteStateUnknown || st.BlockedAt != nil || st.Partitions[1].BlockedAt != nil || st.Partitions[1].State != topic.RemoteStateUnknown {
+		t.Fatalf("block on a skipped record: state %s blocked_at %+v row %+v, want unknown with no block", st.State, st.BlockedAt, st.Partitions[1])
+	}
+	st = remoteStatus(parent, stub, []topic.FanoutCursorStat{running, blocked(8)}, true, true, true, now)
+	if st.State != topic.RemoteStateRejectedRecord || st.BlockedAt == nil || st.BlockedAt.Offset != 8 {
+		t.Fatalf("block on a record nobody skipped: state %s blocked_at %+v, want rejected_record at 8", st.State, st.BlockedAt)
 	}
 }
 
