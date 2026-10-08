@@ -23,6 +23,5 @@ site/
 ops/*
 !ops/monitoring/
 
-# test driver binaries built at the repo root by mistake once (#185); never track them
+# test driver binary built at the repo root by mistake once (#185); never track it
 /integration
-/linearizability

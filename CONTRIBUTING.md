@@ -25,22 +25,20 @@ Useful targeted commands:
 go test ./cmd/narad
 go test ./internal/...
 go test ./tests/e2e/... -race
-go test ./tests/linearizability/...
 ```
 
-One suite does not run under `make test`: the nightly delivery-contract
-check. It starts a three-node cluster on loopback, kills and partitions
-nodes under load, and checks the recorded history against a sequential
-specification of at-least-once delivery.
+Two suites do not run under `make test`: the cluster integration and chaos
+runs. Each starts a three-node cluster on loopback and drives it with the
+load driver in `tests/integration`; the chaos run also restarts nodes under
+load. CI runs both on every pull request. To run them locally:
 
 ```sh
-./scripts/linearizability-nightly.sh
+make local-cluster-e2e
+make local-cluster-chaos
 ```
 
-Partition faults need `iptables` and passwordless `sudo`; without them it
-injects kills only, which is the normal case on a laptop. The verdicts, the
-flags, and what the check does not catch are in
-[Checking the Delivery Contract](https://debanganthakuria.github.io/narad/understand/linearizability/).
+What they check, and what they cannot catch, is in
+[Linearizability](https://debanganthakuria.github.io/narad/understand/linearizability/).
 
 ## Test policy
 

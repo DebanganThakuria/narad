@@ -42,7 +42,6 @@ func parseConfigTo(w io.Writer, args []string) (config, error) {
 	flagSet.BoolVar(&cfg.fatalDupAfterAck, "fatal-dup-after-ack", true, "steady mode: abort on a message redelivered after its ack (off for broker-restart runs; the count is still reported)")
 	flagSet.BoolVar(&cfg.fatalDupBeforeAck, "fatal-dup-before-ack", true, "steady mode: abort when two acks for one message both return 204, which means two consumers held a live lease on it at once")
 	flagSet.BoolVar(&cfg.noSchema, "no-schema", false, "create topics without a message schema (measures the cost of produce-side schema validation)")
-	flagSet.StringVar(&cfg.historyPath, "history", "", "steady mode: write a JSONL operation history to this path for tests/linearizability to check")
 	if err := flagSet.Parse(args); err != nil {
 		return cfg, err
 	}
