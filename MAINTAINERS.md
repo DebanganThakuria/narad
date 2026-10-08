@@ -14,7 +14,7 @@ people's, and stay around for a couple of release cycles. The details are
 
 | Name | GitHub ID | Company/Organization | Role |
 |---|---|---|---|
-| Debangan Thakuria | [@DebanganThakuria](https://github.com/DebanganThakuria) | TODO-ORG | Lead maintainer |
+| Debangan Thakuria | [@DebanganThakuria](https://github.com/DebanganThakuria) | Independent | Lead maintainer |
 
 ## What a single maintainer means for you
 
