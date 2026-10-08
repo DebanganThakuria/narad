@@ -37,10 +37,14 @@ laptop unchanged from how it runs in Kubernetes.
 
 ```sh
 brew install debanganthakuria/narad/narad
-# or: go install github.com/debanganthakuria/narad/cmd/narad@latest
 
 narad server start --dev          # local playground on loopback, auth off
 ```
+
+To build from source instead, clone the latest release tag and run `make build`, as the
+[quickstart](https://debanganthakuria.github.io/narad/get-started/quickstart/) shows. Do not use
+`go install ...@latest`: it resolves to an old, unsupported v1 release, because the module path
+has no `/v3` suffix.
 
 In another terminal:
 

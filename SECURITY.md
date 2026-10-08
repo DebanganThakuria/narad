@@ -43,12 +43,19 @@ so these are goals rather than a contractual SLA:
 | Initial assessment and severity | 10 business days |
 | Fix released for a confirmed high-severity issue | 30 days |
 
+Behind those goals is one firm commitment: every report gets an initial
+response within 14 days of arriving, even when the assessment takes longer.
+
 ## Disclosure process
 
 The project acknowledges reports, assesses impact, develops a fix, and
 coordinates disclosure once affected users have a reasonable opportunity to
 upgrade. Fixes are published as a GitHub Security Advisory with a CVE where
 one is warranted, and noted in [CHANGELOG.md](./CHANGELOG.md).
+
+Every release that fixes a vulnerability with a CVE or a GitHub Security
+Advisory names it in the `### Security` section of that release's
+`CHANGELOG.md` entry and in its GitHub release notes.
 
 ## Scope
 

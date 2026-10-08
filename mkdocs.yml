@@ -163,6 +163,7 @@ nav:
       - Quickstart: get-started/quickstart.md
       - Core concepts: get-started/concepts.md
       - Compare Narad with other brokers: get-started/compare.md
+      - Get help and contribute: get-started/community.md
   - Build:
       - Setup:
           - Connect and authenticate: build/connect.md
