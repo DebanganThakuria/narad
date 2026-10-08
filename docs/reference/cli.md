@@ -201,7 +201,7 @@ It ends with a line such as `2 message(s) replayed from p1 [0, 2)` on standard e
 | `--count <n>` | `10000` | Messages to produce. |
 | `--size <bytes>` | `256` | Payload size. |
 | `--workers <n>` | `8` | Concurrent workers. |
-| `--consume` | off | Consume and ack the messages afterwards. |
+| `--consume` | off | Consume and ack the messages afterwards. The consume rate is taken up to the last message acked; a worker stops after two empty polls, and that wait is not counted. If fewer messages were drained than produced, a second line says how many were left (still leased by another consumer, or not yet visible). |
 
 It prints the produce count, failures, rate, and p50, p95 and p99 latency, and with `--consume` the consume rate. What the numbers mean for sizing is in [Capacity and disk sizing](capacity.md).
 
