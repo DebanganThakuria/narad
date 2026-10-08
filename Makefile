@@ -127,14 +127,6 @@ cluster-load: ## Run the integration/load driver against existing nodes. Use NAR
 	fi
 	$(GO) run ./tests/integration --nodes "$(NARAD_NODES)" $(ARGS)
 
-.PHONY: local-monitoring-start
-local-monitoring-start: ## Start local Prometheus and import the Grafana dashboards.
-	./scripts/local-monitoring-start.sh
-
-.PHONY: local-monitoring-stop
-local-monitoring-stop: ## Stop local Prometheus. Pass ARGS='--grafana' to stop Homebrew Grafana too.
-	./scripts/local-monitoring-stop.sh $(ARGS)
-
 # ---- developer setup -----------------------------------------------------
 
 # Pinned, not @latest. A formatter that silently moves version reformats

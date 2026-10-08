@@ -1,10 +1,10 @@
 ---
-description: "Scrape Narad's Prometheus metrics, import the ready-made Grafana dashboard, and set up the seven alerts that catch real trouble."
+description: "Scrape Narad's Prometheus metrics, graph the series that matter, and set up the seven alerts that catch real trouble."
 ---
 
 # Monitor and alert
 
-Scrape Narad's Prometheus metrics, import the ready-made Grafana dashboard, and set up the seven alerts that catch real trouble.
+Scrape Narad's Prometheus metrics, graph the series that matter, and set up the seven alerts that catch real trouble.
 
 Before you start: a cluster installed with the Helm chart, and a Prometheus that can reach its pods.
 
@@ -35,16 +35,28 @@ Every metric name starts with `narad_`. Point Prometheus at port 9100 in one of 
 
 Port 9100 is unauthenticated and names every topic, so keep it inside the cluster ([Production checklist](production-checklist.md#metrics-exposure)). The same listener answers `/healthz` and `/readyz` for the kubelet's probes ([Helm values reference](../reference/helm-values.md#ports-and-probes)). Every metric is described in the [Metrics reference](../reference/metrics.md).
 
-## Import the dashboard {#dashboard}
+## Graph the metrics {#dashboard}
 
-The repository ships a Grafana dashboard, [`ops/monitoring/grafana/dashboards/narad-node-dashboard.json`](https://github.com/DebanganThakuria/narad/blob/master/ops/monitoring/grafana/dashboards/narad-node-dashboard.json). Import the JSON file into Grafana. Its 14 panels cover message throughput, HTTP requests and latency, errors and rejections, consumer backlog and age, disk usage and the largest topics, storage latency and throughput, process CPU, memory and runtime counts, and an inventory of topics and partitions.
+Narad does not ship a dashboard. These queries cover what a dashboard per node needs; add a `job` or `instance` selector to match your scrape config.
 
-The panels select `job="narad"`. Name your scrape job `narad`, or change that selector after the import.
+| Panel | Queries |
+|---|---|
+| Message throughput | `sum(rate(narad_messages_produced_total[1m]))`, `sum(rate(narad_messages_consumed_total[1m]))`, and empty consumes, `sum(rate(narad_consume_empty_total[1m]))` |
+| HTTP requests | `sum by (route, status) (rate(narad_http_requests_total[1m]))` |
+| HTTP latency | `histogram_quantile(0.99, sum by (le, route) (rate(narad_http_request_duration_seconds_bucket[5m])))` |
+| Errors and rejections | `sum by (route, status) (rate(narad_http_requests_total{status!~"2.."}[1m]))`, `sum by (component, kind) (rate(narad_errors_total[1m]))`, `sum by (reason) (rate(narad_produce_rejections_total[1m]))` |
+| Consumer backlog | `sum(narad_consumer_lag_messages)`, `sum(narad_inflight_size)`, `sum(narad_acked_ahead_size)` |
+| Consumer age and wait | `max(narad_oldest_unconsumed_message_age_seconds)`, `histogram_quantile(0.95, sum by (le, outcome) (rate(narad_consume_wait_seconds_bucket[5m])))` |
+| Disk | `narad_data_dir_size_bytes`, `narad_data_dir_available_bytes`, and the largest topics, `topk(10, sum by (topic) (narad_topic_bytes))` |
+| Storage latency | `histogram_quantile(0.95, sum by (le) (rate(narad_storage_flush_duration_seconds_bucket[5m])))`, and the same over `narad_storage_fsync_duration_seconds_bucket` |
+| Storage throughput | `sum(rate(narad_storage_flush_bytes_total[1m]))`, `sum(rate(narad_storage_retention_bytes_deleted_total[1m]))`, `sum(rate(narad_bytes_produced_total[1m]))` |
+| Process | `rate(process_cpu_seconds_total[1m])`, `process_resident_memory_bytes`, `go_memstats_heap_alloc_bytes`, `go_goroutines`, `process_open_fds` |
+| Inventory | `narad_topics_total`, `narad_partitions_total`, `narad_boot_duration_seconds` |
 
-From v3.1.0, two panels read differently from their titles:
+From v3.1.0, two series read differently from their names:
 
-- **HTTP Requests** counts requests, not messages. One batch request carries up to 100 messages, so once clients batch, read **Message Throughput** instead.
-- **Storage Latency** still plots `narad_storage_high_watermark_persist_duration_seconds`, which no longer measures a commit.
+- `narad_http_requests_total` counts requests, not messages. One batch request carries up to 100 messages, so once clients batch, read throughput from `narad_messages_produced_total` and `narad_messages_consumed_total` instead.
+- `narad_storage_high_watermark_persist_duration_seconds` no longer measures a commit, so leave it off a storage latency panel.
 
 ## Set up the alerts {#alerts}
 
