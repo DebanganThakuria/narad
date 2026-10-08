@@ -117,7 +117,7 @@ Three limits are structural rather than unfinished, and they are the ones to wei
 
 - **No ordering guarantee.** Five documented mechanisms reorder. Carry a sequence in the payload if you need one, and make handlers idempotent, which at-least-once already requires. See [Guarantees](https://debanganthakuria.github.io/narad/understand/delivery-contract/).
 - **No synchronous replication.** Partitions have a single owner. Losing a node's volume loses that node's unreplicated data, so volume snapshots and the async [replica pattern](https://debanganthakuria.github.io/narad/operate/backups/#replica-children) are the tools against disk loss. This is the top item on the roadmap.
-- **Months of track record, not years.** The evidence is the project's own test suites, self-administered, and worth exactly that. Every night a three-node cluster takes load while nodes are killed and cut off from their peers, and a [linearizability checker](https://debanganthakuria.github.io/narad/understand/linearizability/) requires every anomaly to be accounted for. That is a real gate. It is not the same as years of other people's production traffic.
+- **Months of track record, not years.** The evidence is the project's own test suites, self-administered, and worth exactly that. Every pull request runs a three-node cluster under load while its nodes restart, and fails unless every message is acked ([how the contract is tested](https://debanganthakuria.github.io/narad/understand/linearizability/)). That is a real gate. It is not the same as years of other people's production traffic.
 
 The full concession list, with what to pick instead when one of these is a hard requirement,
 is in [Compare](https://debanganthakuria.github.io/narad/get-started/compare/). Which versions get
@@ -127,7 +127,7 @@ security fixes is in [SECURITY.md](./SECURITY.md).
 
 ```sh
 make tools-install   # gofumpt + goimports, once
-make check           # fmt-check + vet + docs version check + test
+make check           # fmt-check + vet + test
 make build           # bin/narad
 ```
 

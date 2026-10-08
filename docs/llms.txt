@@ -44,7 +44,7 @@ These docs track the master branch; the latest release is v3.2.2, what v3.2.0 ad
 - [Raft TLS certificates: enable and rotate](https://debanganthakuria.github.io/narad/operate/raft-tls/): Turn on mutual TLS for the Raft port, then renew and rotate its certificates without losing messages.
 - [Manage users and grants](https://debanganthakuria.github.io/narad/operate/users/): Create a user for each service and give it only the grants it needs.
 - [Manage remotes](https://debanganthakuria.github.io/narad/operate/remotes/): New in v3.2.0. Register the other Narad clusters this one may copy topics to, rotate their passwords and the key that protects them, and know what that storage risks.
-- [Monitor and alert](https://debanganthakuria.github.io/narad/operate/monitoring/): Scrape Narad's Prometheus metrics, import the ready-made Grafana dashboard, and set up the seven alerts that catch real trouble.
+- [Monitor and alert](https://debanganthakuria.github.io/narad/operate/monitoring/): Scrape Narad's Prometheus metrics, graph the series that matter, and set up the seven alerts that catch real trouble.
 - [Scale out and in](https://debanganthakuria.github.io/narad/operate/scaling/): Add nodes to a running Narad cluster, or drain nodes and remove them, without stranding any partition.
 - [Back up and replicate topics](https://debanganthakuria.github.io/narad/operate/backups/): Keep a second copy of a topic on other nodes, and restore a node from a volume snapshot when its disk is lost.
 - [Upgrade Narad](https://debanganthakuria.github.io/narad/operate/upgrade/): Move a cluster to a new Narad release with a rolling restart, and roll it back safely if you need to.
@@ -58,7 +58,7 @@ These docs track the master branch; the latest release is v3.2.2, what v3.2.0 ad
 
 - [Architecture overview](https://debanganthakuria.github.io/narad/understand/): Learn how Narad is put together: what every node runs, where data lives, and how one message travels from producer to consumer.
 - [Delivery contract](https://debanganthakuria.github.io/narad/understand/delivery-contract/): Learn what Narad promises about delivery, durability, ordering and availability, and what each kind of failure does to your messages.
-- [Linearizability check: the contract, tested nightly](https://debanganthakuria.github.io/narad/understand/linearizability/): Learn how a nightly run checks Narad's delivery contract: what it records, how a model judges the history, and what it cannot catch.
+- [Linearizability: the contract, and how it is tested](https://debanganthakuria.github.io/narad/understand/linearizability/): Learn what it means for Narad's delivery contract to linearize, which tests check it, and what those tests cannot catch.
 - [Produce path](https://debanganthakuria.github.io/narad/understand/produce-path/): Learn how a produce becomes a durable, visible record: the local write behind the 202, the background dispatch, and the commit on the owner.
 - [Storage engine](https://debanganthakuria.github.io/narad/understand/storage-engine/): Learn how Narad stores a partition on disk: segments of CRC-checked frames, the high watermark that bounds what consumers see, crash recovery and retention.
 - [Consume path](https://debanganthakuria.github.io/narad/understand/consume-path/): Learn how Narad hands each message to one consumer at a time: in-memory leases, a durable frontier of settled messages, and consumes across nodes.

@@ -151,9 +151,9 @@ Every status code, and whether to retry it, is in [Status codes and errors](../r
 
 ## How we check the contract {#how-we-check}
 
-A nightly job runs a three-node cluster under load, kills nodes and cuts them off from their peers, and records every client operation with the interval it was in flight for. It then checks that history against a model of this contract. A message delivered again after a confirmed ack must fall inside a fault window, or the run fails. A second run injects no faults and fails on any redelivery after an ack at all.
+Every pull request runs a three-node cluster on loopback through two suites. One produces, consumes and acks a known set of messages with nothing broken, and fails on any message delivered twice or never delivered. The other does the same while nodes are stopped and restarted, and fails unless every message is acked. Both fail on a message the run never produced, or one on the wrong topic.
 
-The method, the verdicts and what the check cannot catch are in [Linearizability check](linearizability.md).
+The property these runs check, the checks that run by hand, and what none of them can catch are in [Linearizability](linearizability.md).
 
 ## Next steps
 

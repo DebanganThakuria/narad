@@ -202,7 +202,7 @@ nav:
       - Overview:
           - Architecture overview: understand/index.md
           - Delivery contract: understand/delivery-contract.md
-          - Linearizability check: understand/linearizability.md
+          - Linearizability: understand/linearizability.md
       - Data path:
           - Produce path: understand/produce-path.md
           - Storage engine: understand/storage-engine.md

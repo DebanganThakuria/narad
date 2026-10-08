@@ -15,14 +15,11 @@ tmp/
 site/
 /narad
 
-# ops/ carries only monitoring in the repo. Everything else under it is
-# local investigation work: benchmark harnesses, profiling drivers, the
-# docker clusters used to validate a change and the results they
-# produced. Useful to keep on disk, not useful to ship or review, and in
-# one case 91M of rebuilt binary.
-ops/*
-!ops/monitoring/
+# ops/ is local investigation work: benchmark harnesses, profiling
+# drivers, the docker clusters used to validate a change and the results
+# they produced. Useful to keep on disk, not useful to ship or review, and
+# in one case 91M of rebuilt binary.
+/ops/
 
-# test driver binaries built at the repo root by mistake once (#185); never track them
+# test driver binary built at the repo root by mistake once (#185); never track it
 /integration
-/linearizability

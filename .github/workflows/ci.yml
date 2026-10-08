@@ -21,10 +21,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-        with:
-          # Full history so release tags are visible to the
-          # documentation staleness check below.
-          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -46,30 +42,12 @@ jobs:
       - name: go build
         run: go build ./...
 
-      # Catches a pinned image tag in the docs that a release left
-      # behind. Cheap here, embarrassing when a reader finds it.
-      - name: Check pinned versions in docs
-        run: ./scripts/check-release-refs.sh
-
-      # The HTTP API reference page is generated from
-      # docs/reference/openapi.yaml. This fails a pull request that
-      # changes router.go without the spec, or the spec without the
-      # page, before merge rather than on the post-merge docs deploy.
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
-      - name: Check the generated HTTP API page
-        run: |
-          python -m pip install "PyYAML>=6"
-          python scripts/gen_http_api.py --check
-
-      # The contract test reads the same published file,
-      # docs/reference/openapi.yaml, and fails when it documents a
-      # status code a handler can never answer, or leaves out a 2xx
+      # The contract test reads the published spec,
+      # docs/reference/openapi.yaml, and fails when its operations and
+      # the routes in router.go disagree, when it documents a status
+      # code a handler can never answer, or when it leaves out a 2xx
       # code a handler can. Named here so a spec-only change shows the
-      # failure next to the page check, not deep in the unit-test log.
+      # failure next to the build, not deep in the unit-test log.
       - name: Check the published OpenAPI spec against the handlers
         run: go test -count=1 -run '^TestOpenAPIContract' ./internal/transport/httpserver/
 

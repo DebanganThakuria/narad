@@ -80,7 +80,7 @@ A join request that declares an **empty data directory** is a deliberate re-add:
 - `/readyz` is live: a node answers ready only while it has a leader in view, has heard from it within 5 s (or is the leader), and its ownership view has caught up once since start. Losing the leader turns it not ready again.
 - A dead node's partitions are **not** reassigned, because their data is on that node's disk. Produce reroutes around them, and a consume pinned to one of them fails until the node returns.
 - Graceful shutdown transfers Raft leadership first, so planned restarts fail over in about 150 ms.
-- Rolling restarts under full traffic were run dozens of times against the soak workload before it was removed in September 2026 (PR #211). The nightly [linearizability check](linearizability.md) now kills and partitions nodes under load every night.
+- Rolling restarts under full traffic were run dozens of times against the soak workload before it was removed in September 2026 (PR #211). The chaos run in CI now restarts nodes under load on every pull request ([How Narad is tested](linearizability.md#how-tested)).
 
 ## Crash recovery bugs {#crash-recovery-bugs}
 
@@ -107,7 +107,7 @@ The rules these fixes add up to are in [Stale replicas](metastore-and-raft.md#st
 
 ## Chaos test results {#chaos-results}
 
-These scenarios ran under 300 messages per second of soak traffic, with a Redis ledger that detected any lost message. The soak harness was removed in September 2026; the nightly [linearizability check](linearizability.md) now kills and partitions nodes under load instead.
+These scenarios ran under 300 messages per second of soak traffic, with a Redis ledger that detected any lost message. The soak harness was removed in September 2026; what runs now, and what it cannot catch, is in [Linearizability](linearizability.md#how-tested).
 
 | Scenario | Result |
 |---|---|

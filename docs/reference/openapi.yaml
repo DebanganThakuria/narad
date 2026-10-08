@@ -3,15 +3,16 @@
 # Written by hand from internal/transport/httpserver/router.go and the
 # request and response types under internal/transport/httpserver/handlers.
 # This is the only spec: the docs site publishes it as-is.
-# scripts/gen_http_api.py renders docs/reference/http-api.md from this file
-# and, with --check, fails when the routes in router.go and the operations
-# here disagree. The Go contract test
-# (internal/transport/httpserver/openapi_contract_test.go) fails when a
-# status code here is one the handler cannot answer. Examples are pasted
-# from real runs, never typed.
+# docs/reference/http-api.md is edited by hand alongside this file: a
+# change to an operation, field, parameter or status code goes into both
+# in the same pull request. The Go contract test
+# (internal/transport/httpserver/openapi_contract_test.go) fails when the
+# routes in router.go and the operations here disagree, and when a status
+# code here is one the handler cannot answer. Examples are pasted from
+# real runs, never typed.
 #
 # Extensions:
-#   x-narad-lead      first paragraph of the generated page
+#   x-narad-lead      first paragraph of docs/reference/http-api.md
 #   x-narad-grant     the grant or role an operation needs
 #   x-narad-since     the release that added it ("v3.1.0"), or "unreleased"
 #                     for anything merged since the latest release

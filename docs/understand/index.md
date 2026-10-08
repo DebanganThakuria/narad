@@ -72,7 +72,7 @@ The bugs that taught these rules are in [Cluster lifecycle](cluster-lifecycle.md
 The pages in this section follow the path of a message, then the cluster around it:
 
 1. [Delivery contract](delivery-contract.md): what Narad promises, and what each failure does to your messages.
-2. [Linearizability check](linearizability.md): how a nightly run checks that contract.
+2. [Linearizability](linearizability.md): that contract as a property, and how it is tested.
 3. [Produce path](produce-path.md): from a produce request to a durable, visible record.
 4. [Storage engine](storage-engine.md): segments, frames, the high watermark and retention.
 5. [Consume path](consume-path.md): leases, acks and how they reach the disk, and consumes that cross nodes.
