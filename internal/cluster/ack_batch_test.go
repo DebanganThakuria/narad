@@ -63,9 +63,12 @@ func TestRouteAckBatchReportsNotSentPerHandle(t *testing.T) {
 		},
 	}}
 	handles := []consumer.Handle{
-		{Partition: 1, Offset: 1, Nonce: 1}, {Partition: 1, Offset: 2, Nonce: 1},
-		{Partition: 2, Offset: 1, Nonce: 1}, {Partition: 2, Offset: 2, Nonce: 1},
-		{Partition: 0, Offset: 1, Nonce: 1}, {Partition: 0, Offset: 2, Nonce: 1},
+		{Partition: 1, Offset: 1, Nonce: 1},
+		{Partition: 1, Offset: 2, Nonce: 1},
+		{Partition: 2, Offset: 1, Nonce: 1},
+		{Partition: 2, Offset: 2, Nonce: 1},
+		{Partition: 0, Offset: 1, Nonce: 1},
+		{Partition: 0, Offset: 2, Nonce: 1},
 	}
 	statuses := make([]int, len(handles))
 	msgs := make([]string, len(handles))
