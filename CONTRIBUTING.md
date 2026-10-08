@@ -38,7 +38,7 @@ make local-cluster-chaos
 ```
 
 What they check, and what they cannot catch, is in
-[Linearizability](https://debanganthakuria.github.io/narad/understand/linearizability/).
+[Linearizability](https://debanganthakuria.github.io/narad/understand/linearizability/#how-tested).
 
 ## Test policy
 

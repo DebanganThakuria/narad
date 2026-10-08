@@ -507,7 +507,7 @@ What a `202` promises, and what Narad trades for it.
 </div>
 <div class="nr-rows nr-rows--one" markdown>
 
-- **A `202` means fsynced to disk.** Delivery is at least once, so handlers must be idempotent. A nightly run kills and partitions a three-node cluster at 300 messages a second, and fails on any anomaly the contract does not explain. [The delivery contract, checked nightly](understand/linearizability.md){ .nr-more }
+- **A `202` means fsynced to disk.** Delivery is at least once, so handlers must be idempotent. Every pull request runs a three-node cluster under load while its nodes restart, and fails unless every message is acked. [How the contract is tested](understand/linearizability.md){ .nr-more }
 - **Ordering is not guaranteed.** Redelivery and rerouting around a dead node both reorder messages. Carry a sequence in the payload if you need one. [Every way order breaks](understand/delivery-contract.md#ordering){ .nr-more }
 - **Each partition is one copy on one volume.** Crashes and restarts lose nothing; a destroyed disk loses that node's partitions. For a second copy, add a replica child or snapshot the volumes. [Replication, when you ask for it](operate/backups.md#replica-children){ .nr-more }
 - **Fsync costs throughput.** On one shared 2 CPU / 2 GB box with 256-byte messages, Narad produced 10,454 msg/s, fifth of six brokers; RabbitMQ's quorum queue, the only other one there that fsyncs before it confirms, was about 1.25 times faster. Batches win most of it back: on three nodes, [batches of 100](reference/capacity.md#batched-throughput) sustained about 377,000 messages a second through produce, consume and ack. [Same compute, measured](get-started/compare.md#same-compute-measured-ourselves){ .nr-more }

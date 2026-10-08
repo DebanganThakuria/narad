@@ -58,7 +58,7 @@ These docs track the master branch; the latest release is v3.2.2, what v3.2.0 ad
 
 - [Architecture overview](https://debanganthakuria.github.io/narad/understand/): Learn how Narad is put together: what every node runs, where data lives, and how one message travels from producer to consumer.
 - [Delivery contract](https://debanganthakuria.github.io/narad/understand/delivery-contract/): Learn what Narad promises about delivery, durability, ordering and availability, and what each kind of failure does to your messages.
-- [Linearizability check: the contract, tested nightly](https://debanganthakuria.github.io/narad/understand/linearizability/): Learn how a nightly run checks Narad's delivery contract: what it records, how a model judges the history, and what it cannot catch.
+- [Linearizability: the contract, and how it is tested](https://debanganthakuria.github.io/narad/understand/linearizability/): Learn what it means for Narad's delivery contract to linearize, which tests check it, and what those tests cannot catch.
 - [Produce path](https://debanganthakuria.github.io/narad/understand/produce-path/): Learn how a produce becomes a durable, visible record: the local write behind the 202, the background dispatch, and the commit on the owner.
 - [Storage engine](https://debanganthakuria.github.io/narad/understand/storage-engine/): Learn how Narad stores a partition on disk: segments of CRC-checked frames, the high watermark that bounds what consumers see, crash recovery and retention.
 - [Consume path](https://debanganthakuria.github.io/narad/understand/consume-path/): Learn how Narad hands each message to one consumer at a time: in-memory leases, a durable frontier of settled messages, and consumes across nodes.

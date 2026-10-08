@@ -77,7 +77,7 @@ Narad beside SQS, Redis Streams and Pulsar:
 
 Narad, Pulsar and RabbitMQ quorum queues are the only systems here that fsync before acking by default. Narad gives up the other axis: it has **no synchronous replication**, so a destroyed disk loses data where Kafka, JetStream at R3 and quorum queues survive it. Each system guards against a different failure.
 
-Kafka, RabbitMQ, NATS and Redis have all been through [Jepsen](https://jepsen.io/analyses) analyses. Narad's evidence is its own. Before v1.0.0 it was a chaos matrix. Since September 2026 a [nightly linearizability check](../understand/linearizability.md) tests the delivery contract while nodes are killed and cut off from each other.
+Kafka, RabbitMQ, NATS and Redis have all been through [Jepsen](https://jepsen.io/analyses) analyses. Narad's evidence is its own. Before v1.0.0 it was a chaos matrix. Today every pull request runs a three-node cluster through load and through node restarts ([how the contract is tested](../understand/linearizability.md)).
 
 ## Throughput on similar compute {#throughput}
 
@@ -195,7 +195,7 @@ What Narad gives up, in one place:
 - **No ordering guarantee.** Narad spends ordering on availability. If you need a sequence, carry one in the payload; the [Delivery contract](../understand/delivery-contract.md#ordering) lists every way order breaks.
 - **No synchronous replication.** Each partition has one owner. The [replica child](../operate/backups.md#replica-children) pattern is asynchronous and opt-in.
 - **No stream-processing ecosystem.**
-- **A short track record.** The first release was in June 2026. v1.0.0 shipped after 300M+ soaked messages and a chaos matrix ([release notes](https://github.com/DebanganThakuria/narad/releases/tag/v1.0.0)), and the nightly linearizability check has run since September 2026. That is little next to more than a decade of production use for Kafka and RabbitMQ.
+- **A short track record.** The first release was in June 2026. v1.0.0 shipped after 300M+ soaked messages and a chaos matrix ([release notes](https://github.com/DebanganThakuria/narad/releases/tag/v1.0.0)), and every pull request now runs a three-node cluster through node restarts. That is little next to more than a decade of production use for Kafka and RabbitMQ.
 
 If one of these is a hard requirement, pick the tool that has it. If your problem is a durable work queue over plain HTTP, run as one binary, that is what Narad was built for.
 
