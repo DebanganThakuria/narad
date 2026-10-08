@@ -10,6 +10,9 @@ summarized more briefly than the 1.x and later entries.
 
 ## [Unreleased]
 
+### Removed
+- Tooling that is neither product code nor its tests, removed from the repository and kept for the maintainer outside it: the linearizability checker (`tests/linearizability`), `scripts/linearizability-nightly.sh` and its nightly workflow; the local monitoring setup (`ops/monitoring`, with its Grafana dashboards and Prometheus config, `scripts/local-monitoring-start.sh`, `scripts/local-monitoring-stop.sh`, `scripts/capture-local-pprof.sh` and the `make local-monitoring-start` and `local-monitoring-stop` targets); `scripts/gen_http_api.py`; and `scripts/check-release-refs.sh` with `make check-release-refs`. The load driver's `--history` flag goes with the checker it fed. `docs/reference/http-api.md` is now edited by hand alongside `docs/reference/openapi.yaml`, and pinned image versions in the docs are checked by hand at release. [Monitor and alert](docs/operate/monitoring.md#dashboard) lists the queries the dashboard graphed, and [Linearizability](docs/understand/linearizability.md) describes the property and the suites that test it.
+
 ## [3.2.2] - 2026-10-08
 
 ### Added
