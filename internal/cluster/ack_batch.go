@@ -226,7 +226,7 @@ func (rt *Router) settleAckGroup(ctx context.Context, g ackGroup, topicName stri
 			statuses[i], msgs[i] = rt.ackFailureFor(ctx, g.addr, mode, err)
 			continue
 		}
-		statuses[i], msgs[i] = ackOutcome(ctx, res, nil)
+		statuses[i], msgs[i] = ackOutcome(res)
 	}
 }
 
@@ -253,7 +253,7 @@ func ackBatchResults(ctx context.Context, res nodewire.Response, err error, n in
 		return nil, &ackBatchFailure{status: status, msg: msg, cause: err}
 	}
 	if res.Status != http.StatusOK {
-		status, msg := ackOutcome(ctx, res, nil)
+		status, msg := ackOutcome(res)
 		return nil, &ackBatchFailure{status: status, msg: msg}
 	}
 	results, err := nodewire.DecodeAckBatchReply(res.Body, nil)
@@ -282,13 +282,10 @@ func (rt *Router) sendSingleAck(ctx context.Context, addr string, timeout time.D
 	}
 }
 
-// ackOutcome is the status and error message a forwarded single ack's
-// round trip comes to: what writePeerResponse would have written, or
-// what RouteAck writes for a transport failure (see ackForwardFailure).
-func ackOutcome(ctx context.Context, res nodewire.Response, err error) (int, string) {
-	if err != nil {
-		return ackForwardFailure(ctx, err)
-	}
+// ackOutcome is the status and error message an owner's reply to a
+// forwarded ack comes to: what writePeerResponse would have written. A
+// round trip that failed is ackForwardFailure's.
+func ackOutcome(res nodewire.Response) (int, string) {
 	status := res.Status
 	if status == 0 {
 		status = http.StatusOK

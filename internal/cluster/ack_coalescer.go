@@ -241,7 +241,8 @@ func (rt *Router) sendLiveBatch(addr string, b *ackBatch, live []int, timeout ti
 // answer, which the batch's own round-trip budget bounds: the record is
 // on its way to the owner, and giving up then would report a failure for
 // an ack the owner may apply. The longest wait is therefore twice
-// ackForwardTimeout.
+// ackForwardTimeout, plus one more round trip when the owner is too old
+// to take a batch and the record goes out again on its own.
 func (rt *Router) awaitAck(ctx context.Context, addr string, o *ackOwner, b *ackBatch, idx int, item nodewire.AckBatchItem) (nodewire.Response, error) {
 	timer := time.NewTimer(ackForwardTimeout)
 	defer timer.Stop()
