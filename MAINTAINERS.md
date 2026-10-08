@@ -1,13 +1,20 @@
 # Maintainers
 
-## Current maintainers
+Narad has one maintainer, listed below. `CODEOWNERS` routes every review to
+that one account, so every pull request, release and security report goes
+through the same person. That is the accurate picture rather than a formality.
 
-| Name | GitHub | Areas |
-|---|---|---|
-| Debangan Thakuria | [@DebanganThakuria](https://github.com/DebanganThakuria) | All of it |
+**How decisions are made.** With one maintainer, decisions are the
+maintainer's. They are made in public, on the pull request, issue or
+discussion where the change is proposed, so the reasoning stays on the record.
 
-`CODEOWNERS` routes every review to that one account, which is the accurate
-picture rather than a formality.
+**How to become a maintainer.** Land non-trivial pull requests, review other
+people's, and stay around for a couple of release cycles. The details are
+[below](#becoming-a-maintainer). Growing this table is an explicit goal.
+
+| Name | GitHub ID | Company/Organization | Role |
+|---|---|---|---|
+| Debangan Thakuria | [@DebanganThakuria](https://github.com/DebanganThakuria) | TODO-ORG | Lead maintainer |
 
 ## What a single maintainer means for you
 
@@ -31,7 +38,7 @@ implementation cost is sunk. See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Becoming a maintainer
 
-There is no hidden bar, and growing this table is an explicit goal. The path:
+There is no hidden bar. The path:
 
 1. Land a handful of non-trivial pull requests, with tests, that show you understand the subsystem you are touching.
 2. Review other people's pull requests. Reviewing well is the skill the project is short of, more than writing code.
