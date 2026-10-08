@@ -65,6 +65,15 @@ var (
 	// cluster.writeForwardedWrite), so keep it free of characters JSON
 	// escapes.
 	ErrOutcomeUnknown = errors.New("the change may still be applied, read it back before retrying")
+
+	// ErrNotAppliedHere marks a write this node forwarded that the
+	// leader committed, where this node's own replica could not be
+	// confirmed to have applied it before answering (the leader did not
+	// answer the applied-index probe, or the replica did not catch up in
+	// time). The change happened: the client must not repeat it, only
+	// read it back once this node has caught up. It maps to 503 with
+	// Retry-After, and the audit line records the change as made.
+	ErrNotAppliedHere = errors.New("the cluster leader committed the change, but this node has not applied it yet")
 )
 
 // Partition log (storage).

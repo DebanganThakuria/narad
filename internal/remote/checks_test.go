@@ -60,7 +60,7 @@ func TestChecksAgainstTheRealRouter(t *testing.T) {
 	}
 	// A target on this release serves parent_id in its children
 	// listing: loop and recreate detection are on, and nothing warns.
-	if rep.CertNotAfter == "" || !rep.TargetServesIDs || slices.ContainsFunc(rep.Warnings, func(w string) bool { return strings.Contains(w, "parent_id") }) {
+	if rep.CertNotAfter == "" || !rep.ServesIDs() || slices.ContainsFunc(rep.Warnings, func(w string) bool { return strings.Contains(w, "parent_id") }) {
 		t.Fatalf("cert expiry missing, or a same-release target reported as serving no IDs: %+v", rep)
 	}
 
@@ -221,7 +221,7 @@ func TestChecksAgainstOlderAndEdgeTargets(t *testing.T) {
 	}
 	srv := fakeNarad(t, true, plain, false)
 	got := run(t, checker(t, srv.URL, caOf(srv), "repl", "pw-0123456789012345678901"), "orders", nil)
-	if got.Result != remote.ResultPass || !got.TargetServesIDs || got.TargetID != "target-id" {
+	if got.Result != remote.ResultPass || !got.ServesIDs() || got.TargetID != "target-id" {
 		t.Fatalf("a target serving IDs: %+v", got)
 	}
 }
@@ -233,7 +233,7 @@ func TestChecksAgainstOlderAndEdgeTargets(t *testing.T) {
 func TestChecksWarnWhenTheTargetServesNoIDs(t *testing.T) {
 	srv := fakeNarad(t, true, `{"parent":"orders","children":[{"name":"c1"}]}`, false)
 	got := run(t, checker(t, srv.URL, caOf(srv), "repl", "pw-0123456789012345678901"), "orders", nil)
-	if got.Result != remote.ResultPass || got.TargetServesIDs {
+	if got.Result != remote.ResultPass || got.TargetServesIDs == nil || got.ServesIDs() {
 		t.Fatalf("a target without IDs: %+v, want a pass that serves no IDs", got)
 	}
 	if !slices.ContainsFunc(got.Warnings, func(w string) bool { return strings.Contains(w, "parent_id") }) {

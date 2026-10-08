@@ -28,17 +28,27 @@ const (
 
 // NodeReport is one member's answer.
 type NodeReport struct {
-	Node              string   `json:"node"`
-	Result            string   `json:"result"`          // "pass" or "fail"
-	Class             string   `json:"class,omitempty"` // a topic.RemoteState value, or a check class (below)
-	CredentialVersion uint64   `json:"credential_version"`
-	TargetID          string   `json:"target_id,omitempty"`
-	TargetServesIDs   bool     `json:"target_serves_ids"` // the target shows remote and parent_id
-	RTTMs             *int64   `json:"rtt_ms,omitempty"`  // only with remotes.allowed_hosts set
-	LaneCapacityPerS  *int64   `json:"lane_capacity_per_s,omitempty"`
-	CertNotAfter      string   `json:"server_cert_not_after,omitempty"`
-	Warnings          []string `json:"warnings"`
-	Posture           Posture  `json:"posture"`
+	Node              string `json:"node"`
+	Result            string `json:"result"`          // "pass" or "fail"
+	Class             string `json:"class,omitempty"` // a topic.RemoteState value, or a check class (below)
+	CredentialVersion uint64 `json:"credential_version"`
+	TargetID          string `json:"target_id,omitempty"`
+	// TargetServesIDs: the target shows remote and parent_id. Absent
+	// when the checks stopped before the children listing (check 5) and
+	// in a blind report; ServesIDs reads absent as false. A member on an
+	// older release always sends it, true or false.
+	TargetServesIDs  *bool    `json:"target_serves_ids,omitempty"`
+	RTTMs            *int64   `json:"rtt_ms,omitempty"` // only with remotes.allowed_hosts set
+	LaneCapacityPerS *int64   `json:"lane_capacity_per_s,omitempty"`
+	CertNotAfter     string   `json:"server_cert_not_after,omitempty"`
+	Warnings         []string `json:"warnings"`
+	Posture          Posture  `json:"posture"`
+}
+
+// ServesIDs reports whether the target showed remote and parent_id;
+// false when the check never got that far.
+func (r NodeReport) ServesIDs() bool {
+	return r.TargetServesIDs != nil && *r.TargetServesIDs
 }
 
 // Blind returns reports as an admin may see them without a host

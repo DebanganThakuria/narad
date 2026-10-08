@@ -35,6 +35,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/domain/user"
+	"github.com/debanganthakuria/narad/internal/errs"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 	"github.com/debanganthakuria/narad/internal/remote"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
@@ -320,17 +321,29 @@ type undecider interface{ MarkUndecided() }
 
 // writeForwardError answers a remote write whose forward failed. A
 // leader that could not be reached may have committed the write, so the
-// audit line says unknown; an older leader refused it outright.
-func writeForwardError(s *handlers.Set, w http.ResponseWriter, err error) {
+// audit line says unknown; an older leader refused it outright; and a
+// write the leader committed that this node has not applied yet is
+// answered as made (handlers.Set.WriteNotAppliedHere), with the
+// warnings of the leader's answer res.
+func writeForwardError(s *handlers.Set, w http.ResponseWriter, res nodewire.Response, err error) {
 	if leaderTooOld(err) {
 		s.WriteError(w, http.StatusPreconditionFailed, "the cluster leader runs an older release that does not serve remote children; finish the upgrade first")
+		return
+	}
+	if errors.Is(err, errs.ErrNotAppliedHere) {
+		s.WriteNotAppliedHere(w, leaderWarnings(res)...)
 		return
 	}
 	if u, ok := w.(undecider); ok {
 		u.MarkUndecided()
 	}
+	w.Header().Set("Retry-After", forwardRetryAfter)
 	s.WriteError(w, http.StatusServiceUnavailable, "the cluster leader could not be reached; retry")
 }
+
+// forwardRetryAfter is the Retry-After, in seconds, of the 503 for a
+// remote write whose forward got no answer from the leader.
+const forwardRetryAfter = "2"
 
 // sendRemoteChildWrite forwards one remote child write to the leader and
 // answers with its reply; the caller's audit writer records the status.
@@ -343,10 +356,26 @@ func sendRemoteChildWrite(s *handlers.Set, w http.ResponseWriter, r *http.Reques
 	}
 	res, err := forwardRemoteWrite(r.Context(), s, subOp, actor, requestID, body, timeout)
 	if err != nil {
-		writeForwardError(s, w, err)
+		writeForwardError(s, w, res, err)
 		return
 	}
 	writeRemoteAnswer(s, w, res)
+}
+
+// leaderWarnings returns the warnings of a leader's 2xx answer: an
+// attach computes them once, and a 503 for a change this node has not
+// applied yet must not lose them.
+func leaderWarnings(res nodewire.Response) []string {
+	if res.Status < 200 || res.Status > 299 {
+		return nil
+	}
+	var body struct {
+		Warnings []string `json:"warnings"`
+	}
+	if json.Unmarshal(res.Body, &body) != nil {
+		return nil
+	}
+	return body.Warnings
 }
 
 func forwardRemoteWrite(ctx context.Context, s *handlers.Set, subOp, actor, requestID string, body map[string]any, timeout time.Duration) (nodewire.Response, error) {
@@ -431,7 +460,7 @@ func detachThroughLeader(s *handlers.Set, w http.ResponseWriter, r *http.Request
 	body := map[string]any{"parent": parent, "child": child, "force": force, "expect_remote": true}
 	res, err := forwardRemoteWrite(r.Context(), s, nodewire.RemoteSubDetach, callerName(r), requestID, body, deleteTimeout)
 	if err != nil {
-		writeForwardError(s, w, err)
+		writeForwardError(s, w, res, err)
 		return
 	}
 	writeRemoteAnswer(s, w, res)
@@ -447,7 +476,7 @@ func deleteThroughLeader(s *handlers.Set, w http.ResponseWriter, r *http.Request
 	body := map[string]any{"topic": name, "force": force, "expect_remote": true}
 	res, err := forwardRemoteWrite(r.Context(), s, nodewire.RemoteSubTopicDelete, callerName(r), requestID, body, deleteTimeout)
 	if err != nil {
-		writeForwardError(s, w, err)
+		writeForwardError(s, w, res, err)
 		return
 	}
 	writeRemoteAnswer(s, w, res)
@@ -543,6 +572,37 @@ func remoteStart(stub topic.Topic, p int) int64 {
 	return 0
 }
 
+// reconcileRemoteRow reads an owner's row against the link as this
+// node's replica applied it. The owner reports what its cursor last
+// saw, which trails a pause, resume or skip by the time its own replica
+// takes to apply it and its cursor takes to read the stub again
+// (fanout_remote.go remoteBeforeRead), so straight after a write the
+// rows can contradict the answer the client just got:
+//
+//   - paused while the link here is not: the resume is applied here, the
+//     owner has not caught up, so the row reads running;
+//   - running while the link here is paused: it reads paused;
+//   - blocked on a record the link here has skipped: the skip is
+//     applied here, but what the cursor meets next is not known yet, so
+//     the block goes and a row stalled on it reads unknown, which is no
+//     stall (topic wait keeps polling).
+//
+// A state that needs a fix is never changed by the pause flag.
+func reconcileRemoteRow(row *remotePartitionRow, link topic.RemoteLink) {
+	if b := row.BlockedAt; b != nil && link.Skipped(b.Partition, b.Offset) {
+		if row.State == b.State {
+			row.State = topic.RemoteStateUnknown
+		}
+		row.BlockedAt = nil
+	}
+	switch {
+	case row.State == topic.RemoteStatePaused && !link.Paused:
+		row.State = topic.RemoteStateRunning
+	case row.State == topic.RemoteStateRunning && link.Paused:
+		row.State = topic.RemoteStatePaused
+	}
+}
+
 // remoteStatus folds the owners' cursor stats of one remote child into
 // its listing entry.
 func remoteStatus(parent, stub topic.Topic, stats []topic.FanoutCursorStat, complete, admin, withPartitions bool, now time.Time) *remoteChildStatus {
@@ -568,9 +628,10 @@ func remoteStatus(parent, stub topic.Topic, stats []topic.FanoutCursorStat, comp
 			if s.State != "" {
 				row.State = s.State
 			}
+			reconcileRemoteRow(&row, *stub.Remote)
 			st.LagSeconds = max(st.LagSeconds, s.LagSeconds)
-			if s.BlockedAt != nil && (st.BlockedAt == nil || s.BlockedAt.Partition < st.BlockedAt.Partition) {
-				b := *s.BlockedAt
+			if row.BlockedAt != nil && (st.BlockedAt == nil || row.BlockedAt.Partition < st.BlockedAt.Partition) {
+				b := *row.BlockedAt
 				st.BlockedAt = &b
 			}
 			// A cursor never verified is the stalest of all: it counts

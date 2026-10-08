@@ -496,6 +496,52 @@ func TestRemoteWriteToAnOlderLeader(t *testing.T) {
 	}
 }
 
+// noAppliedIndex refuses the applied-index probe, the way a leader
+// that lost its leadership right after the commit, or a probe that
+// times out, leaves the forwarding node without a bound to wait for.
+type noAppliedIndex struct{ inner *RPCServer }
+
+func (n noAppliedIndex) HandleStreamFrame(frame clusterwire.StreamFrame, respond func(clusterwire.StreamFrame)) bool {
+	if op, err := nodewire.OperationOf(frame.Payload); err == nil && op == nodewire.OpAppliedIndex {
+		payload, _ := nodewire.EncodeResponse(errorResponse(http.StatusServiceUnavailable, "not the leader"))
+		respond(clusterwire.StreamFrame{Type: clusterwire.StreamFrameNodeReply, RequestID: frame.RequestID, Payload: payload})
+		return true
+	}
+	return n.inner.HandleStreamFrame(frame, respond)
+}
+
+// A remote write the leader committed, forwarded by a node that cannot
+// confirm its own replica applied it, returns the leader's answer with
+// errs.ErrNotAppliedHere instead of a bare 2xx the client would read
+// as safe to read back here.
+func TestRemoteWriteReportsAnUnsettledApply(t *testing.T) {
+	target, ca := regTarget(t)
+	refuse := func(s *RPCServer) clusterrpc.StreamFrameHandler { return noAppliedIndex{inner: s} }
+	nodes := startRegCluster(t, clusterSecret(t), targetPort(t, target), nil, map[string]func(*RPCServer) clusterrpc.StreamFrameHandler{"n0": refuse, "n1": refuse, "n2": refuse})
+	leader, follower := leaderAndFollower(t, nodes)
+
+	sealed, err := follower.svc.PrepareCreate(context.Background(), remote.CreateRequest{
+		Name: "b", URL: target.URL, Username: "repl", Password: domremote.NewSecret([]byte("password-0123456789-abcdef")), CAPEM: ca,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(metastore.PutRemoteOp{Record: sealed.Record, Salt: sealed.Salt, SealedAtMs: sealed.SealedAtMs})
+	res, err := follower.plane.RemoteWrite(context.Background(), nodewire.RemoteWriteRequest{SubOp: nodewire.RemoteSubCreate, Actor: "alice", RequestID: "req-unsettled-01", Body: body})
+	if !errors.Is(err, errs.ErrNotAppliedHere) || res.Status != http.StatusCreated {
+		t.Fatalf("forwarded create without an applied index: %d, %v; want the leader's 201 with ErrNotAppliedHere", res.Status, err)
+	}
+	if _, err := leader.store.GetRemote("b"); err != nil {
+		t.Fatalf("the leader did not commit the create: %v", err)
+	}
+
+	// On the leader nothing is forwarded: raft Apply already waited for
+	// its own replica.
+	if _, err := leader.plane.RemoteWrite(context.Background(), nodewire.RemoteWriteRequest{SubOp: nodewire.RemoteSubDelete, Actor: "alice", RequestID: "req-unsettled-02", Body: []byte(`{"name":"b"}`)}); err != nil {
+		t.Fatalf("a write on the leader: %v", err)
+	}
+}
+
 func regWaitFor(t *testing.T, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

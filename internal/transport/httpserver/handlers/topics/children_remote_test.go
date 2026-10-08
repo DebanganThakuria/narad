@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -498,6 +499,70 @@ func TestRemoteStatusFolding(t *testing.T) {
 	}
 }
 
+// The listing follows the pause flag this node's replica applied: an
+// owner still reporting paused after the resume applied here (its own
+// replica, or its cursor's next look at the stub, lags) reads as
+// running, and an owner still reporting running after a pause applied
+// here reads as paused, on every row as well as on the link. A state
+// that needs a fix is never hidden by the flag.
+func TestRemoteStatusFollowsTheAppliedPauseFlag(t *testing.T) {
+	parent := topic.Topic{Name: "orders", Partitions: 2}
+	link := func(paused bool) topic.Topic {
+		return topic.Topic{Name: "s", Remote: &topic.RemoteLink{Name: "b", Topic: "orders", Paused: paused}, AttachOffsets: []int64{0, 0}}
+	}
+	f := func(p int, state string) topic.FanoutCursorStat {
+		return topic.FanoutCursorStat{Child: "s", Partition: p, State: state}
+	}
+	now := time.Now()
+	rowStates := func(st *remoteChildStatus) []string {
+		var out []string
+		for _, r := range st.Partitions {
+			out = append(out, r.State)
+		}
+		return out
+	}
+
+	st := remoteStatus(parent, link(false), []topic.FanoutCursorStat{f(0, topic.RemoteStateRunning), f(1, topic.RemoteStatePaused)}, true, true, true, now)
+	if st.State != topic.RemoteStateRunning || !slices.Equal(rowStates(st), []string{"running", "running"}) {
+		t.Fatalf("resumed here, one owner still paused: state %s rows %v, want running everywhere", st.State, rowStates(st))
+	}
+	st = remoteStatus(parent, link(true), []topic.FanoutCursorStat{f(0, topic.RemoteStateRunning), f(1, topic.RemoteStateRunning)}, true, true, true, now)
+	if st.State != topic.RemoteStatePaused || !slices.Equal(rowStates(st), []string{"paused", "paused"}) {
+		t.Fatalf("paused here, owners still running: state %s rows %v, want paused everywhere", st.State, rowStates(st))
+	}
+	st = remoteStatus(parent, link(true), []topic.FanoutCursorStat{f(0, topic.RemoteStateRunning), f(1, topic.RemoteStateAuthFailed)}, true, true, true, now)
+	if st.State != topic.RemoteStateAuthFailed || !slices.Equal(rowStates(st), []string{"paused", "auth_failed"}) {
+		t.Fatalf("paused here, one owner auth_failed: state %s rows %v, want auth_failed to win", st.State, rowStates(st))
+	}
+	st = remoteStatus(parent, link(false), []topic.FanoutCursorStat{f(0, topic.RemoteStateRunning), f(1, topic.RemoteStateAuthFailed)}, true, true, true, now)
+	if st.State != topic.RemoteStateAuthFailed {
+		t.Fatalf("running here, one owner auth_failed: state %s, want auth_failed", st.State)
+	}
+}
+
+// A block on a record this node's replica shows as skipped is one its
+// owner has not applied yet: what the cursor meets next is not known,
+// so the row reads unknown (no stall that stops topic wait) and the
+// block is not reported. A block on a record nobody skipped stays.
+func TestRemoteStatusDropsABlockTheStubSkipped(t *testing.T) {
+	parent := topic.Topic{Name: "orders", Partitions: 2}
+	stub := topic.Topic{Name: "s", Remote: &topic.RemoteLink{Name: "b", Topic: "orders", Skip: map[int][]int64{1: {7}}}, AttachOffsets: []int64{0, 0}}
+	blocked := func(off int64) topic.FanoutCursorStat {
+		return topic.FanoutCursorStat{Child: "s", Partition: 1, State: topic.RemoteStateRejectedRecord, BlockedAt: &topic.RemoteBlock{Partition: 1, Offset: off, State: topic.RemoteStateRejectedRecord}}
+	}
+	running := topic.FanoutCursorStat{Child: "s", Partition: 0, State: topic.RemoteStateRunning}
+	now := time.Now()
+
+	st := remoteStatus(parent, stub, []topic.FanoutCursorStat{running, blocked(7)}, true, true, true, now)
+	if st.State != topic.RemoteStateUnknown || st.BlockedAt != nil || st.Partitions[1].BlockedAt != nil || st.Partitions[1].State != topic.RemoteStateUnknown {
+		t.Fatalf("block on a skipped record: state %s blocked_at %+v row %+v, want unknown with no block", st.State, st.BlockedAt, st.Partitions[1])
+	}
+	st = remoteStatus(parent, stub, []topic.FanoutCursorStat{running, blocked(8)}, true, true, true, now)
+	if st.State != topic.RemoteStateRejectedRecord || st.BlockedAt == nil || st.BlockedAt.Offset != 8 {
+		t.Fatalf("block on a record nobody skipped: state %s blocked_at %+v, want rejected_record at 8", st.State, st.BlockedAt)
+	}
+}
+
 // Topic describe and list strip the admin names for a non-admin.
 func TestStubDescribeRedactsAdminNames(t *testing.T) {
 	b := remoteBroker()
@@ -574,6 +639,70 @@ func TestRemoteDetachAndDeleteAuditLinesCarryTheRequestID(t *testing.T) {
 	lines = auditLines(t, &logs)
 	if len(lines) != 1 || lines[0]["event"] != "topic.delete" || lines[0]["request_id"] != req.RequestID || req.RequestID == "" {
 		t.Fatalf("delete audit = %v, want topic.delete with request_id %q", lines, req.RequestID)
+	}
+}
+
+// A remote write the leader committed but this node could not confirm
+// it applied answers 503 with Retry-After and a message that says the
+// change is made (not that the leader could not be reached), and its
+// audit line records the change as made, marked unsettled, never as
+// failed or undecided.
+func TestRemoteWriteNotAppliedHereAnswers503WithRetryAfter(t *testing.T) {
+	w := &recordingWriter{res: nodewire.Response{Status: http.StatusOK, Body: []byte(`{}`)}, err: errs.ErrNotAppliedHere}
+	s := remoteSet(remoteBroker(), w)
+	var logs bytes.Buffer
+	s.Deps.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	s = handlers.New(s.Deps)
+	s.Deps.Remote.Writer = w
+
+	check := func(name string, res *httptest.ResponseRecorder) {
+		t.Helper()
+		if res.Code != http.StatusServiceUnavailable || res.Header().Get("Retry-After") == "" {
+			t.Fatalf("%s: %d Retry-After %q, want 503 with Retry-After", name, res.Code, res.Header().Get("Retry-After"))
+		}
+		if !strings.Contains(res.Body.String(), "committed") || strings.Contains(res.Body.String(), "could not be reached") {
+			t.Fatalf("%s: body %s, want the committed message", name, res.Body.String())
+		}
+		lines := auditLines(t, &logs)
+		if len(lines) != 1 || lines[0]["outcome"] != handlers.AuditOK || lines[0]["settled"] != false {
+			t.Fatalf("%s: audit %v, want one ok line with settled false", name, lines)
+		}
+		logs.Reset()
+	}
+	check("pause", post(t, PauseChild(s), "/", `{}`, &adminUser, "parent", "orders", "child", "orders-to-b"))
+	w.res = nodewire.Response{Status: http.StatusNoContent}
+	check("detach", del(t, DetachChild(s), "/", &adminUser, "parent", "orders", "child", "orders-to-b"))
+
+	// An attach's warnings are computed once, on the leader, and no read
+	// shows them again: the 503 passes on the leader's.
+	warned := []string{"parent retention (24h0m0s) is below 72h", "the target runs an older release"}
+	leader, _ := json.Marshal(map[string]any{"name": "orders-to-c", "warnings": warned})
+	w.res = nodewire.Response{Status: http.StatusCreated, Body: leader}
+	res := post(t, AttachChild(s), "/v1/topics/orders/children", `{"child":"orders-to-c","remote":"c","remote_topic":"orders"}`, &adminUser, "parent", "orders")
+	check("attach", res)
+	var out struct {
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &out); err != nil || !slices.Equal(out.Warnings, warned) {
+		t.Fatalf("attach 503 body %s (%v): warnings = %v, want the leader's %v", res.Body.String(), err, out.Warnings, warned)
+	}
+}
+
+// A forward that never got the leader's answer still answers 503 with
+// Retry-After, and its audit line stays undecided.
+func TestRemoteWriteLostAnswerCarriesRetryAfter(t *testing.T) {
+	w := &recordingWriter{err: context.DeadlineExceeded}
+	s := remoteSet(remoteBroker(), w)
+	var logs bytes.Buffer
+	s.Deps.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	s = handlers.New(s.Deps)
+	s.Deps.Remote.Writer = w
+	res := post(t, PauseChild(s), "/", `{}`, &adminUser, "parent", "orders", "child", "orders-to-b")
+	if res.Code != http.StatusServiceUnavailable || res.Header().Get("Retry-After") == "" {
+		t.Fatalf("lost answer: %d Retry-After %q, want 503 with Retry-After", res.Code, res.Header().Get("Retry-After"))
+	}
+	if lines := auditLines(t, &logs); len(lines) != 1 || lines[0]["outcome"] != handlers.AuditUnknown {
+		t.Fatalf("lost answer audit %v, want unknown", lines)
 	}
 }
 

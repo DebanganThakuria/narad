@@ -369,7 +369,13 @@ func (l *RemoteLinks) attach(ctx context.Context, req nodewire.RemoteWriteReques
 	if err != nil {
 		return refuse(errorResponse(http.StatusServiceUnavailable, "a parent partition owner could not be asked for its start offset; retry"), topic.RemoteStateUnavailable)
 	}
-	caps, capsOK := l.probeCapabilities(ctx, b.Remote, b.RemoteTopic)
+	// Blind, the target's batch capability is not asked: its answer
+	// would show in the warnings as much as in capabilities.
+	var caps sink.Capabilities
+	capsOK := false
+	if !blind {
+		caps, capsOK = l.probeCapabilities(ctx, b.Remote, b.RemoteTopic)
+	}
 	if capsOK && caps.MaxMessages <= sink.DefaultMaxChunkMessages {
 		warnings = append(warnings, olderTargetBodyWarning)
 	}
@@ -384,7 +390,7 @@ func (l *RemoteLinks) attach(ctx context.Context, req nodewire.RemoteWriteReques
 			"checks":         shown,
 			"warnings":       warnings,
 		}
-		if capsOK && !blind {
+		if capsOK {
 			out["capabilities"] = map[string]any{"max_messages": caps.MaxMessages, "zstd": caps.Zstd}
 		}
 		return jsonResponse(http.StatusOK, out)
@@ -439,9 +445,11 @@ type stubWithWarnings struct {
 }
 
 // attachWarnings are the attach's advisories: a parent retention below
-// what a regional outage needs (Q15), a target too old to report remote
-// children (loop detection waits for its upgrade), and the warnings the
-// checks drew from the target's answers, left out when blind.
+// what a regional outage needs (Q15), and, unless blind, those drawn
+// from the target's answers: a target too old to report remote children
+// (loop detection waits for its upgrade) and the checks' own warnings.
+// Blind, no answer carries what the target said (ch. 5.8), so only the
+// parent's own warning is left.
 func attachWarnings(parent topic.Topic, reports []remote.NodeReport, blind bool) []string {
 	warnings := []string{}
 	if parent.RetentionMs > 0 && parent.RetentionMs < sink.RetentionWarnMs {
@@ -449,14 +457,14 @@ func attachWarnings(parent topic.Topic, reports []remote.NodeReport, blind bool)
 			"parent retention (%s) is below 72h; a remote outage longer than the retention loses records (drop-behind)",
 			time.Duration(parent.RetentionMs)*time.Millisecond))
 	}
+	if blind {
+		return warnings
+	}
 	for _, r := range reports {
-		if !r.TargetServesIDs {
+		if !r.ServesIDs() {
 			warnings = append(warnings, "the target does not report remote children (an older release, which cannot hold one): loop detection starts once it is upgraded")
 			break
 		}
-	}
-	if blind {
-		return warnings
 	}
 	for _, r := range reports {
 		warnings = append(warnings, r.Warnings...)

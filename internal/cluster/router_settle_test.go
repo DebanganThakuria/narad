@@ -199,3 +199,41 @@ func TestSyncWithLeaderFailsAsUnavailableWithoutTheLeader(t *testing.T) {
 		t.Fatalf("the topic the leader created is not on the synced replica: %v", err)
 	}
 }
+
+// The strict settle the remote writes use answers nil only once this
+// replica has applied what the leader had: a probe that fails and a
+// bound the replica cannot reach are errs.ErrNotAppliedHere, and an
+// answer that changed nothing needs no probe.
+func TestStrictSettleReportsAWriteNotAppliedHere(t *testing.T) {
+	store := newTestStore(t)
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
+	ctx := context.Background()
+
+	var probes atomic.Int32
+	router.peer = fakePeerClient{appliedIndexFn: func(context.Context, string) (uint64, error) {
+		probes.Add(1)
+		return 0, errors.New("not the leader")
+	}}
+	if err := router.settleForwardedWriteStrict(ctx, "leader:1", nodewire.Response{Status: http.StatusConflict}); err != nil || probes.Load() != 0 {
+		t.Fatalf("a 409: %v after %d probes, want nil and no probe", err, probes.Load())
+	}
+	if err := router.settleForwardedWriteStrict(ctx, "leader:1", nodewire.Response{Status: http.StatusOK}); !errors.Is(err, errs.ErrNotAppliedHere) {
+		t.Fatalf("a failed probe: %v, want ErrNotAppliedHere", err)
+	}
+
+	router.peer = fakePeerClient{appliedIndexFn: func(context.Context, string) (uint64, error) {
+		return store.AppliedIndex() + 1_000_000, nil
+	}}
+	shortCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	if err := router.settleForwardedWriteStrict(shortCtx, "leader:1", nodewire.Response{Status: http.StatusOK}); !errors.Is(err, errs.ErrNotAppliedHere) {
+		t.Fatalf("an index the replica never reaches: %v, want ErrNotAppliedHere", err)
+	}
+
+	router.peer = fakePeerClient{appliedIndexFn: func(context.Context, string) (uint64, error) {
+		return store.AppliedIndex(), nil
+	}}
+	if err := router.settleForwardedWriteStrict(ctx, "leader:1", nodewire.Response{Status: http.StatusOK}); err != nil {
+		t.Fatalf("a replica already caught up: %v", err)
+	}
+}

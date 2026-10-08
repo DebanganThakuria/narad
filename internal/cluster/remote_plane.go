@@ -58,8 +58,13 @@ var ErrLeaderTooOld = fmt.Errorf("cluster: the leader does not serve remote writ
 const remoteWriteForwardTimeout = 60 * time.Second
 
 // RemoteWrite runs req on the leader: in process when this node leads
-// (Router.leaderMemberAddr() == ""), else forwarded as OpRemoteWrite
-// and settled on the local replica (settleForwardedWrite).
+// (Router.leaderMemberAddr() == ""), where raft Apply already waited
+// for this replica, else forwarded as OpRemoteWrite and settled on the
+// local replica. The settle is strict (settleForwardedWriteStrict): a
+// 2xx this node cannot confirm it applied comes back as the leader's
+// answer with an error wrapping errs.ErrNotAppliedHere, so the client
+// is never told a change is done that a read here would not show. A
+// dry run writes nothing and keeps the best-effort settle.
 func (p *RemotePlane) RemoteWrite(ctx context.Context, req nodewire.RemoteWriteRequest) (nodewire.Response, error) {
 	addr := ""
 	if p.router != nil {
@@ -77,8 +82,25 @@ func (p *RemotePlane) RemoteWrite(ctx context.Context, req nodewire.RemoteWriteR
 	if unsupportedOperation(res) {
 		return res, ErrLeaderTooOld
 	}
-	p.router.settleForwardedWrite(ctx, addr, res)
+	if isDryRun(req) {
+		p.router.settleForwardedWrite(ctx, addr, res)
+		return res, nil
+	}
+	if err := p.router.settleForwardedWriteStrict(ctx, addr, res); err != nil {
+		p.log.Warn("remote write committed on the leader but not applied here yet",
+			"sub_op", req.SubOp, "request_id", req.RequestID, "status", res.Status, "err", err)
+		return res, err
+	}
 	return res, nil
+}
+
+// isDryRun reports a remote write that asks only for the checks (an
+// attach's dry_run): it commits nothing to wait for.
+func isDryRun(req nodewire.RemoteWriteRequest) bool {
+	var body struct {
+		DryRun bool `json:"dry_run"`
+	}
+	return req.SubOp == nodewire.RemoteSubAttach && json.Unmarshal(req.Body, &body) == nil && body.DryRun
 }
 
 // unsupportedOperation reports an older peer's answer to an op it does
