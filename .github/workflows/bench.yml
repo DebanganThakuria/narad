@@ -20,6 +20,12 @@
 # while the broker sustained ~6000, so a 39% regression would have
 # passed) stops detecting anything. The median is what the runner
 # actually does.
+#
+# Consume numbers before 2026-10-08 are not comparable with later ones:
+# the readiness probe was left unacked, which stalled one of the six
+# partitions, so a run drained 5/6 of its messages, and `narad bench`
+# counted the two empty long-polls that end a drain (about 4s) in the
+# consume time.
 name: Bench
 
 on:
@@ -83,7 +89,15 @@ jobs:
           for i in $(seq 1 60); do
             curl -sf -X POST http://127.0.0.1:7942/v1/topics/bench/produce \
               -H 'Content-Type: application/octet-stream' -d probe -o /dev/null || true
-            if curl -sf "http://127.0.0.1:7942/v1/topics/bench/consume?wait=1s" | grep -q receipt_handle; then
+            msg=$(curl -sf "http://127.0.0.1:7942/v1/topics/bench/consume?wait=1s" || true)
+            handle=$(printf '%s' "$msg" | jq -r '.receipt_handle // empty' 2>/dev/null || true)
+            if [ -n "$handle" ]; then
+              # Ack the probe. Left leased, it pins its partition's
+              # committed offset for the visibility timeout, and 1,024 acks
+              # past it that partition stops handing out messages: the
+              # bench then drained five of the six partitions.
+              curl -sf -X POST "http://127.0.0.1:7942/v1/topics/bench/ack?receipt_handle=$(jq -rn --arg h "$handle" '$h|@uri')" \
+                -H 'X-Narad-Client: bench' -o /dev/null
               echo "first message consumable after ${i} probe(s)"; consumable=yes; break
             fi
             sleep 1
@@ -115,6 +129,14 @@ jobs:
           read P2 C2 L2 <<< "$(parse 2)"
           echo "run1: produce=$P1 consume=$C1 p99=$L1"
           echo "run2: produce=$P2 consume=$C2 p99=$L2"
+          # A short drain is a stuck partition or a broken bench, never a
+          # throughput number: fail rather than record it.
+          for r in 1 2; do
+            if grep -q 'were not drained' "$RUNNER_TEMP/bench-$r.log"; then
+              echo "::error::run $r left messages undrained: $(grep 'were not drained' "$RUNNER_TEMP/bench-$r.log")"
+              exit 1
+            fi
+          done
           PROD=$(echo "$P1 $P2" | tr ' ' '\n' | sort -rn | head -1)
           CONS=$(echo "$C1 $C2" | tr ' ' '\n' | sort -rn | head -1)
           printf '{"produce_msgs_per_sec": %.0f, "consume_msgs_per_sec": %.0f}\n' "$PROD" "$CONS" > "$RUNNER_TEMP/result.json"

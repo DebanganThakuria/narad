@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -320,6 +321,11 @@ func newBenchCmd() *cobra.Command {
 			}
 			fmt.Fprintf(os.Stderr, "consuming+acking %d with %d workers...\n", count, workers)
 			var consumed int64
+			// lastDone is when the last message was consumed and acked,
+			// as an offset from cstart. The rate is taken over that span:
+			// a worker stops only after two empty long-polls, and that
+			// wait is the drain detector's, not the broker's.
+			var lastDone atomic.Int64
 			cstart := time.Now()
 			ctx := cmdContext()
 			var cwg sync.WaitGroup
@@ -345,13 +351,23 @@ func newBenchCmd() *cobra.Command {
 						mu.Lock()
 						consumed++
 						mu.Unlock()
+						done := int64(time.Since(cstart))
+						for prev := lastDone.Load(); done > prev && !lastDone.CompareAndSwap(prev, done); prev = lastDone.Load() {
+						}
 					}
 				})
 			}
 			cwg.Wait()
-			celapsed := time.Since(cstart)
+			celapsed := time.Duration(lastDone.Load())
+			if consumed == 0 {
+				celapsed = time.Since(cstart)
+			}
 			fmt.Fprintf(os.Stderr, "consume: %d msgs in %s (%.0f msg/s)\n",
 				consumed, celapsed.Round(time.Millisecond), float64(consumed)/celapsed.Seconds())
+			if consumed < int64(count) {
+				fmt.Fprintf(os.Stderr, "consume: %d of the %d produced were not drained: still leased by another consumer, or not yet visible, when every worker had seen two empty polls\n",
+					int64(count)-consumed, count)
+			}
 			return nil
 		},
 	}
