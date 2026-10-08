@@ -1323,7 +1323,12 @@ paths:
           description: With `partition`, the node forwarded the request to the partition's owner and got no answer.
           x-narad-origin: forwarding
         '503':
-          description: With `partition`, the partition's owner is down.
+          description: With `partition`, the partition's owner is down. Retry after `Retry-After`. Releases up to v3.2.1 sent no `Retry-After`.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying, `1`.
+              schema:
+                type: string
       x-narad-examples:
         - title: one message
           request: |

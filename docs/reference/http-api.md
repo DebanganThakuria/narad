@@ -1486,7 +1486,7 @@ has no `receipt_handle` and nothing needs acking.
 | [`429`](status-codes.md#status-429) | Too many consumes in flight for this user on this node. |
 | [`500`](status-codes.md#status-500) | The node could not read the partition, for example after a disk error. |
 | [`502`](status-codes.md#status-502) | With `partition`, the node forwarded the request to the partition's owner and got no answer. |
-| [`503`](status-codes.md#status-503) | With `partition`, the partition's owner is down. |
+| [`503`](status-codes.md#status-503) | With `partition`, the partition's owner is down. Retry after `Retry-After`. Releases up to v3.2.1 sent no `Retry-After`. |
 
 **Response body (`200`)**: a [Message](#message-object).
 
