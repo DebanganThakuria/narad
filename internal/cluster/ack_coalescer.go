@@ -293,7 +293,7 @@ func (o *ackOwner) leave(b *ackBatch, idx int) bool {
 // ackForwardTimeout: a deadline failure, like a single forwarded ack's,
 // and one that never left this node, so the owner applied nothing.
 func ackQueueTimeout(addr string) error {
-	return fmt.Errorf("ack to %s waited %s for a slot: %w: %w", addr, ackForwardTimeout, clusterrpc.ErrNotSent, context.DeadlineExceeded)
+	return fmt.Errorf("ack to %s: %w after %s: %w: %w", addr, errAckQueued, ackForwardTimeout, clusterrpc.ErrNotSent, context.DeadlineExceeded)
 }
 
 // ackResultResponse is the reply a single ack-shaped RPC would have

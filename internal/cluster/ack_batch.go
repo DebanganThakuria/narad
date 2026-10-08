@@ -207,6 +207,9 @@ func (rt *Router) settleAckGroup(ctx context.Context, g ackGroup, topicName stri
 			rt.acks.legacy.note(g.addr)
 		} else {
 			results, rerr := ackBatchResults(ctx, res, err, len(g.idx))
+			if rerr != nil && rerr.cause != nil {
+				rt.noteAckFailure(g.addr, mode, rerr.status, rerr.cause, len(g.idx))
+			}
 			for k, i := range g.idx {
 				if rerr != nil {
 					statuses[i], msgs[i] = rerr.status, rerr.msg
@@ -219,7 +222,11 @@ func (rt *Router) settleAckGroup(ctx context.Context, g ackGroup, topicName stri
 	}
 	for _, i := range g.idx {
 		res, err := rt.sendSingleAck(ctx, g.addr, ackForwardTimeout, item(i))
-		statuses[i], msgs[i] = ackOutcome(ctx, res, err)
+		if err != nil {
+			statuses[i], msgs[i] = rt.ackFailureFor(ctx, g.addr, mode, err)
+			continue
+		}
+		statuses[i], msgs[i] = ackOutcome(ctx, res, nil)
 	}
 }
 
@@ -228,6 +235,9 @@ func (rt *Router) settleAckGroup(ctx context.Context, g ackGroup, topicName stri
 type ackBatchFailure struct {
 	status int
 	msg    string
+	// cause is the transport error or undecodable reply behind a
+	// forward that failed; nil for an owner's own refusal of the batch.
+	cause error
 }
 
 // ackBatchResults turns an OpAckBatch round trip into n per-record
@@ -240,7 +250,7 @@ type ackBatchFailure struct {
 func ackBatchResults(ctx context.Context, res nodewire.Response, err error, n int) ([]nodewire.AckResult, *ackBatchFailure) {
 	if err != nil {
 		status, msg := ackForwardFailure(ctx, err)
-		return nil, &ackBatchFailure{status: status, msg: msg}
+		return nil, &ackBatchFailure{status: status, msg: msg, cause: err}
 	}
 	if res.Status != http.StatusOK {
 		status, msg := ackOutcome(ctx, res, nil)
@@ -251,8 +261,9 @@ func ackBatchResults(ctx context.Context, res nodewire.Response, err error, n in
 		err = errors.New("wrong record count")
 	}
 	if err != nil {
-		status, msg := ackForwardFailure(ctx, fmt.Errorf("invalid ack batch reply: %w", err))
-		return nil, &ackBatchFailure{status: status, msg: msg}
+		err = fmt.Errorf("invalid ack batch reply: %w", err)
+		status, msg := ackForwardFailure(ctx, err)
+		return nil, &ackBatchFailure{status: status, msg: msg, cause: err}
 	}
 	return results, nil
 }

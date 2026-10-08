@@ -216,6 +216,7 @@ Every node holds a full replica of the [metastore](glossary.md#metastore), kept 
 |---|---|
 | `narad_cluster_rpc_requests_total`<br>counter; labels `op`, `outcome` | Requests this node sent to other nodes, by operation and `outcome`: `ok`, `rejected` (a 4xx), `failed` (a 5xx), `timeout` or `error`. |
 | `narad_cluster_rpc_request_seconds`<br>histogram; labels `op` | Their round-trip time. |
+| `narad_cluster_ack_forward_failures_total` (unreleased)<br>counter; labels `op`, `outcome` | Acks, extends and nacks (`op` is `ack`, `extend` or `nack`) this node forwarded to a partition owner that failed, one per record, by what the client was told: `not_sent` (`503`, the ack never left this node and nothing was applied), `unknown` (`502`, it may have been applied) or `client_gone` (`499`). It also counts acks that gave up waiting for a slot to the owner, which never became an RPC and so are missing from `narad_cluster_rpc_requests_total`. |
 | `narad_moves_inflight`<br>gauge; no labels | Partition moves this node is running as the destination. |
 | `narad_moves_total`<br>counter; labels `outcome` | Finished moves: `completed`, or `force_promoted` when the source died and the copy took over. |
 | `narad_moves_duration_seconds`<br>histogram; no labels | Time from a move starting to the ownership change. |

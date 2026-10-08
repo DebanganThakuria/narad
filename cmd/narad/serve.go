@@ -389,6 +389,7 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin(), cfg.Security.ClusterSecret)
 	router.SetPeerClient(peerRPC)
 	router.SetLogger(log)
+	router.RegisterMetrics(reg)
 	// The router clamps client-supplied long-poll waits (?wait=) on its
 	// forward and re-probe paths to the same ceiling the HTTP handlers use.
 	router.SetMaxConsumeWait(cfg.HTTP.MaxConsumeWait.D())

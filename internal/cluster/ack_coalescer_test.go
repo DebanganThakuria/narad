@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -259,6 +260,8 @@ func TestQueuedAckThatNeverLeftAnswers503AndIsNeverSent(t *testing.T) {
 		return nil
 	}}
 	rt, o := ackTestRouter(t, owner, 1)
+	logs := &syncLog{}
+	rt.SetLogger(slog.New(slog.NewJSONHandler(logs, nil)))
 	go routeTestAck(context.Background(), rt, 1)
 	waitApplied(t, owner, 1)
 	var wg sync.WaitGroup
@@ -289,5 +292,8 @@ func TestQueuedAckThatNeverLeftAnswers503AndIsNeverSent(t *testing.T) {
 	waitIdle(t, o)
 	if slices.Contains(owner.appliedOffsets(), last) {
 		t.Fatalf("owner applied the ack that answered 503")
+	}
+	if lines := logs.warnLines("forwarded acks failed"); len(lines) != 1 || lines[0]["phase"] != "queue" || lines[0]["not_sent"] != 1.0 {
+		t.Fatalf("warnings = %v, want one for the queue wait", lines)
 	}
 }

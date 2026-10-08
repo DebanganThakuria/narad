@@ -68,6 +68,9 @@ type Router struct {
 	// overlap (see ack_coalescer.go), and remembers the owners too old to
 	// take a batch.
 	acks ackCoalescer
+	// ackFailures counts and logs forwarded acks that failed; see
+	// ack_failure_log.go.
+	ackFailures ackFailureLog
 
 	// logger receives what the router decides on its own and nobody else
 	// reports, such as members still owing a topic purge. slog.Default
@@ -624,7 +627,7 @@ func (rt *Router) routeAckShaped(ctx context.Context, w http.ResponseWriter, top
 		Mode:      mode,
 	})
 	if err != nil {
-		status, msg := ackForwardFailure(ctx, err)
+		status, msg := rt.ackFailureFor(ctx, addr, mode, err)
 		if status == http.StatusServiceUnavailable {
 			w.Header().Set("Retry-After", "1")
 		}
