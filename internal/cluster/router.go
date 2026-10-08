@@ -68,6 +68,9 @@ type Router struct {
 	// overlap (see ack_coalescer.go), and remembers the owners too old to
 	// take a batch.
 	acks ackCoalescer
+	// ackFailures counts and logs forwarded acks that failed; see
+	// ack_failure_log.go.
+	ackFailures ackFailureLog
 
 	// logger receives what the router decides on its own and nobody else
 	// reports, such as members still owing a topic purge. slog.Default
@@ -581,7 +584,10 @@ func (rt *Router) longPollConsumeRemote(ctx context.Context, w http.ResponseWrit
 // transport as the call's budget rather than derived as a
 // context.WithTimeout per ack: the transport already runs a timer for
 // the reply wait, and the derived context cost four allocations and a
-// lock on the request's context for every forwarded ack.
+// lock on the request's context for every forwarded ack. An ack that
+// queues for a shared batch (see ack_coalescer.go) has the bound twice
+// over, once for the wait for a slot and once for the batch's round
+// trip, so a batch that leaves late is not sent with a remnant.
 const ackForwardTimeout = 2 * time.Second
 
 // RouteAck forwards an ack request to the owner of the handle partition.
@@ -621,7 +627,11 @@ func (rt *Router) routeAckShaped(ctx context.Context, w http.ResponseWriter, top
 		Mode:      mode,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		status, msg := rt.ackFailureFor(ctx, addr, mode, err)
+		if status == http.StatusServiceUnavailable {
+			w.Header().Set("Retry-After", "1")
+		}
+		http.Error(w, msg, status)
 		return true
 	}
 	writePeerResponse(w, res)

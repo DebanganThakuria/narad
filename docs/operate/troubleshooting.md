@@ -118,6 +118,7 @@ An ack, extend or nack, or a consume with `partition=N`, answers `503`.
 **Cause.** The body says which:
 
 - `partition owner is down; retry later`: the node that owns the partition is down. A partition has one owner and no replica, so it waits for that node.
+- `the ack did not reach the partition owner and was not applied; retry` (ack, extend and nack only): the node you called could not send the ack to the owner, because no connection to it could be had, or because every slot for acks to that owner stayed busy for 2 seconds. The owner is slow or unreachable from that node. Nothing was applied. See [`502` on ack, extend or nack](#status-502) for what to check.
 - `control plane temporarily unavailable`: the node has no Raft leader, or has not caught up with it yet.
 
 **Check.** `narad cluster members` shows the owner as `dead`, and `/readyz` shows the leader state ([Start with readiness](#check-readiness)).
@@ -126,11 +127,11 @@ An ack, extend or nack, or a consume with `partition=N`, answers `503`.
 
 ### `502` on ack, extend or nack {#status-502}
 
-An ack, extend or nack answers `502`, with the error of a failed call between nodes as the body.
+An ack, extend or nack answers `502`, `the partition owner did not answer; the ack may have been applied; retry`. Releases up to v3.2.1 put the error of the failed call between nodes in the body instead.
 
 **Cause.** The node you called forwarded the request to the partition's owner and got no usable answer, often because the owner was restarting or overloaded. The ack may or may not have been applied. When the `502`s last, the owner may be down ([A node is down](#node-down)).
 
-**Check.** `narad_cluster_rpc_requests_total` with `outcome="timeout"` or `outcome="error"` rises on the forwarding node.
+**Check.** On the forwarding node, `narad_cluster_ack_forward_failures_total` rises with `outcome="unknown"` (these `502`s) or `outcome="not_sent"` (the `503`s for acks that never left), and `narad_cluster_rpc_requests_total` with `outcome="timeout"` or `outcome="error"` rises for the round trips. The node also logs `forwarded acks failed` at warning level, at most once a minute per owner, with the `owner` address, the `not_sent` and `unknown` counts since its last such line, the `last_error`, and the `phase`: `queue` when acks waited 2 seconds for a free slot to the owner, `round_trip` when the call itself failed. Many `queue` failures mean the owner answers acks slowly: compare `narad_cluster_rpc_request_seconds{op="ack"}` and `{op="ack_batch"}` with `{op="consume"}` on the forwarding node, and look at the owner's disk, since an owner's acks wait for the same handler slots as consume reads.
 
 **Fix.** Retry the ack. If it answers `410`, the first attempt was applied or the lease had already lapsed; the message may be delivered again either way. Retry rules: [Status codes and errors](../reference/status-codes.md#status-502).
 

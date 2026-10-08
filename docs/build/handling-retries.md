@@ -39,7 +39,7 @@ Date: Mon, 28 Sep 2026 19:35:28 GMT
 ```
 
 - `$HANDLE` is the `receipt_handle` from the consume response. curl's `--retry` resends on a timeout and on `408`, `429`, `500`, `502`, `503` and `504`, and not on `410`.
-- [`503`](../reference/status-codes.md#status-503) on an ack means the partition's owner is unreachable right now. [`502`](../reference/status-codes.md#status-502) means the node you reached forwarded the ack and got no answer in time. Both are safe to retry: an ack applied twice gets `410` the second time.
+- [`503`](../reference/status-codes.md#status-503) on an ack means the partition's owner is down, or the node you reached could not get the ack to it in time; either way nothing was applied. [`502`](../reference/status-codes.md#status-502) means the node you reached forwarded the ack and got no answer in time, so it may have been applied. Both are safe to retry, and both carry or honour backoff (a single ack's `503` has `Retry-After: 1`): an ack applied twice gets `410` the second time.
 - [`410`](../reference/status-codes.md#status-410) means the lease already ran out and the message went back to the queue. Do not retry it; the work may run twice, which your handler already tolerates.
 - The Go SDK's `msg.Ack` retries for you, and treats a `410` that follows a lost reply as the success it almost certainly was.
 

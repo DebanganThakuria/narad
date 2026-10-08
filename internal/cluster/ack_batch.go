@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/consumer"
+	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
@@ -204,7 +206,10 @@ func (rt *Router) settleAckGroup(ctx context.Context, g ackGroup, topicName stri
 		if err == nil && isUnsupportedOp(res) {
 			rt.acks.legacy.note(g.addr)
 		} else {
-			results, rerr := ackBatchResults(res, err, len(g.idx))
+			results, rerr := ackBatchResults(ctx, res, err, len(g.idx))
+			if rerr != nil && rerr.cause != nil {
+				rt.noteAckFailure(g.addr, mode, rerr.status, rerr.cause, len(g.idx))
+			}
 			for k, i := range g.idx {
 				if rerr != nil {
 					statuses[i], msgs[i] = rerr.status, rerr.msg
@@ -217,7 +222,11 @@ func (rt *Router) settleAckGroup(ctx context.Context, g ackGroup, topicName stri
 	}
 	for _, i := range g.idx {
 		res, err := rt.sendSingleAck(ctx, g.addr, ackForwardTimeout, item(i))
-		statuses[i], msgs[i] = ackOutcome(res, err)
+		if err != nil {
+			statuses[i], msgs[i] = rt.ackFailureFor(ctx, g.addr, mode, err)
+			continue
+		}
+		statuses[i], msgs[i] = ackOutcome(res)
 	}
 }
 
@@ -226,19 +235,25 @@ func (rt *Router) settleAckGroup(ctx context.Context, g ackGroup, topicName stri
 type ackBatchFailure struct {
 	status int
 	msg    string
+	// cause is the transport error or undecodable reply behind a
+	// forward that failed; nil for an owner's own refusal of the batch.
+	cause error
 }
 
 // ackBatchResults turns an OpAckBatch round trip into n per-record
 // results, or the one outcome all n records share when the batch as a
-// whole failed: a transport error is a 502 with its text, as a single
-// forwarded ack's is, and a non-200 reply (an owner that gave up on the
-// batch while it waited for a slot, say) is that reply.
-func ackBatchResults(res nodewire.Response, err error, n int) ([]nodewire.AckResult, *ackBatchFailure) {
+// whole failed: a transport error is what a single forwarded ack's
+// would be (see ackForwardFailure), a non-200 reply (an owner that gave
+// up on the batch while it waited for a slot, say) is that reply, and a
+// reply that does not decode is an unknown outcome, since the owner ran
+// the records.
+func ackBatchResults(ctx context.Context, res nodewire.Response, err error, n int) ([]nodewire.AckResult, *ackBatchFailure) {
 	if err != nil {
-		return nil, &ackBatchFailure{status: http.StatusBadGateway, msg: err.Error()}
+		status, msg := ackForwardFailure(ctx, err)
+		return nil, &ackBatchFailure{status: status, msg: msg, cause: err}
 	}
 	if res.Status != http.StatusOK {
-		status, msg := ackOutcome(res, nil)
+		status, msg := ackOutcome(res)
 		return nil, &ackBatchFailure{status: status, msg: msg}
 	}
 	results, err := nodewire.DecodeAckBatchReply(res.Body, nil)
@@ -246,7 +261,9 @@ func ackBatchResults(res nodewire.Response, err error, n int) ([]nodewire.AckRes
 		err = errors.New("wrong record count")
 	}
 	if err != nil {
-		return nil, &ackBatchFailure{status: http.StatusBadGateway, msg: "invalid ack batch reply: " + err.Error()}
+		err = fmt.Errorf("invalid ack batch reply: %w", err)
+		status, msg := ackForwardFailure(ctx, err)
+		return nil, &ackBatchFailure{status: status, msg: msg, cause: err}
 	}
 	return results, nil
 }
@@ -265,13 +282,10 @@ func (rt *Router) sendSingleAck(ctx context.Context, addr string, timeout time.D
 	}
 }
 
-// ackOutcome is the status and error message a forwarded single ack's
-// round trip comes to: what writePeerResponse would have written, or
-// the 502 RouteAck writes for a transport failure.
-func ackOutcome(res nodewire.Response, err error) (int, string) {
-	if err != nil {
-		return http.StatusBadGateway, err.Error()
-	}
+// ackOutcome is the status and error message an owner's reply to a
+// forwarded ack comes to: what writePeerResponse would have written. A
+// round trip that failed is ackForwardFailure's.
+func ackOutcome(res nodewire.Response) (int, string) {
 	status := res.Status
 	if status == 0 {
 		status = http.StatusOK
@@ -280,6 +294,41 @@ func ackOutcome(res nodewire.Response, err error) (int, string) {
 		return status, ""
 	}
 	return status, errorBodyText(res.ContentType, res.Body)
+}
+
+// statusClientClosedRequest is the non-standard 499 the HTTP layer
+// answers a request whose client went away with (handlers cannot be
+// imported from here; see handlers.StatusClientClosedRequest).
+const statusClientClosedRequest = 499
+
+// What a forwarded ack, extend or nack that got no answer from its owner
+// tells the client. Neither names the owner or carries the transport
+// error, which are this node's business; ackForwardFailure's callers log
+// them.
+const (
+	ackNotSentMessage      = "the ack did not reach the partition owner and was not applied; retry"
+	ackUnknownMessage      = "the partition owner did not answer; the ack may have been applied; retry"
+	clientClosedAckMessage = "client closed request"
+)
+
+// ackForwardFailure is the status and message a forwarded ack-shaped
+// record answers when its round trip to the owner failed. A request
+// whose client left is 499: nobody reads the answer, and it is not the
+// owner's failure. A request that never left this node (it waited out
+// its queue, or the transport refused it before writing a byte, see
+// clusterrpc.ErrNotSent) is 503 with nothing applied, and the single
+// route adds Retry-After. Anything else may have reached the owner and
+// been applied, so it is 502, the code that already says so; a retry of
+// an ack that landed answers 410.
+func ackForwardFailure(ctx context.Context, err error) (int, string) {
+	switch {
+	case ctx.Err() != nil:
+		return statusClientClosedRequest, clientClosedAckMessage
+	case errors.Is(err, clusterrpc.ErrNotSent):
+		return http.StatusServiceUnavailable, ackNotSentMessage
+	default:
+		return http.StatusBadGateway, ackUnknownMessage
+	}
 }
 
 // errorBodyText extracts the message from an error body: the "error"

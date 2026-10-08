@@ -1486,7 +1486,7 @@ has no `receipt_handle` and nothing needs acking.
 | [`429`](status-codes.md#status-429) | Too many consumes in flight for this user on this node. |
 | [`500`](status-codes.md#status-500) | The node could not read the partition, for example after a disk error. |
 | [`502`](status-codes.md#status-502) | With `partition`, the node forwarded the request to the partition's owner and got no answer. |
-| [`503`](status-codes.md#status-503) | With `partition`, the partition's owner is down. |
+| [`503`](status-codes.md#status-503) | With `partition`, the partition's owner is down. Retry after `Retry-After`. Releases up to v3.2.1 sent no `Retry-After`. |
 
 **Response body (`200`)**: a [Message](#message-object).
 
@@ -1600,8 +1600,8 @@ Only for a batch ack, at most 64 KiB.
 | [`413`](status-codes.md#status-413) | A batch body over 64 KiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`421`](status-codes.md#status-421) | The partition moved to another node while the request was served. Retry. |
-| [`502`](status-codes.md#status-502) | The node forwarded the request to the partition's owner and got no answer. Retry; an ack that already landed answers `410` the second time. |
-| [`503`](status-codes.md#status-503) | The partition's owner is down. Retry. |
+| [`502`](status-codes.md#status-502) | The node forwarded the request to the partition's owner and got no answer in time, so the ack may have been applied. Retry; an ack that already landed answers `410` the second time. The plain-text body names neither the owner nor the transport error. |
+| [`503`](status-codes.md#status-503) | The partition's owner is down, or the node could not get the forwarded request to the owner in time (no connection, or 2 seconds without a free slot to the owner). Nothing was applied. Retry after `Retry-After`; a `410` on the retry means the lease is gone. Releases up to v3.2.1 answered a forward that never left with `502`, and sent no `Retry-After`. |
 
 **Response body (`200`)**
 

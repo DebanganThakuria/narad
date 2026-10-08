@@ -692,8 +692,10 @@ func setContentHeaders(h http.Header, contentType string) {
 // currently down. Without replication the partition is unavailable until the
 // owner returns (or the partition moves), so this is a RETRYABLE condition:
 // a 503 tells clients to back off and try again, where falling through to
-// local handling would surface a terminal-looking 421.
+// local handling would surface a terminal-looking 421. Retry-After keeps
+// the retry from hammering a cluster that is recovering.
 func writeOwnerDown(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
 	http.Error(w, ownerDownMessage, http.StatusServiceUnavailable)
 }
 

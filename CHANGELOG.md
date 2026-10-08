@@ -10,6 +10,15 @@ summarized more briefly than the 1.x and later entries.
 
 ## [Unreleased]
 
+### Added
+- `narad_cluster_ack_forward_failures_total{op,outcome}`: forwarded acks, extends and nacks that failed, one per record, by `op` and by what the client was told (`not_sent`, `unknown` or `client_gone`), including acks that gave up waiting for a slot to their owner, which `narad_cluster_rpc_requests_total` never saw. With it, a `forwarded acks failed` warning, at most once a minute per owner, with the owner's address, the counts since the last line, the last error and whether the acks failed in the queue or on the round trip. See [Troubleshooting](docs/operate/troubleshooting.md#status-502).
+
+### Changed
+- A forwarded ack, extend or nack whose request never left the node you called (it waited 2 s for a free slot to the partition's owner, or no connection to the owner could be had) now answers `503` with `Retry-After: 1`, `the ack did not reach the partition owner and was not applied; retry`, instead of `502`: nothing was applied, so a `410` on the retry means the lease is gone. `502` now means only that the ack may have been applied, `the partition owner did not answer; the ack may have been applied; retry`, and its body no longer carries the owner's address or the transport error. A forwarded ack whose client went away is recorded as `499`, not `502`. A batch ack reports the same statuses per handle. The `503` for a partition owner that is down (ack, extend, nack, a replay or a pinned consume) now carries `Retry-After: 1`. See [Status codes and errors](docs/reference/status-codes.md#status-503).
+
+### Fixed
+- A forwarded ack, extend or nack that queued for a shared batch could answer `502` after its owner applied it: the queued ack gave up when its 2 s budget ran out even when its batch had already left and was on the wire. It now waits for the batch's answer once the batch has left. A batch also left with only what was left of the first queued ack's 2 s for its round trip, so one that queued for 1.9 s had about 100 ms and timed out after the owner applied it; every batch now gets a full 2 s round trip. A queued ack can therefore take up to 4 s (2 s waiting for a slot, 2 s for the round trip) before it answers.
+
 ## [3.2.1] - 2026-10-07
 
 ### Fixed

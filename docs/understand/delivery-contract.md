@@ -132,7 +132,8 @@ Each row is one event: what clients see while it lasts, what it can lose, and wh
 |---|---|---|---|---|
 | A consumer crashes holding a lease | Nothing | The message again after its visibility timeout | Nothing | Make handlers [idempotent](../build/handling-retries.md) |
 | A handler outlives the visibility timeout | Nothing | Another consumer gets the message; the late ack gets `410` | Nothing, but the work may run twice | [Extend the lease](../build/consuming.md#extend) while working |
-| An ack is lost, or answered `502` or `503` | Nothing | Unknown whether it landed; a retry of one that landed gets `410` | Nothing | [Retry the ack](../build/handling-retries.md#retry-acks) with backoff |
+| An ack is answered `503` | Nothing | It did not land | Nothing | [Retry the ack](../build/handling-retries.md#retry-acks) with backoff; a `410` on the retry means the lease is gone |
+| An ack is lost, or answered `502` | Nothing | Unknown whether it landed; a retry of one that landed gets `410` | Nothing | [Retry the ack](../build/handling-retries.md#retry-acks) with backoff |
 | A produce times out | Unknown whether it was accepted | A retried produce may arrive twice | Nothing, once retried | Retry, per the [retry rules](../reference/status-codes.md#retry-rules) |
 | The broker process crashes | Requests in flight to that node fail; other nodes accept | Its partitions wait. On its return, its leased messages and about 100 ms of acks come back at once, and messages committed to it just before the crash can arrive twice | Nothing that got a `202` | Nothing, with [idempotent handlers](../build/handling-retries.md) |
 | A node loses power, volume intact | As for a crash | As for a crash, plus about 1.1 s of acks, and about 250 ms of dispatched messages twice | Nothing that got a `202` | To shorten the ack window, lower [the durability interval](../reference/configuration.md#storage) |

@@ -26,7 +26,7 @@ Date: Mon, 28 Sep 2026 21:48:17 GMT
 - `$NARAD` is the base URL of any node or of the load balancer, for example `http://127.0.0.1:7942`.
 - `$AUTH` is `username:password` of a user with the grant the request needs.
 
-An error answer is JSON with one field, `{"error": "..."}`. A few are plain text: an unknown route or method (`404`, `405`), an oversized header block (`431`), and some answers to a request forwarded to another node. Those are `502`, `503` when a partition owner is down or the leader cannot be reached, and some `500` and `400` answers to a consume forwarded to another node. Decide on the status code; the message is for people. Which endpoint returns which code is listed with each endpoint in the [HTTP API reference](http-api.md).
+An error answer is JSON with one field, `{"error": "..."}`. A few are plain text: an unknown route or method (`404`, `405`), an oversized header block (`431`), and some answers to a request forwarded to another node. Those are `502`, `503` when a partition owner is down, a forwarded ack did not reach its owner, or the leader cannot be reached, and some `500` and `400` answers to a consume forwarded to another node. Decide on the status code; the message is for people. Which endpoint returns which code is listed with each endpoint in the [HTTP API reference](http-api.md).
 
 The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for each code, checked against narad-go at commit `377c853`. Match them with `errors.Is`.
 
@@ -274,9 +274,9 @@ The error message says which limit was hit, in the same order:
 
 ## 499 Client Closed Request {#status-499}
 
-**Where:** any request whose client disconnected before the answer.
+**Where:** any request whose client disconnected before the answer, including an ack, extend or nack that this node forwarded to the partition's owner (single, or one handle's result in a batch ack).
 
-**Meaning:** Narad records the request as `499`, not as a server error. No client receives it; it shows in `narad_http_requests_total{status="499"}` and the logs ([Metrics reference](metrics.md#traffic)).
+**Meaning:** Narad records the request as `499`, not as a server error. A forwarded ack whose client left may still have been applied by the owner; a retry of one that landed answers `410`. No client receives it; it shows in `narad_http_requests_total{status="499"}` and the logs ([Metrics reference](metrics.md#traffic)).
 
 **What to do:** nothing on the server. On the client, look at its timeouts.
 
@@ -308,7 +308,7 @@ The error message says which limit was hit, in the same order:
 
 **Where:** ack, extend and nack (single, or one handle's result in a batch ack); a replay, or a consume pinned with `partition`; and (from v3.2.0) a remote child's attach or resume.
 
-**Meaning:** the node you reached forwarded the request to the partition's [owner](glossary.md#owner) and got no answer: the owner stopped responding or the connection failed. The body is plain text. **New in v3.2.0:** for a remote child's attach or resume, the remote checks got an answer that proves nothing about the target: something in front of it (a load balancer, a proxy) answered instead (`edge`), or it answered with a redirect, which is never followed (`redirect_refused`).
+**Meaning:** the node you reached forwarded the request to the partition's [owner](glossary.md#owner) and got no answer: the owner stopped responding or the connection failed after the request went out. For an ack, extend or nack this means the owner may have applied it: `the partition owner did not answer; the ack may have been applied; retry`. An ack that never left the node you reached is a [`503`](#status-503) instead. The body is plain text and names neither the owner nor the transport error, which the node logs ([Troubleshooting](../operate/troubleshooting.md#status-502)); releases up to v3.2.1 put both in the body and answered `502` for every failed forward of an ack. **New in v3.2.0:** for a remote child's attach or resume, the remote checks got an answer that proves nothing about the target: something in front of it (a load balancer, a proxy) answered instead (`edge`), or it answered with a redirect, which is never followed (`redirect_refused`).
 
 **What to do:** retry with backoff. An ack cannot settle twice, so a retry of one that had already landed answers `410` and changes nothing. For a batch ack, retry only the handles whose result is `502`. See [Troubleshooting](../operate/troubleshooting.md#status-502).
 
@@ -318,7 +318,8 @@ The error message says which limit was hit, in the same order:
 
 **Where:**
 
-- Ack, extend and nack, a replay, or a consume pinned with `partition`, when the partition's owner is down: `partition owner is down; retry later` (plain text).
+- Ack, extend and nack, a replay, or a consume pinned with `partition`, when the partition's owner is down: `partition owner is down; retry later` (plain text), with `Retry-After: 1` (releases up to v3.2.1 sent no `Retry-After`).
+- Ack, extend and nack (single, or one handle's result in a batch ack) that this node forwards to the partition's owner, when the forward never left the node: it waited 2 seconds for a free slot to the owner, or no connection to the owner could be had. Nothing was applied: `the ack did not reach the partition owner and was not applied; retry` (plain text), with `Retry-After: 1` on a single ack. A `410` on the retry is then a real loss of the lease, not a sign that this attempt landed. Releases up to v3.2.1 answered these with `502`.
 - Any change to cluster metadata (topics, fan-out links, users, decommission) while the cluster has no Raft leader or the leader cannot be reached, including a change by a user without `admin` naming a topic the receiving node does not have, when that node cannot catch up with the leader to confirm it. A leader elected moments ago may also answer `503` once while it finishes applying the log.
 - A change to cluster metadata whose Raft leader lost its leadership, or stopped, while committing it (**from v3.1.0**): `control plane temporarily unavailable: the change may still be applied, read it back before retrying: ...`. A later leader may still commit the change, so read the record back before you retry; a retried create of a topic that did land answers `409`, a retried delete `404`.
 - `/readyz` while the node should not take traffic, and `/healthz` once the node is shutting down.
@@ -340,7 +341,7 @@ The error message says which limit was hit, in the same order:
 
 - **`2xx`:** done. Never retry a `202`.
 - **`4xx`:** do not retry unchanged. Two exceptions: retry `429` after a backoff, and retry `421`, which is a routing race.
-- **`410` on an ack:** do not retry. The message comes back; your handler must be idempotent.
+- **`410` on an ack:** do not retry. The message comes back; your handler must be idempotent. A `410` on the retry of an ack that got `502`, `499` or no answer most likely means that attempt landed; after a `503` it means the lease is gone.
 - **`500`, `502`, `503`:** retry with backoff. Where you can, send the retry to another node.
 - **Timeouts and dropped connections on a produce:** the message may or may not have been accepted, so a retry can store it twice. That is safe only because consumers are idempotent. A batch produce that times out or gets a `5xx` is ambiguous as a whole: any of its messages may have been stored.
 - **Timeouts on an ack:** retry. A duplicate ack answers `410` and changes nothing.

@@ -220,7 +220,8 @@ func (p *quicClientPool) requestWithin(ctx context.Context, addr string, lane La
 		var err error
 		ps, err = p.stream(ctx, deadline, key)
 		if err != nil {
-			return clusterwire.StreamFrame{}, err
+			// No stream, so nothing was written.
+			return clusterwire.StreamFrame{}, notSent(err)
 		}
 	}
 
