@@ -1,8 +1,8 @@
 repository:
   name: narad
-  description: Lightweight, durable, queue-first event streaming system.
+  description: "Queue-first message broker in one Go binary: HTTP in, at-least-once out."
   private: false
-  homepage: ""
+  homepage: https://debanganthakuria.github.io/narad/
   topics:
     - go
     - queue
