@@ -57,6 +57,24 @@ var errFallbackReplyTimeout = fmt.Errorf("reply wait fell back to client timeout
 // deadline.
 var errRequestTimeout = fmt.Errorf("cluster rpc request timed out: %w", context.DeadlineExceeded)
 
+// ErrNotSent marks a request that failed before any byte of its frame
+// was written to the peer: no stream could be had, the caller's context
+// had already ended, the wait for the stream's write slot ran out, or
+// the write timed out or failed with nothing written. The peer never saw
+// the request, so it applied nothing, and a caller can say so. The error
+// wraps its cause too, so a timeout is still a context.DeadlineExceeded.
+// Any failure after part of the frame went out, or while its reply is
+// awaited, is not marked: the peer may have the request.
+var ErrNotSent = errors.New("cluster rpc request not sent")
+
+// notSent marks err as a request that never left (see ErrNotSent).
+func notSent(err error) error {
+	if err == nil || errors.Is(err, ErrNotSent) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrNotSent, err)
+}
+
 // timerPool recycles the timers that bound reply and queue waits, so a
 // request carrying a timeout does not allocate one. Reuse is safe: since
 // Go 1.23, Stop and Reset guarantee that no value from before the call
@@ -187,7 +205,7 @@ func (c *streamClient) roundTrip(ctx context.Context, deadline time.Time, frameT
 	// A caller whose context has already ended fails without touching
 	// the shared stream: nothing registered, nothing written.
 	if err := ctx.Err(); err != nil {
-		return clusterwire.StreamFrame{}, errors.Is(err, context.DeadlineExceeded), err
+		return clusterwire.StreamFrame{}, errors.Is(err, context.DeadlineExceeded), notSent(err)
 	}
 	// limit is when the request must end; own marks it as the caller's
 	// deadline rather than ctx's. ctx.Done() already fires at ctx's, the
@@ -319,21 +337,22 @@ func (c *streamClient) complete(requestID uint64, result streamResult) {
 // writeFrame writes one frame, bounded by limit (see roundTrip; the
 // client timeout when limit is zero). Frames go out one at a time; a
 // caller whose context ends while it waits its turn, or whose own
-// deadline (own) passes, gives up having written nothing.
+// deadline (own) passes, gives up having written nothing. Every failure
+// with nothing written wraps ErrNotSent.
 func (c *streamClient) writeFrame(ctx context.Context, limit time.Time, own bool, frame clusterwire.StreamFrame) error {
 	if c.isClosed() {
-		return c.closeError()
+		return notSent(c.closeError())
 	}
 	if len(frame.Payload) > clusterwire.MaxStreamFramePayloadBytes {
 		// Refused before a byte is written: the stream is untouched.
-		return fmt.Errorf("stream frame payload too large: %d bytes", len(frame.Payload))
+		return notSent(fmt.Errorf("stream frame payload too large: %d bytes", len(frame.Payload)))
 	}
 	var until time.Time
 	if own {
 		until = limit
 	}
 	if err := c.lockWrite(ctx, until); err != nil {
-		return err
+		return notSent(err)
 	}
 	defer c.unlockWrite()
 
@@ -349,11 +368,11 @@ func (c *streamClient) writeFrame(ctx context.Context, limit time.Time, own bool
 	// before any of the frame went out; report whose deadline that was.
 	switch {
 	case own:
-		return errRequestTimeout
+		return notSent(errRequestTimeout)
 	case !limit.IsZero():
-		return context.DeadlineExceeded
+		return notSent(context.DeadlineExceeded)
 	default:
-		return fmt.Errorf("cluster rpc write stalled for %s: %w", c.timeout, context.DeadlineExceeded)
+		return notSent(fmt.Errorf("cluster rpc write stalled for %s: %w", c.timeout, context.DeadlineExceeded))
 	}
 }
 
@@ -393,10 +412,12 @@ func (c *streamClient) unlockWrite() {
 // leaves the stream's framing intact, so only this frame fails and the
 // stream keeps serving the RPCs multiplexed on it. Any other failure, or
 // a frame cut off part-way (which corrupts the framing), closes the
-// stream and fails every request on it.
+// stream and fails every request on it. A failure with nothing written
+// wraps ErrNotSent; the requests already on the stream fail with the bare
+// cause, since the peer may have them.
 func (c *streamClient) writeLocked(deadline time.Time, frame clusterwire.StreamFrame) error {
 	if c.isClosed() {
-		return c.closeError()
+		return notSent(c.closeError())
 	}
 	_ = c.conn.SetWriteDeadline(deadline)
 	buf, n, err := clusterwire.WriteStreamFrameStaged(c.conn, c.writeBuf, frame, maxRetainedWriteBuffer)
@@ -408,9 +429,12 @@ func (c *streamClient) writeLocked(deadline time.Time, frame clusterwire.StreamF
 		return nil
 	}
 	if n == 0 && errors.Is(err, os.ErrDeadlineExceeded) {
-		return err
+		return notSent(err)
 	}
 	c.closeWithError(err)
+	if n == 0 {
+		return notSent(err)
+	}
 	return err
 }
 
