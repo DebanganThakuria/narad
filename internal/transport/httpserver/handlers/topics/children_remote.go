@@ -323,14 +323,15 @@ type undecider interface{ MarkUndecided() }
 // leader that could not be reached may have committed the write, so the
 // audit line says unknown; an older leader refused it outright; and a
 // write the leader committed that this node has not applied yet is
-// answered as made (handlers.Set.WriteNotAppliedHere).
-func writeForwardError(s *handlers.Set, w http.ResponseWriter, err error) {
+// answered as made (handlers.Set.WriteNotAppliedHere), with the
+// warnings of the leader's answer res.
+func writeForwardError(s *handlers.Set, w http.ResponseWriter, res nodewire.Response, err error) {
 	if leaderTooOld(err) {
 		s.WriteError(w, http.StatusPreconditionFailed, "the cluster leader runs an older release that does not serve remote children; finish the upgrade first")
 		return
 	}
 	if errors.Is(err, errs.ErrNotAppliedHere) {
-		s.WriteNotAppliedHere(w)
+		s.WriteNotAppliedHere(w, leaderWarnings(res)...)
 		return
 	}
 	if u, ok := w.(undecider); ok {
@@ -355,10 +356,26 @@ func sendRemoteChildWrite(s *handlers.Set, w http.ResponseWriter, r *http.Reques
 	}
 	res, err := forwardRemoteWrite(r.Context(), s, subOp, actor, requestID, body, timeout)
 	if err != nil {
-		writeForwardError(s, w, err)
+		writeForwardError(s, w, res, err)
 		return
 	}
 	writeRemoteAnswer(s, w, res)
+}
+
+// leaderWarnings returns the warnings of a leader's 2xx answer: an
+// attach computes them once, and a 503 for a change this node has not
+// applied yet must not lose them.
+func leaderWarnings(res nodewire.Response) []string {
+	if res.Status < 200 || res.Status > 299 {
+		return nil
+	}
+	var body struct {
+		Warnings []string `json:"warnings"`
+	}
+	if json.Unmarshal(res.Body, &body) != nil {
+		return nil
+	}
+	return body.Warnings
 }
 
 func forwardRemoteWrite(ctx context.Context, s *handlers.Set, subOp, actor, requestID string, body map[string]any, timeout time.Duration) (nodewire.Response, error) {
@@ -443,7 +460,7 @@ func detachThroughLeader(s *handlers.Set, w http.ResponseWriter, r *http.Request
 	body := map[string]any{"parent": parent, "child": child, "force": force, "expect_remote": true}
 	res, err := forwardRemoteWrite(r.Context(), s, nodewire.RemoteSubDetach, callerName(r), requestID, body, deleteTimeout)
 	if err != nil {
-		writeForwardError(s, w, err)
+		writeForwardError(s, w, res, err)
 		return
 	}
 	writeRemoteAnswer(s, w, res)
@@ -459,7 +476,7 @@ func deleteThroughLeader(s *handlers.Set, w http.ResponseWriter, r *http.Request
 	body := map[string]any{"topic": name, "force": force, "expect_remote": true}
 	res, err := forwardRemoteWrite(r.Context(), s, nodewire.RemoteSubTopicDelete, callerName(r), requestID, body, deleteTimeout)
 	if err != nil {
-		writeForwardError(s, w, err)
+		writeForwardError(s, w, res, err)
 		return
 	}
 	writeRemoteAnswer(s, w, res)

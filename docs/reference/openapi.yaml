@@ -602,6 +602,8 @@ paths:
         `result`, `class` and this cluster's own `credential_version`,
         `posture` and an empty `warnings` (nothing the target answered: no
         `target_id`, `target_serves_ids`, times or certificate expiry),
+        the top-level `warnings` of a dry run or a `201` holds only the
+        parent retention warning, a dry run has no `capabilities`,
         and a failed attach or resume answers the
         `class` and the failing `members` instead of each member's report.
         The
@@ -619,13 +621,13 @@ paths:
               $ref: '#/components/schemas/AttachChildRequest'
       responses:
         '200':
-          description: 'Attached. The body is the parent topic. From v3.2.0, for a remote `dry_run`: every check passed and nothing was written, and the body is a report instead, with `dry_run`, `attach_offsets` (the start offset per parent partition), `checks` (each member''s report), `warnings` and, when the leader could probe the target, `capabilities` (`max_messages` per batch and `zstd`).'
+          description: 'Attached. The body is the parent topic. From v3.2.0, for a remote `dry_run`: every check passed and nothing was written, and the body is a report instead, with `dry_run`, `attach_offsets` (the start offset per parent partition), `checks` (each member''s report), `warnings` and, when the leader could probe the target and `remotes.allowed_hosts` is set, `capabilities` (`max_messages` per batch and `zstd`).'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Topic'
         '201':
-          description: New in v3.2.0. The remote child was created. The body is its stub, plus `warnings` when there are any (a parent retention below 72 hours, a target that serves no topic IDs, a certificate that expires within 14 days).
+          description: New in v3.2.0. The remote child was created. The body is its stub, plus `warnings` when there are any (a parent retention below 72 hours; with `remotes.allowed_hosts`, also a target that serves no topic IDs, a target whose batch produce takes at most 1 MiB of body, a certificate that expires within 14 days).
           x-narad-origin: forwarding
           content:
             application/json:
@@ -653,7 +655,7 @@ paths:
           description: New in v3.2.0, with `remote`. Something in front of the target answered instead of it (a load balancer or a proxy), or the target answered with a redirect, which is never followed.
           x-narad-origin: forwarding
         '503':
-          description: 'No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent''s partition owners could not be asked for the attach point. Nothing was linked; retry. From v3.2.0, with `remote`, also when the target or a member was unavailable during the checks. With `remote`, when the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again.'
+          description: 'No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent''s partition owners could not be asked for the attach point. Nothing was linked; retry. From v3.2.0, with `remote`, also when the target or a member was unavailable during the checks. With `remote`, when the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again. For an attach, the body also carries the leader''s `warnings`, which no read shows again.'
       x-narad-examples:
         - title: a local child
           request: |

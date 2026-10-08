@@ -541,6 +541,9 @@ type fakeCheckRunner struct {
 	// blind: no host allowlist on the node; hereCalls counts CheckHere.
 	blind     bool
 	hereCalls int
+	// older: the target is a release whose children listing reports no
+	// parent IDs, so it serves no topic IDs.
+	older bool
 }
 
 func (f *fakeCheckRunner) AllowlistConfigured() bool {
@@ -562,7 +565,7 @@ func (f *fakeCheckRunner) CheckEverywhere(_ context.Context, req remote.CheckReq
 	defer f.mu.Unlock()
 	f.calls++
 	f.last = req
-	r := remote.NodeReport{Node: "node-self", Result: "pass", CredentialVersion: req.CredentialVersion, TargetID: f.targetID, TargetServesIDs: new(f.targetID != ""), Warnings: []string{}}
+	r := remote.NodeReport{Node: "node-self", Result: "pass", CredentialVersion: req.CredentialVersion, TargetID: f.targetID, TargetServesIDs: new(f.targetID != "" && !f.older), Warnings: []string{}}
 	if f.fail != "" {
 		r.Result, r.Class = "fail", f.fail
 	}

@@ -636,6 +636,8 @@ run checks from the leader alone, its reports carry only `node`,
 `result`, `class` and this cluster's own `credential_version`,
 `posture` and an empty `warnings` (nothing the target answered: no
 `target_id`, `target_serves_ids`, times or certificate expiry),
+the top-level `warnings` of a dry run or a `201` holds only the
+parent retention warning, a dry run has no `capabilities`,
 and a failed attach or resume answers the
 `class` and the failing `members` instead of each member's report.
 The
@@ -667,8 +669,8 @@ fields `remote_topic`, `from`, `lanes` and `dry_run` without
 
 | Status | Meaning |
 |---|---|
-| [`200`](status-codes.md#status-200) | Attached. The body is the parent topic. From v3.2.0, for a remote `dry_run`: every check passed and nothing was written, and the body is a report instead, with `dry_run`, `attach_offsets` (the start offset per parent partition), `checks` (each member's report), `warnings` and, when the leader could probe the target, `capabilities` (`max_messages` per batch and `zstd`). |
-| [`201`](status-codes.md#status-201) | New in v3.2.0. The remote child was created. The body is its stub, plus `warnings` when there are any (a parent retention below 72 hours, a target that serves no topic IDs, a certificate that expires within 14 days). |
+| [`200`](status-codes.md#status-200) | Attached. The body is the parent topic. From v3.2.0, for a remote `dry_run`: every check passed and nothing was written, and the body is a report instead, with `dry_run`, `attach_offsets` (the start offset per parent partition), `checks` (each member's report), `warnings` and, when the leader could probe the target and `remotes.allowed_hosts` is set, `capabilities` (`max_messages` per batch and `zstd`). |
+| [`201`](status-codes.md#status-201) | New in v3.2.0. The remote child was created. The body is its stub, plus `warnings` when there are any (a parent retention below 72 hours; with `remotes.allowed_hosts`, also a target that serves no topic IDs, a target whose batch produce takes at most 1 MiB of body, a certificate that expires within 14 days). |
 | [`400`](status-codes.md#status-400) | `child` is missing, the two names are the same, or `delay_ms` is out of range. New in v3.2.0: a remote field without `remote`, a name that is not a remote's or a topic's, `lanes` outside 1 to 8, `from` other than `attach`, `unconsumed` or `earliest`, or a remote that does not exist. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | The caller does not manage both topics, as the node that answers or the cluster leader sees them. From v3.2.0, with `remote`, the caller is not an `admin`, or security is off (`remotes require security`). |
@@ -679,7 +681,7 @@ fields `remote_topic`, `from`, `lanes` and `dry_run` without
 | [`429`](status-codes.md#status-429) | New in v3.2.0, with `remote`. This node took 60 remote child writes in the last minute, or a check of this remote ran less than 5 seconds ago on a member; retry after `Retry-After`. |
 | [`501`](status-codes.md#status-501) | New in v3.2.0, with `remote`. The answering node, or the leader, has no remote plane. |
 | [`502`](status-codes.md#status-502) | New in v3.2.0, with `remote`. Something in front of the target answered instead of it (a load balancer or a proxy), or the target answered with a redirect, which is never followed. |
-| [`503`](status-codes.md#status-503) | No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry. From v3.2.0, with `remote`, also when the target or a member was unavailable during the checks. With `remote`, when the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again. |
+| [`503`](status-codes.md#status-503) | No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry. From v3.2.0, with `remote`, also when the target or a member was unavailable during the checks. With `remote`, when the leader committed the change but the answering node could not confirm that its own copy applied it, `503` with `Retry-After: 2` and an error that says the change is committed: read it back after the delay, or on another node, and do not send it again. For an attach, the body also carries the leader's `warnings`, which no read shows again. |
 
 **Response body (`200`)**: a [Topic](#topic-object).
 

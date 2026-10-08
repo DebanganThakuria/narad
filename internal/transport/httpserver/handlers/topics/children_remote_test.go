@@ -672,6 +672,20 @@ func TestRemoteWriteNotAppliedHereAnswers503WithRetryAfter(t *testing.T) {
 	check("pause", post(t, PauseChild(s), "/", `{}`, &adminUser, "parent", "orders", "child", "orders-to-b"))
 	w.res = nodewire.Response{Status: http.StatusNoContent}
 	check("detach", del(t, DetachChild(s), "/", &adminUser, "parent", "orders", "child", "orders-to-b"))
+
+	// An attach's warnings are computed once, on the leader, and no read
+	// shows them again: the 503 passes on the leader's.
+	warned := []string{"parent retention (24h0m0s) is below 72h", "the target runs an older release"}
+	leader, _ := json.Marshal(map[string]any{"name": "orders-to-c", "warnings": warned})
+	w.res = nodewire.Response{Status: http.StatusCreated, Body: leader}
+	res := post(t, AttachChild(s), "/v1/topics/orders/children", `{"child":"orders-to-c","remote":"c","remote_topic":"orders"}`, &adminUser, "parent", "orders")
+	check("attach", res)
+	var out struct {
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &out); err != nil || !slices.Equal(out.Warnings, warned) {
+		t.Fatalf("attach 503 body %s (%v): warnings = %v, want the leader's %v", res.Body.String(), err, out.Warnings, warned)
+	}
 }
 
 // A forward that never got the leader's answer still answers 503 with
