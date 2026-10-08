@@ -599,7 +599,10 @@ paths:
         `dry_run` it stops before the entry and answers what it found.
         Without `remotes.allowed_hosts` on the leader, a dry
         run checks from the leader alone, its reports carry only `node`,
-        `result` and `class`, and a failed attach or resume answers the
+        `result`, `class` and this cluster's own `credential_version`,
+        `posture` and an empty `warnings` (nothing the target answered: no
+        `target_id`, `target_serves_ids`, times or certificate expiry),
+        and a failed attach or resume answers the
         `class` and the failing `members` instead of each member's report.
         The
         fields `remote_topic`, `from`, `lanes` and `dry_run` without
@@ -2367,7 +2370,8 @@ paths:
         (`rtt_ms`) and an estimate of one lane's capacity; without it only
         this node runs them, and its report carries only `node`, `result`,
         `class` and this cluster's own fields: no time, no target ID, no
-        certificate expiry, no warnings drawn from the target's answers.
+        `target_serves_ids`, no certificate expiry, no warnings drawn from
+        the target's answers.
 
         The answer is `200` whether or not the checks pass: read `result`.
         `narad remote test` exits non-zero unless it is `pass`.
@@ -3365,7 +3369,7 @@ components:
                 description: The target topic's ID.
               target_serves_ids:
                 type: boolean
-                description: '`false` for a target whose children listing serves no `parent_id` and no `remote` objects (v3.1.0): it cannot hold a remote child, so loop detection starts once it is upgraded; recreate detection reads the topic id from its describe answer.'
+                description: '`false` for a target whose children listing serves no `parent_id` and no `remote` objects (v3.1.0): it cannot hold a remote child, so loop detection starts once it is upgraded; recreate detection reads the topic id from its describe answer. Absent without `remotes.allowed_hosts` (a blind report) and when the checks stopped before they read the target''s children listing.'
               rtt_ms:
                 type: integer
                 description: TCP connect time, with `remotes.allowed_hosts` set.

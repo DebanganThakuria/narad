@@ -450,7 +450,7 @@ func attachWarnings(parent topic.Topic, reports []remote.NodeReport, blind bool)
 			time.Duration(parent.RetentionMs)*time.Millisecond))
 	}
 	for _, r := range reports {
-		if !r.TargetServesIDs {
+		if !r.ServesIDs() {
 			warnings = append(warnings, "the target does not report remote children (an older release, which cannot hold one): loop detection starts once it is upgraded")
 			break
 		}

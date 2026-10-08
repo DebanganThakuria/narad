@@ -137,7 +137,7 @@ narad --ctx a remote test b --topic orders --source orders
 }
 ```
 
-The command exits `0` only when `result` is `pass`; otherwise it ends with `narad: remote test failed: <class>`, such as `target_missing` for a topic the remote does not have. With `remotes.allowed_hosts` set, every node runs the checks and reports its connect time (`rtt_ms`) and an estimate of one [lane](../build/remote-children.md#throughput)'s records per second at that round trip; without it, only the node you asked runs them and reports no time. A check of one remote runs at most once every 5 seconds per node (`429` in between). What each failing `class` means is in [check classes](../reference/remote-children.md#check-classes).
+The command exits `0` only when `result` is `pass`; otherwise it ends with `narad: remote test failed: <class>`, such as `target_missing` for a topic the remote does not have. With `remotes.allowed_hosts` set, every node runs the checks and reports its connect time (`rtt_ms`) and an estimate of one [lane](../build/remote-children.md#throughput)'s records per second at that round trip; without it, only the node you asked runs them and its report carries nothing the remote answered: no `rtt_ms`, `target_id`, `target_serves_ids` or `server_cert_not_after`. A check of one remote runs at most once every 5 seconds per node (`429` in between). What each failing `class` means is in [check classes](../reference/remote-children.md#check-classes).
 
 ## List remotes {#list}
 

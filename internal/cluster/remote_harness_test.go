@@ -562,7 +562,7 @@ func (f *fakeCheckRunner) CheckEverywhere(_ context.Context, req remote.CheckReq
 	defer f.mu.Unlock()
 	f.calls++
 	f.last = req
-	r := remote.NodeReport{Node: "node-self", Result: "pass", CredentialVersion: req.CredentialVersion, TargetID: f.targetID, TargetServesIDs: f.targetID != "", Warnings: []string{}}
+	r := remote.NodeReport{Node: "node-self", Result: "pass", CredentialVersion: req.CredentialVersion, TargetID: f.targetID, TargetServesIDs: new(f.targetID != ""), Warnings: []string{}}
 	if f.fail != "" {
 		r.Result, r.Class = "fail", f.fail
 	}

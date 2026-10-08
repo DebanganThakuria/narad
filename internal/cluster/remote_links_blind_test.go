@@ -31,6 +31,9 @@ func TestAttachIsBlindWithoutAnAllowlist(t *testing.T) {
 		if id, ok := raw.(map[string]any)["target_id"]; ok {
 			t.Fatalf("dry run answer carries the target ID %v", id)
 		}
+		if v, ok := raw.(map[string]any)["target_serves_ids"]; ok {
+			t.Fatalf("dry run answer carries target_serves_ids %v", v)
+		}
 	}
 
 	s.checks.mu.Lock()

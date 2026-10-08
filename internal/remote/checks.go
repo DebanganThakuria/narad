@@ -178,7 +178,8 @@ func (c *Checker) Run(ctx context.Context, req CheckRequest) NodeReport {
 	if err := json.Unmarshal(body, &ch); err != nil {
 		return fail(topic.RemoteClassEdge)
 	}
-	rep.TargetServesIDs = ch.ParentID != nil
+	servesIDs := ch.ParentID != nil
+	rep.TargetServesIDs = &servesIDs
 	if !topic.RemoteChainsAllowed {
 		for _, child := range ch.Children {
 			if len(child.Remote) > 0 && !bytes.Equal(child.Remote, []byte("null")) {
@@ -186,7 +187,7 @@ func (c *Checker) Run(ctx context.Context, req CheckRequest) NodeReport {
 			}
 		}
 	}
-	if !rep.TargetServesIDs {
+	if !servesIDs {
 		rep.Warnings = append(rep.Warnings, "the target does not serve remote and parent_id (an older release, which cannot hold remote children): loop and chain detection start once it is upgraded; recreate detection reads the topic id")
 	}
 	if rep.TargetID == "" {

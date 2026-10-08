@@ -308,7 +308,7 @@ type targetIDChecks struct {
 }
 
 func (c *targetIDChecks) CheckEverywhere(ctx context.Context, req remote.CheckRequest) ([]remote.NodeReport, error) {
-	r := remote.NodeReport{Node: c.node, Result: "pass", CredentialVersion: req.CredentialVersion, Warnings: []string{}, TargetServesIDs: true}
+	r := remote.NodeReport{Node: c.node, Result: "pass", CredentialVersion: req.CredentialVersion, Warnings: []string{}, TargetServesIDs: new(true)}
 	e, err := c.lookup.Get(req.Remote)
 	if err != nil {
 		r.Result, r.Class = "fail", topic.RemoteStateRemoteMissing
