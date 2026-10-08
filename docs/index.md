@@ -376,7 +376,7 @@ To scale out, raise `replicaCount`. The new pod joins the cluster and the leader
 ```sh
 helm install narad ./charts/narad \
   -n narad --set replicaCount=3 \
-  --set image.tag=v3.2.1
+  --set image.tag=v3.2.2
 ```
 
 The chart's NetworkPolicy fences the Raft port to the Narad pods by default; [Raft TLS](operate/raft-tls.md) is the production choice.
@@ -510,7 +510,7 @@ What a `202` promises, and what Narad trades for it.
 - **A `202` means fsynced to disk.** Delivery is at least once, so handlers must be idempotent. A nightly run kills and partitions a three-node cluster at 300 messages a second, and fails on any anomaly the contract does not explain. [The delivery contract, checked nightly](understand/linearizability.md){ .nr-more }
 - **Ordering is not guaranteed.** Redelivery and rerouting around a dead node both reorder messages. Carry a sequence in the payload if you need one. [Every way order breaks](understand/delivery-contract.md#ordering){ .nr-more }
 - **Each partition is one copy on one volume.** Crashes and restarts lose nothing; a destroyed disk loses that node's partitions. For a second copy, add a replica child or snapshot the volumes. [Replication, when you ask for it](operate/backups.md#replica-children){ .nr-more }
-- **Fsync costs throughput.** On one shared 2 CPU / 2 GB box with 256-byte messages, Narad produced 10,454 msg/s, fifth of six brokers; RabbitMQ's quorum queue, the only other one there that fsyncs before it confirms, was about 1.25 times faster. [Same compute, measured](get-started/compare.md#same-compute-measured-ourselves){ .nr-more }
+- **Fsync costs throughput.** On one shared 2 CPU / 2 GB box with 256-byte messages, Narad produced 10,454 msg/s, fifth of six brokers; RabbitMQ's quorum queue, the only other one there that fsyncs before it confirms, was about 1.25 times faster. Batches win most of it back: on three nodes, [batches of 100](reference/capacity.md#batched-throughput) sustained about 377,000 messages a second through produce, consume and ack. [Same compute, measured](get-started/compare.md#same-compute-measured-ourselves){ .nr-more }
 
 </div>
 </section>
@@ -552,7 +552,7 @@ The `narad` binary is both the broker and the CLI. `narad server start --dev` ru
       -v narad-data:/var/lib/narad \
       -e NARAD_SECURITY_ENABLED=false \
       -e NARAD_CLUSTER_ADDR=127.0.0.1:7943 \
-      ghcr.io/debanganthakuria/narad:v3.2.1
+      ghcr.io/debanganthakuria/narad:v3.2.2
     ```
 
 === "Homebrew"
