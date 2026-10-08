@@ -4,6 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/DebanganThakuria/narad?sort=semver)](https://github.com/DebanganThakuria/narad/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/DebanganThakuria/narad)](./go.mod)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15297/badge)](https://www.bestpractices.dev/projects/15297)
 
 <p align="center">
   <picture>
