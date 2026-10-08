@@ -13,8 +13,8 @@ Before you start: every pod ready, Helm access to the release, and the [changelo
 1. Get the chart of the target release. In a clone made as in [Deploy on Kubernetes](deploy-kubernetes.md#install):
 
     ```bash
-    git fetch --depth 1 origin tag v3.2.1
-    git checkout v3.2.1
+    git fetch --depth 1 origin tag v3.2.2
+    git checkout v3.2.2
     ```
 
 2. Read the [version notes](#version-notes) for every release you cross.
@@ -24,7 +24,7 @@ Before you start: every pod ready, Helm access to the release, and the [changelo
     ```bash
     helm upgrade narad ./charts/narad -n narad \
       --reset-then-reuse-values \
-      --set image.tag=v3.2.1
+      --set image.tag=v3.2.2
     kubectl rollout status statefulset/narad -n narad
     ```
 
@@ -82,6 +82,11 @@ Partition segments, consumer position files and fan-out cursor files need nothin
 
 Read the notes for each release boundary you cross, in either direction.
 
+- **To v3.2.2.** No stored format or config key changes, so it rolls onto, and back to, v3.2.1 node by node. What clients can see:
+    - *Forwarded acks say whether they landed.* An ack, extend or nack that never left the node you called answers `503` with `Retry-After: 1` (not applied, retry it); `502` now means only that the owner may have applied it. Until every node runs this release, a node on v3.2.1 still answers `502` for both, so keep treating `502` as possibly applied.
+    - *Retry-After on owner-down.* The `503` for an ack, extend, nack, replay or pinned consume whose partition owner is down carries `Retry-After: 1`.
+    - *Remote writes answer once applied.* A remote write answered by a follower returns `2xx` only after that node applied it; otherwise `503` with `Retry-After: 2`, which says the change is committed and must not be sent again ([Status codes](../reference/status-codes.md#status-503)).
+    - *Blind check reports* (no `remotes.allowed_hosts`) leave out `target_serves_ids`, and a blind attach no longer adds warnings drawn from the target's answers.
 - **To v3.2.1.** Nothing to do in either direction: v3.2.1 changes no stored format, config key or API, so it rolls onto, and back to, v3.2.0 node by node.
 - **To v3.2.0.**
     - *Remotes and remote children need every member upgraded.* No action during the roll. Remote writes and remote child attaches answer `412`, naming the member, until every member, dead ones and Raft servers without a member record included, runs this release with security on and legacy cluster authentication off ([Manage remotes](remotes.md#before-you-start)). The rollback boundary for their Raft entry types is the first remote write ([above](#roll-back-from-v3-2)).
