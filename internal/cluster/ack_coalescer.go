@@ -81,10 +81,13 @@ type ackBatch struct {
 	// gone marks callers that stopped waiting before the batch left;
 	// their records are not sent. Guarded by the owner's mu.
 	gone []bool
-	// deadline is the latest of the callers' deadlines: the batch is
-	// worth sending for as long as anyone still waits for it.
-	deadline time.Time
-	done     chan struct{}
+	// sent is set when the batch takes a slot and leaves. From then on
+	// its records are on their way to the owner, which may apply them,
+	// so a caller whose queue wait runs out keeps waiting for the
+	// batch's answer instead of reporting a failure. Guarded by the
+	// owner's mu.
+	sent bool
+	done chan struct{}
 	// Set before done is closed.
 	outs   []ackOut
 	legacy bool // the owner refused the op: each caller sends its own
@@ -113,12 +116,9 @@ func (rt *Router) forwardAck(ctx context.Context, addr string, item nodewire.Ack
 		rt.releaseAckSlot(addr, o)
 		return res, err
 	}
-	// The budget covers the wait for a slot as well as the round trip,
-	// so a queued ack gives up no later than a single one would.
-	deadline := time.Now().Add(ackForwardTimeout)
-	b, idx := o.join(item, deadline)
+	b, idx := o.join(item)
 	o.mu.Unlock()
-	return rt.awaitAck(ctx, addr, o, b, idx, deadline, item)
+	return rt.awaitAck(ctx, addr, o, b, idx, item)
 }
 
 // peerBatches reports whether the peer client can send an OpAckBatch.
@@ -134,7 +134,7 @@ func (rt *Router) peerBatches() bool {
 
 // join adds item to the batch at the tail of the queue, opening a new
 // one when there is none or it is full. Must hold o.mu.
-func (o *ackOwner) join(item nodewire.AckBatchItem, deadline time.Time) (*ackBatch, int) {
+func (o *ackOwner) join(item nodewire.AckBatchItem) (*ackBatch, int) {
 	var b *ackBatch
 	if n := len(o.queue); n > 0 && len(o.queue[n-1].items) < ackCoalesceMax {
 		b = o.queue[n-1]
@@ -144,9 +144,6 @@ func (o *ackOwner) join(item nodewire.AckBatchItem, deadline time.Time) (*ackBat
 	}
 	b.items = append(b.items, item)
 	b.gone = append(b.gone, false)
-	if deadline.After(b.deadline) {
-		b.deadline = deadline
-	}
 	return b, len(b.items) - 1
 }
 
@@ -164,6 +161,7 @@ func (rt *Router) releaseAckSlot(addr string, o *ackOwner) {
 	b := o.queue[0]
 	o.queue[0] = nil
 	o.queue = o.queue[1:]
+	b.sent = true
 	live := make([]int, 0, len(b.items))
 	for i, gone := range b.gone {
 		if !gone {
@@ -177,23 +175,22 @@ func (rt *Router) releaseAckSlot(addr string, o *ackOwner) {
 // sendAckBatch sends a batch's live records, hands every caller its
 // outcome, and frees the slot the batch held. It runs under no caller's
 // context: the batch serves every caller in it, and any one of them
-// leaving must not cancel it for the rest.
+// leaving must not cancel it for the rest. The round trip gets the full
+// ackForwardTimeout however long the batch queued: a batch sent with
+// only the rest of its callers' budget would time out on the wire, after
+// the owner may have applied it, which is an unknown outcome by
+// construction.
 func (rt *Router) sendAckBatch(addr string, o *ackOwner, b *ackBatch, live []int) {
 	b.outs = make([]ackOut, len(b.items))
-	timeout := time.Until(b.deadline)
-	switch {
-	case len(live) == 0:
-		// Everyone left.
-	case timeout <= 0:
-		for _, i := range live {
-			b.outs[i].err = ackQueueTimeout(addr)
-		}
-	case len(live) == 1:
+	switch len(live) {
+	case 0:
+		// Everyone left before the batch did.
+	case 1:
 		// One record is an OpAck, which every owner speaks.
 		i := live[0]
-		b.outs[i].res, b.outs[i].err = rt.sendSingleAck(context.Background(), addr, timeout, b.items[i])
+		b.outs[i].res, b.outs[i].err = rt.sendSingleAck(context.Background(), addr, ackForwardTimeout, b.items[i])
 	default:
-		rt.sendLiveBatch(addr, b, live, timeout)
+		rt.sendLiveBatch(addr, b, live, ackForwardTimeout)
 	}
 	close(b.done)
 	rt.releaseAckSlot(addr, o)
@@ -237,45 +234,62 @@ func (rt *Router) sendLiveBatch(addr string, b *ackBatch, live []int, timeout ti
 }
 
 // awaitAck waits for the batch holding a queued ack and returns the
-// ack's share of it.
-func (rt *Router) awaitAck(ctx context.Context, addr string, o *ackOwner, b *ackBatch, idx int, deadline time.Time, item nodewire.AckBatchItem) (nodewire.Response, error) {
-	timer := time.NewTimer(time.Until(deadline))
+// ack's share of it. The wait for a slot is bounded by
+// ackForwardTimeout; an ack still queued then gives up without having
+// been sent. Once its batch has left, the ack waits for the batch's
+// answer, which the batch's own round-trip budget bounds: the record is
+// on its way to the owner, and giving up then would report a failure for
+// an ack the owner may apply. The longest wait is therefore twice
+// ackForwardTimeout.
+func (rt *Router) awaitAck(ctx context.Context, addr string, o *ackOwner, b *ackBatch, idx int, item nodewire.AckBatchItem) (nodewire.Response, error) {
+	timer := time.NewTimer(ackForwardTimeout)
 	defer timer.Stop()
 	select {
 	case <-b.done:
 	case <-ctx.Done():
+		// The client left. Its record stays out of a batch that has not
+		// left yet; one that has may still be applied.
 		o.leave(b, idx)
 		return nodewire.Response{}, ctx.Err()
 	case <-timer.C:
-		o.leave(b, idx)
-		return nodewire.Response{}, ackQueueTimeout(addr)
-	}
-	if b.legacy {
-		// The owner predates OpAckBatch. Send this record on its own with
-		// what is left of the budget; the owner is remembered, so later
-		// acks to it skip the queue altogether.
-		left := time.Until(deadline)
-		if left <= 0 {
+		if o.leave(b, idx) {
 			return nodewire.Response{}, ackQueueTimeout(addr)
 		}
-		return rt.sendSingleAck(ctx, addr, left, item)
+		select {
+		case <-b.done:
+		case <-ctx.Done():
+			return nodewire.Response{}, ctx.Err()
+		}
+	}
+	if b.legacy {
+		// The owner predates OpAckBatch and refused the batch, so nothing
+		// in it was applied. Send this record on its own with a round
+		// trip of its own; the owner is remembered, so later acks to it
+		// skip the queue altogether.
+		return rt.sendSingleAck(ctx, addr, ackForwardTimeout, item)
 	}
 	out := b.outs[idx]
 	return out.res, out.err
 }
 
 // leave marks a queued caller gone, so a batch that has not left yet
-// does not send its record: the requester already answered its client
-// with an error, and a retry is applied on its own (as the owner's own
-// slot wait does, see handleAckFamily).
-func (o *ackOwner) leave(b *ackBatch, idx int) {
+// does not send its record: the requester answers its client with an
+// error, and a retry is applied on its own (as the owner's own slot wait
+// does, see handleAckFamily). It reports false, and marks nothing, when
+// the batch has already left: the record is then on its way to the
+// owner and cannot be pulled back.
+func (o *ackOwner) leave(b *ackBatch, idx int) bool {
 	o.mu.Lock()
+	defer o.mu.Unlock()
+	if b.sent {
+		return false
+	}
 	b.gone[idx] = true
-	o.mu.Unlock()
+	return true
 }
 
-// ackQueueTimeout is a queued ack whose budget ran out: a deadline
-// failure, like a single forwarded ack's.
+// ackQueueTimeout is a queued ack that found no slot to leave on within
+// ackForwardTimeout: a deadline failure, like a single forwarded ack's.
 func ackQueueTimeout(addr string) error {
 	return fmt.Errorf("ack to %s: %w", addr, context.DeadlineExceeded)
 }

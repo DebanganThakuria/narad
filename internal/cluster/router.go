@@ -581,7 +581,10 @@ func (rt *Router) longPollConsumeRemote(ctx context.Context, w http.ResponseWrit
 // transport as the call's budget rather than derived as a
 // context.WithTimeout per ack: the transport already runs a timer for
 // the reply wait, and the derived context cost four allocations and a
-// lock on the request's context for every forwarded ack.
+// lock on the request's context for every forwarded ack. An ack that
+// queues for a shared batch (see ack_coalescer.go) has the bound twice
+// over, once for the wait for a slot and once for the batch's round
+// trip, so a batch that leaves late is not sent with a remnant.
 const ackForwardTimeout = 2 * time.Second
 
 // RouteAck forwards an ack request to the owner of the handle partition.

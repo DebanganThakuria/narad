@@ -10,6 +10,9 @@ summarized more briefly than the 1.x and later entries.
 
 ## [Unreleased]
 
+### Fixed
+- A forwarded ack, extend or nack that queued for a shared batch could answer `502` after its owner applied it: the queued ack gave up when its 2 s budget ran out even when its batch had already left and was on the wire. It now waits for the batch's answer once the batch has left. A batch also left with only what was left of the first queued ack's 2 s for its round trip, so one that queued for 1.9 s had about 100 ms and timed out after the owner applied it; every batch now gets a full 2 s round trip. A queued ack can therefore take up to 4 s (2 s waiting for a slot, 2 s for the round trip) before it answers.
+
 ## [3.2.1] - 2026-10-07
 
 ### Fixed
