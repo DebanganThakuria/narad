@@ -2,8 +2,11 @@ package cluster
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,6 +134,94 @@ func TestRouteAckFamilyForwardsCarryDeadline(t *testing.T) {
 	router.RouteAck(short, httptest.NewRecorder(), nil, "orders", handle)
 	if len(frames.deadlines) != 1 || !frames.deadlines[0].Equal(want) || frames.budgets[0] != ackForwardTimeout {
 		t.Fatalf("caller deadline not passed through: deadlines %v budgets %v", frames.deadlines, frames.budgets)
+	}
+}
+
+// failingFrames is a frameTransport whose every request fails with err,
+// or with the caller's context error once the context has ended.
+type failingFrames struct{ err error }
+
+func (f failingFrames) RequestOnLane(ctx context.Context, addr string, lane clusterrpc.Lane, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
+	return f.RequestOnLaneTimeout(ctx, addr, lane, 0, frameType, payload)
+}
+
+func (f failingFrames) RequestOnLaneTimeout(ctx context.Context, _ string, _ clusterrpc.Lane, _ time.Duration, _ clusterwire.StreamFrameType, _ []byte) (clusterwire.StreamFrame, error) {
+	if err := ctx.Err(); err != nil {
+		return clusterwire.StreamFrame{}, err
+	}
+	return clusterwire.StreamFrame{}, f.err
+}
+
+// A forwarded ack's failure tells the client what it can know: 503 with
+// Retry-After when the request never left this node (nothing was
+// applied), 502 when it may have reached the owner, and 499 when the
+// client itself went away. No body names the owner or the transport
+// error.
+func TestForwardedAckOutcomeFollowsTheTransportFailure(t *testing.T) {
+	store := newTestStore(t)
+	seedTopicRouteState(t, store)
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
+	handle := consumer.Handle{Partition: 1, Offset: 3, Nonce: 4}
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name       string
+		ctx        context.Context
+		err        error
+		status     int
+		retryAfter string
+	}{
+		{"never sent", context.Background(), fmt.Errorf("%w: dial remote.example:7942: connection refused", clusterrpc.ErrNotSent), http.StatusServiceUnavailable, "1"},
+		{"no reply in time", context.Background(), fmt.Errorf("cluster rpc request timed out: %w", context.DeadlineExceeded), http.StatusBadGateway, ""},
+		{"stream failed after the write", context.Background(), errors.New("stream reset by remote.example:7942"), http.StatusBadGateway, ""},
+		{"client went away", gone, nil, 499, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			router.peer = &PeerClient{frames: failingFrames{err: tc.err}}
+			for op, route := range map[string]func(context.Context, http.ResponseWriter) bool{
+				"ack": func(ctx context.Context, w http.ResponseWriter) bool {
+					return router.RouteAck(ctx, w, nil, "orders", handle)
+				},
+				"extend": func(ctx context.Context, w http.ResponseWriter) bool {
+					return router.RouteExtendAck(ctx, w, nil, "orders", handle)
+				},
+				"nack": func(ctx context.Context, w http.ResponseWriter) bool {
+					return router.RouteNack(ctx, w, nil, "orders", handle)
+				},
+			} {
+				rec := httptest.NewRecorder()
+				if !route(tc.ctx, rec) {
+					t.Fatalf("%s: not forwarded", op)
+				}
+				if rec.Code != tc.status {
+					t.Errorf("%s: status %d (%q), want %d", op, rec.Code, rec.Body.String(), tc.status)
+				}
+				if got := rec.Header().Get("Retry-After"); got != tc.retryAfter {
+					t.Errorf("%s: Retry-After %q, want %q", op, got, tc.retryAfter)
+				}
+				if body := rec.Body.String(); strings.Contains(body, "remote.example") || strings.Contains(body, "deadline") || strings.Contains(body, "refused") || strings.Contains(body, "reset") {
+					t.Errorf("%s: body %q names the owner or the transport error", op, body)
+				}
+			}
+		})
+	}
+}
+
+// An ack whose owner is down is answered 503 with Retry-After, so a
+// client backs off instead of hammering a recovering cluster.
+func TestRouteAckOwnerDownCarriesRetryAfter(t *testing.T) {
+	store := newTestStore(t)
+	seedTopicRouteState(t, store)
+	if err := store.MarkMemberDead(context.Background(), "node-remote"); err != nil {
+		t.Fatalf("MarkMemberDead() error = %v", err)
+	}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
+	rec := httptest.NewRecorder()
+	if !router.RouteAck(context.Background(), rec, nil, "orders", consumer.Handle{Partition: 1, Offset: 3, Nonce: 4}) {
+		t.Fatal("not answered")
+	}
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "1" {
+		t.Fatalf("status %d, Retry-After %q; want 503 with Retry-After 1", rec.Code, rec.Header().Get("Retry-After"))
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -147,6 +148,20 @@ func waitQueued(t *testing.T, o *ackOwner, n int) {
 	t.Fatalf("fewer than %d acks queued", n)
 }
 
+// waitIdle waits until no ack to o is queued or in flight.
+func waitIdle(t *testing.T, o *ackOwner) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		o.mu.Lock()
+		idle := o.inflight == 0 && len(o.queue) == 0
+		o.mu.Unlock()
+		if idle {
+			return
+		}
+	}
+	t.Fatal("acks still queued or in flight")
+}
+
 func after(d time.Duration) <-chan struct{} {
 	c := make(chan struct{})
 	time.AfterFunc(d, func() { close(c) })
@@ -223,5 +238,56 @@ func TestBatchLeavingLateGetsAFullRoundTripBudget(t *testing.T) {
 		if got := owner.budget(off); got != ackForwardTimeout {
 			t.Errorf("record %d left with a budget of %s, want %s", off, got, ackForwardTimeout)
 		}
+	}
+}
+
+// A queued ack that never found a slot was never sent, so the owner
+// applied nothing: it answers 503 with Retry-After, not the 502 that
+// means the ack may have landed, and its record stays out of its batch
+// when a slot frees later. The ack waits behind a full batch that left
+// after it queued, with a round trip of its own that outlasts the
+// queued ack's wait.
+func TestQueuedAckThatNeverLeftAnswers503AndIsNeverSent(t *testing.T) {
+	release := make(chan struct{})
+	owner := &ackOwnerFake{answer: func(offset int64) <-chan struct{} {
+		switch {
+		case offset == 1:
+			return release
+		case offset <= ackCoalesceMax+1: // the full batch of offsets 2 to 65
+			return after(ackForwardTimeout - 200*time.Millisecond)
+		}
+		return nil
+	}}
+	rt, o := ackTestRouter(t, owner, 1)
+	go routeTestAck(context.Background(), rt, 1)
+	waitApplied(t, owner, 1)
+	var wg sync.WaitGroup
+	for off := range int64(ackCoalesceMax) {
+		wg.Go(func() { routeTestAck(context.Background(), rt, off+2) })
+	}
+	waitQueued(t, o, ackCoalesceMax)
+	last := int64(ackCoalesceMax + 2)
+	recc := make(chan *httptest.ResponseRecorder, 1)
+	go func() { recc <- routeTestAck(context.Background(), rt, last) }()
+	waitQueued(t, o, ackCoalesceMax+1)
+	time.Sleep(500 * time.Millisecond)
+	close(release) // the full batch leaves now and answers 1.8s later
+	rec := <-recc
+	wg.Wait()
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d (%q), want 503", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want 1", got)
+	}
+	if body := rec.Body.String(); strings.Contains(body, ackTestOwnerAddr) || strings.Contains(body, "deadline") {
+		t.Fatalf("body %q names the owner or the transport error", body)
+	}
+	// The freed slot passes to the queued ack's batch, which must send
+	// nothing.
+	waitIdle(t, o)
+	if slices.Contains(owner.appliedOffsets(), last) {
+		t.Fatalf("owner applied the ack that answered 503")
 	}
 }

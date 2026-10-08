@@ -624,7 +624,11 @@ func (rt *Router) routeAckShaped(ctx context.Context, w http.ResponseWriter, top
 		Mode:      mode,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		status, msg := ackForwardFailure(ctx, err)
+		if status == http.StatusServiceUnavailable {
+			w.Header().Set("Retry-After", "1")
+		}
+		http.Error(w, msg, status)
 		return true
 	}
 	writePeerResponse(w, res)

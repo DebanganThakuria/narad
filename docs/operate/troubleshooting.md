@@ -118,6 +118,7 @@ An ack, extend or nack, or a consume with `partition=N`, answers `503`.
 **Cause.** The body says which:
 
 - `partition owner is down; retry later`: the node that owns the partition is down. A partition has one owner and no replica, so it waits for that node.
+- `the ack did not reach the partition owner and was not applied; retry` (ack, extend and nack only): the node you called could not send the ack to the owner, because no connection to it could be had, or because every slot for acks to that owner stayed busy for 2 seconds. The owner is slow or unreachable from that node. Nothing was applied. See [`502` on ack, extend or nack](#status-502) for what to check.
 - `control plane temporarily unavailable`: the node has no Raft leader, or has not caught up with it yet.
 
 **Check.** `narad cluster members` shows the owner as `dead`, and `/readyz` shows the leader state ([Start with readiness](#check-readiness)).
@@ -126,7 +127,7 @@ An ack, extend or nack, or a consume with `partition=N`, answers `503`.
 
 ### `502` on ack, extend or nack {#status-502}
 
-An ack, extend or nack answers `502`, with the error of a failed call between nodes as the body.
+An ack, extend or nack answers `502`, `the partition owner did not answer; the ack may have been applied; retry`. Releases up to v3.2.1 put the error of the failed call between nodes in the body instead.
 
 **Cause.** The node you called forwarded the request to the partition's owner and got no usable answer, often because the owner was restarting or overloaded. The ack may or may not have been applied. When the `502`s last, the owner may be down ([A node is down](#node-down)).
 

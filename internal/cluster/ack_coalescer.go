@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
@@ -289,9 +290,10 @@ func (o *ackOwner) leave(b *ackBatch, idx int) bool {
 }
 
 // ackQueueTimeout is a queued ack that found no slot to leave on within
-// ackForwardTimeout: a deadline failure, like a single forwarded ack's.
+// ackForwardTimeout: a deadline failure, like a single forwarded ack's,
+// and one that never left this node, so the owner applied nothing.
 func ackQueueTimeout(addr string) error {
-	return fmt.Errorf("ack to %s: %w", addr, context.DeadlineExceeded)
+	return fmt.Errorf("ack to %s waited %s for a slot: %w: %w", addr, ackForwardTimeout, clusterrpc.ErrNotSent, context.DeadlineExceeded)
 }
 
 // ackResultResponse is the reply a single ack-shaped RPC would have
