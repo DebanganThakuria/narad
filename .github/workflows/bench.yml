@@ -1,37 +1,49 @@
 # Nightly throughput regression bench.
 #
-# Runs a single-node --dev broker on a standard GitHub runner and
-# pushes a fixed workload through the full produce -> consume -> ack
-# flow via `narad bench`. Free public-repo runners are a fixed size but
-# not a quiet lab, so this is a REGRESSION detector, not a benchmark:
-# absolute numbers here are not publishable, but a broker that got 30%
-# slower overnight is a real signal. Best-of-two runs absorbs most
-# runner noise; the thresholds absorb the rest.
+# Builds master and a reference (by default the newest release tagged at
+# least three days ago), runs each as a single-node --dev broker on the
+# same GitHub runner, and pushes a fixed workload through the full
+# produce -> consume -> ack flow via `narad bench`. The gate is master's throughput as a ratio of
+# the reference's, measured minutes apart on the same machine. This is a
+# REGRESSION detector, not a benchmark: absolute numbers here are not
+# publishable, but master draining 25% slower than the release on the
+# same host is a real signal.
 #
-# Baseline lives in .github/bench/baseline.json. When a legitimate
-# change moves throughput (either direction), rerun via
-# workflow_dispatch and commit a new one.
+# Why not a committed baseline: hosted runners are not one machine. The
+# same commit (08720482) drained at 21,696 and 32,822 msg/s on
+# 2026-10-09 and 10-10, then at 13,552 to 14,461 on 10-12 to 10-14, with
+# both runs of each night in the same band, while thirteen fresh brokers
+# on one machine stayed within 0.90x of their median. The host was the
+# variable, so a baseline from one host either failed on slower hosts or
+# sat too low to catch a real regression on faster ones. A ratio taken on
+# one host cancels the host.
 #
-# Take the MEDIAN of the last few runs, not the number the job summary
-# suggests. The summary can only see tonight, and best-of-two absorbs
-# noise within a job but not between them: consume has ranged 5927 to
-# 7278 msg/s on unchanged code. A baseline set from a peak run warns on
-# every ordinary night, and one set from a trough (consume sat at 5241
-# while the broker sustained ~6000, so a 39% regression would have
-# passed) stops detecting anything. The median is what the runner
-# actually does.
+# Each round starts a fresh broker on a fresh data dir, gates on one
+# produce -> consume round trip, warms up, and keeps the best of two 50k
+# runs; each side's number is the median of its rounds. Four rounds run
+# reference, master / master, reference / reference, master / master,
+# reference, so both sides' medians sit at the same point in the job and
+# steady drift, such as a warming disk or a neighbour ramping up, cancels
+# out of the ratio. Both sides are driven by master's `narad bench`, so a
+# change to how the bench measures cannot pass for a change in the broker.
 #
-# Consume numbers before 2026-10-08 are not comparable with later ones:
-# the readiness probe was left unacked, which stalled one of the six
-# partitions, so a run drained 5/6 of its messages, and `narad bench`
-# counted the two empty long-polls that end a drain (about 4s) in the
-# consume time.
+# A release becomes the default reference three days after it is tagged.
+# To accept a deliberate throughput change sooner, commit the commit to
+# compare against in .github/bench/reference, and delete that file once a
+# release containing the change is three days old. workflow_dispatch can
+# name a reference for one run; naming master itself is an A/A run that
+# shows the noise floor.
 name: Bench
 
 on:
   schedule:
     - cron: "30 21 * * *" # nightly, ~03:00 IST
   workflow_dispatch:
+    inputs:
+      reference:
+        description: "Tag, branch or commit to compare master against (default: .github/bench/reference, else the newest release tagged three or more days ago)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -44,152 +56,241 @@ jobs:
   bench:
     name: Throughput regression
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash # -eo pipefail: a failed bench run fails its pipe into tee
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the reference is a tag or an older commit
 
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
-      - name: Build
-        run: go build -o narad ./cmd/narad
-
-      - name: Start dev broker
+      - name: Build master and the reference
+        env:
+          INPUT_REFERENCE: ${{ inputs.reference }}
         run: |
-          nohup ./narad server start --dev --data-dir "$RUNNER_TEMP/narad-data" > "$RUNNER_TEMP/server.log" 2>&1 &
-          # /readyz, not GET /v1/topics: a read is served off the local
-          # replica and answers 200 before Raft has elected a leader, so
-          # gating on it lets the topic create below race the election.
-          for i in $(seq 1 60); do
-            if curl -sf -o /dev/null http://127.0.0.1:7942/readyz; then
-              echo "broker ready after ${i}s"; exit 0
-            fi
-            sleep 1
-          done
-          echo "broker did not become ready"
-          curl -s http://127.0.0.1:7942/readyz
-          tail -50 "$RUNNER_TEMP/server.log"; exit 1
-
-      - name: Create topic + warmup
-        run: |
-          # State-changing requests must carry an API content type or the
-          # X-Narad-Client header; without one the CSRF guard answers 415.
-          curl -sf -X POST http://127.0.0.1:7942/v1/topics \
-            -H 'Content-Type: application/json' \
-            -d '{"name":"bench","partitions":6}' -o /dev/null
-          # Assignments propagate to the dispatcher asynchronously after
-          # topic create (~10s on a cold single node); until then produced
-          # messages are acked but not yet consumable and a fast bench
-          # measures an empty topic. Gate on one full produce->consume
-          # round trip before benching.
-          consumable=""
-          for i in $(seq 1 60); do
-            curl -sf -X POST http://127.0.0.1:7942/v1/topics/bench/produce \
-              -H 'Content-Type: application/octet-stream' -d probe -o /dev/null || true
-            msg=$(curl -sf "http://127.0.0.1:7942/v1/topics/bench/consume?wait=1s" || true)
-            handle=$(printf '%s' "$msg" | jq -r '.receipt_handle // empty' 2>/dev/null || true)
-            if [ -n "$handle" ]; then
-              # Ack the probe. Left leased, it pins its partition's
-              # committed offset for the visibility timeout, and 1,024 acks
-              # past it that partition stops handing out messages: the
-              # bench then drained five of the six partitions.
-              curl -sf -X POST "http://127.0.0.1:7942/v1/topics/bench/ack?receipt_handle=$(jq -rn --arg h "$handle" '$h|@uri')" \
-                -H 'X-Narad-Client: bench' -o /dev/null
-              echo "first message consumable after ${i} probe(s)"; consumable=yes; break
-            fi
-            sleep 1
-          done
-          if [ -z "$consumable" ]; then
-            echo "no message became consumable in 60s; benching now would measure an empty topic"
-            tail -50 "$RUNNER_TEMP/server.log"; exit 1
+          ref="$INPUT_REFERENCE"
+          if [ -z "$ref" ] && [ -f .github/bench/reference ]; then
+            ref=$(tr -d '[:space:]' < .github/bench/reference)
           fi
-          ./narad bench bench --server http://127.0.0.1:7942 --count 5000 --size 256 --workers 16 --consume 2>&1 | tail -3
-
-      - name: Bench (best of two)
-        run: |
-          run_once() {
-            ./narad bench bench --server http://127.0.0.1:7942 --count 50000 --size 256 --workers 16 --consume 2>&1 | tee "$RUNNER_TEMP/bench-$1.log"
-          }
-          run_once 1
-          run_once 2
-          # produce line: "produce: N ok, N failed in Xs, R msg/s; latency p50=A p95=B p99=C"
-          # consume line: "consume: N msgs in Xs (R msg/s)"
-          parse() {
-            local log="$RUNNER_TEMP/bench-$1.log"
-            local prod cons p99
-            prod=$(grep '^produce:' "$log" | grep -o '[0-9]* msg/s' | head -1 | grep -o '[0-9]*')
-            cons=$(grep '^consume:' "$log" | grep -o '[0-9]* msg/s' | head -1 | grep -o '[0-9]*')
-            p99=$(grep '^produce:' "$log" | grep -o 'p99=[^ ]*' | head -1 | cut -d= -f2)
-            echo "${prod:-0} ${cons:-0} ${p99:-?}"
-          }
-          read P1 C1 L1 <<< "$(parse 1)"
-          read P2 C2 L2 <<< "$(parse 2)"
-          echo "run1: produce=$P1 consume=$C1 p99=$L1"
-          echo "run2: produce=$P2 consume=$C2 p99=$L2"
-          # A short drain is a stuck partition or a broken bench, never a
-          # throughput number: fail rather than record it.
-          for r in 1 2; do
-            if grep -q 'were not drained' "$RUNNER_TEMP/bench-$r.log"; then
-              echo "::error::run $r left messages undrained: $(grep 'were not drained' "$RUNNER_TEMP/bench-$r.log")"
+          if [ -z "$ref" ]; then
+            # The newest release tagged at least three days ago. Releases
+            # are tagged the day their code merges, so the newest tag would
+            # become the reference before any nightly had compared its
+            # contents with the release before it, and a regression shipped
+            # that day would never be reported. Three days gives a release's
+            # contents at least two nightlies against the previous release
+            # even if GitHub drops or delays one. Pre-releases
+            # (v4.0.0-rc.1) are never the reference.
+            cutoff=$(( $(date +%s) - 3 * 86400 ))
+            ref=$(git for-each-ref --merged HEAD --sort=-creatordate \
+                --format='%(creatordate:unix) %(refname:short)' 'refs/tags/v[0-9]*' |
+              awk -v cut="$cutoff" '!found && $2 !~ /-/ && $1 + 0 <= cut { print $2; found = 1 }')
+            if [ -z "$ref" ]; then
+              echo "::error::no release on master was tagged three or more days ago; dispatch with a reference"
               exit 1
             fi
-          done
-          PROD=$(echo "$P1 $P2" | tr ' ' '\n' | sort -rn | head -1)
-          CONS=$(echo "$C1 $C2" | tr ' ' '\n' | sort -rn | head -1)
-          printf '{"produce_msgs_per_sec": %.0f, "consume_msgs_per_sec": %.0f}\n' "$PROD" "$CONS" > "$RUNNER_TEMP/result.json"
-          cat "$RUNNER_TEMP/result.json"
+          fi
+          # The reference reaches $GITHUB_ENV and the log. Git accepts
+          # whitespace and newlines inside @{...}, and a newline would let a
+          # dispatched value write environment variables of its own.
+          case "$ref" in
+            *[![:graph:]]*)
+              echo "::error::the reference must not contain whitespace or control characters"
+              exit 1
+              ;;
+          esac
+          if ! ref_sha=$(git rev-parse --verify --quiet --end-of-options "$ref^{commit}"); then
+            echo "::error::reference \"$ref\" is not a tag, branch or commit in this repository"
+            exit 1
+          fi
+          {
+            echo "BENCH_REF=$ref"
+            echo "BENCH_REF_SHA=$ref_sha"
+            echo "BENCH_HEAD_SHA=$(git rev-parse HEAD)"
+          } >> "$GITHUB_ENV"
+          echo "master $(git rev-parse --short HEAD) against $ref ($(git rev-parse --short "$ref_sha"))"
+          go build -o "$RUNNER_TEMP/narad-head" ./cmd/narad
+          git worktree add --detach "$RUNNER_TEMP/ref-src" "$ref_sha"
+          (cd "$RUNNER_TEMP/ref-src" && go build -o "$RUNNER_TEMP/narad-ref" ./cmd/narad)
 
-      - name: Compare against baseline
+      - name: Bench (alternating rounds)
         run: |
-          RESULT="$RUNNER_TEMP/result.json"
-          PROD=$(jq -r .produce_msgs_per_sec "$RESULT")
-          CONS=$(jq -r .consume_msgs_per_sec "$RESULT")
+          API=http://127.0.0.1:7942
+          CLIENT="$RUNNER_TEMP/narad-head"
+          RAW="$RUNNER_TEMP/raw.tsv"
+          ROUNDS=4 # even, so steady drift cancels; see the header
+          : > "$RAW"
+
+          start_broker() { # side round
+            "$RUNNER_TEMP/narad-$1" server start --dev --data-dir "$RUNNER_TEMP/data-$1-$2" \
+              > "$RUNNER_TEMP/server-$1-$2.log" 2>&1 &
+            BROKER=$!
+            # /readyz, not GET /v1/topics: a read is served off the local
+            # replica and answers 200 before Raft has elected a leader, so
+            # gating on it lets the topic create below race the election.
+            for i in $(seq 1 60); do
+              if curl -sf -o /dev/null "$API/readyz"; then
+                echo "$1 round $2: broker ready after ${i}s"; return 0
+              fi
+              sleep 1
+            done
+            echo "::error::$1 broker (round $2) did not become ready"
+            curl -s "$API/readyz" || true
+            tail -50 "$RUNNER_TEMP/server-$1-$2.log"; return 1
+          }
+
+          stop_broker() {
+            kill "$BROKER" 2>/dev/null || true
+            for i in $(seq 1 30); do
+              kill -0 "$BROKER" 2>/dev/null || break
+              sleep 1
+            done
+            kill -9 "$BROKER" 2>/dev/null || true
+            wait "$BROKER" 2>/dev/null || true
+          }
+
+          prepare_topic() { # side round
+            # State-changing requests must carry an API content type or the
+            # X-Narad-Client header; without one the CSRF guard answers 415.
+            curl -sf -X POST "$API/v1/topics" \
+              -H 'Content-Type: application/json' \
+              -d '{"name":"bench","partitions":6}' -o /dev/null
+            # Assignments propagate to the dispatcher asynchronously after
+            # topic create (~10s on a cold single node); until then produced
+            # messages are acked but not yet consumable and a fast bench
+            # measures an empty topic. Gate on one full produce->consume
+            # round trip before benching.
+            for i in $(seq 1 60); do
+              curl -sf -X POST "$API/v1/topics/bench/produce" \
+                -H 'Content-Type: application/octet-stream' -d probe -o /dev/null || true
+              msg=$(curl -sf "$API/v1/topics/bench/consume?wait=1s" || true)
+              handle=$(printf '%s' "$msg" | jq -r '.receipt_handle // empty' 2>/dev/null || true)
+              if [ -n "$handle" ]; then
+                # Ack the probe. Left leased, it pins its partition's
+                # committed offset for the visibility timeout, and 1,024 acks
+                # past it that partition stops handing out messages: the
+                # bench then drained five of the six partitions.
+                curl -sf -X POST "$API/v1/topics/bench/ack?receipt_handle=$(jq -rn --arg h "$handle" '$h|@uri')" \
+                  -H 'X-Narad-Client: bench' -o /dev/null
+                echo "$1 round $2: first message consumable after ${i} probe(s)"
+                "$CLIENT" bench bench --server "$API" --count 5000 --size 256 --workers 16 --consume 2>&1 | tail -3
+                return 0
+              fi
+              sleep 1
+            done
+            echo "::error::$1 round $2: no message became consumable in 60s; benching now would measure an empty topic"
+            tail -50 "$RUNNER_TEMP/server-$1-$2.log"; return 1
+          }
+
+          # produce line: "produce: N ok, N failed in Xs, R msg/s; latency p50=A p95=B p99=C"
+          # consume line: "consume: N msgs in Xs (R msg/s)"
+          rate() { # log op -> msg/s, 0 when the line is missing
+            awk -v op="$2:" '$1 == op { for (i = 2; i <= NF; i++) if ($i ~ /^msg\/s/) { v = $(i-1); gsub(/[^0-9]/, "", v); print v + 0; exit } }' "$1" | grep . || echo 0
+          }
+          p99() { # log -> produce p99, ? when missing
+            awk '$1 == "produce:" { for (i = 2; i <= NF; i++) if ($i ~ /^p99=/) { print substr($i, 5); exit } }' "$1" | grep . || echo '?'
+          }
+
+          bench_round() { # side round
+            start_broker "$1" "$2"
+            prepare_topic "$1" "$2"
+            for r in 1 2; do
+              log="$RUNNER_TEMP/bench-$1-$2-$r.log"
+              "$CLIENT" bench bench --server "$API" --count 50000 --size 256 --workers 16 --consume 2>&1 | tee "$log"
+              printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$r" "$(rate "$log" produce)" "$(rate "$log" consume)" "$(p99 "$log")" >> "$RAW"
+            done
+            stop_broker
+            rm -rf "$RUNNER_TEMP/data-$1-$2"
+          }
+
+          for n in $(seq 1 "$ROUNDS"); do
+            if [ $((n % 2)) -eq 1 ]; then order="ref head"; else order="head ref"; fi
+            for side in $order; do
+              bench_round "$side" "$n"
+            done
+          done
+          cat "$RAW"
+
+      - name: Compare master with the reference
+        run: |
+          RAW="$RUNNER_TEMP/raw.tsv"
+          REF_LABEL="$BENCH_REF ($(git rev-parse --short "$BENCH_REF_SHA"))"
+          HEAD_LABEL="master ($(git rev-parse --short "$BENCH_HEAD_SHA"))"
+          # Recorded so a swing between nights can be matched to the host.
+          CPU=$(lscpu 2>/dev/null | sed -n 's/^Model name:[[:space:]]*//p' | head -1) || true
+
+          med() { # side column -> median over rounds of each round's best run
+            awk -F'\t' -v s="$1" -v c="$2" '$1 == s && $c + 0 > 0 && (!($2 in b) || $c + 0 > b[$2]) { b[$2] = $c + 0 } END { for (k in b) print b[k] }' "$RAW" |
+              sort -n | awk '{ a[NR] = $1 } END { if (NR == 0) print 0; else if (NR % 2) print a[(NR + 1) / 2]; else printf "%.0f\n", (a[NR / 2] + a[NR / 2 + 1]) / 2 }'
+          }
+          HP=$(med head 4); HC=$(med head 5)
+          RP=$(med ref 4); RC=$(med ref 5)
+
           {
             echo "## Bench (50k × 256B, 16 workers, single-node dev broker)"
             echo ""
-            echo "| metric | tonight | baseline | ratio |"
+            echo "$HEAD_LABEL against $REF_LABEL on the same runner: $(nproc) × ${CPU:-unknown CPU}."
+            echo ""
+            echo "| metric | master | $BENCH_REF | ratio |"
             echo "|---|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ ! -f .github/bench/baseline.json ]; then
-            {
-              echo "| produce msg/s | $PROD | _none_ | n/a |"
-              echo "| consume msg/s | $CONS | _none_ | n/a |"
-              echo ""
-              echo "No baseline committed yet. Suggested \`.github/bench/baseline.json\`:"
-              echo '```json'
-              cat "$RESULT"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "no baseline: record-only run"
-            exit 0
+
+          FAIL=0
+          # A short drain is a stuck partition or a broken bench, never a
+          # throughput number: fail rather than record it.
+          for log in "$RUNNER_TEMP"/bench-*.log; do
+            if grep -q 'were not drained' "$log"; then
+              echo "::error::$(basename "$log" .log) left messages undrained: $(grep 'were not drained' "$log")"
+              FAIL=1
+            fi
+          done
+          # A run with no rate line crashed or changed its output format.
+          if awk -F'\t' '$4 + 0 <= 0 || $5 + 0 <= 0 { print "::error::" $1 " round " $2 " run " $3 " reported no rate (produce " $4 ", consume " $5 ")"; bad = 1 } END { exit !bad }' "$RAW"; then
+            FAIL=1
           fi
-          BPROD=$(jq -r .produce_msgs_per_sec .github/bench/baseline.json)
-          BCONS=$(jq -r .consume_msgs_per_sec .github/bench/baseline.json)
-          check() { # name tonight baseline -> fails the job under 70%
+
+          check() { # name master reference -> fails the job under 80%
             local ratio
-            ratio=$(echo "$2 $3" | awk '{printf "%.2f", $1/$2}')
-            echo "| $1 msg/s | $2 | $3 | $ratio |" >> "$GITHUB_STEP_SUMMARY"
-            if awk "BEGIN{exit !($ratio < 0.70)}"; then
-              echo "::error::$1 throughput regressed to ${ratio}x of baseline ($2 vs $3 msg/s)"
+            if [ "$3" -le 0 ] || [ "$2" -le 0 ]; then
+              echo "| $1 msg/s | $2 | $3 | n/a |" >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::$1 throughput was not measured (master $2, reference $3 msg/s)"
               return 1
             fi
-            if awk "BEGIN{exit !($ratio < 0.85)}"; then
-              echo "::warning::$1 throughput at ${ratio}x of baseline ($2 vs $3 msg/s), watch it"
+            ratio=$(awk -v h="$2" -v r="$3" 'BEGIN { printf "%.2f", h / r }')
+            echo "| $1 msg/s | $2 | $3 | $ratio |" >> "$GITHUB_STEP_SUMMARY"
+            if awk -v x="$ratio" 'BEGIN { exit !(x < 0.80) }'; then
+              echo "::error::$1 throughput regressed to ${ratio}x of $BENCH_REF on the same runner ($2 vs $3 msg/s)"
+              return 1
+            fi
+            if awk -v x="$ratio" 'BEGIN { exit !(x < 0.90) }'; then
+              echo "::warning::$1 throughput at ${ratio}x of $BENCH_REF on the same runner ($2 vs $3 msg/s), watch it"
             fi
           }
-          FAIL=0
-          check produce "$PROD" "$BPROD" || FAIL=1
-          check consume "$CONS" "$BCONS" || FAIL=1
+          check produce "$HP" "$RP" || FAIL=1
+          check consume "$HC" "$RC" || FAIL=1
+
           {
             echo ""
-            echo "Suggested baseline if tonight's numbers are the new normal:"
-            echo '```json'
-            cat "$RESULT"
-            echo '```'
+            echo "Each number is the median over rounds of the best of two runs in each round. Every run:"
+            echo ""
+            echo "| side | round | run | produce msg/s | consume msg/s | produce p99 |"
+            echo "|---|---|---|---|---|---|"
+            awk -F'\t' '{ printf "| %s | %s | %s | %s | %s | %s |\n", ($1 == "head" ? "master" : "reference"), $2, $3, $4, $5, $6 }' "$RAW"
           } >> "$GITHUB_STEP_SUMMARY"
+
+          jq -n --arg ref "$BENCH_REF" --arg ref_sha "$BENCH_REF_SHA" --arg head_sha "$BENCH_HEAD_SHA" --arg cpu "$CPU" \
+            --argjson hp "$HP" --argjson hc "$HC" --argjson rp "$RP" --argjson rc "$RC" \
+            '{reference: $ref, reference_sha: $ref_sha, head_sha: $head_sha, cpu: $cpu,
+              master: {produce_msgs_per_sec: $hp, consume_msgs_per_sec: $hc},
+              reference_msgs_per_sec: {produce: $rp, consume: $rc}}' > "$RUNNER_TEMP/result.json"
+          cat "$RUNNER_TEMP/result.json"
           exit $FAIL
 
       - name: Upload logs
@@ -199,6 +300,7 @@ jobs:
           name: bench-${{ github.run_number }}
           path: |
             ${{ runner.temp }}/bench-*.log
+            ${{ runner.temp }}/server-*.log
+            ${{ runner.temp }}/raw.tsv
             ${{ runner.temp }}/result.json
-            ${{ runner.temp }}/server.log
           retention-days: 90
