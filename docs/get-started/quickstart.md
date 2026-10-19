@@ -8,7 +8,7 @@ search:
 
 Run Narad on your machine, then create a topic and produce, consume and ack one message with curl, in about five minutes.
 
-Before you start: curl, plus one of Docker, Homebrew, or Go 1.26 or later with git and make.
+Before you start: curl, plus one of Docker, Homebrew, or Go 1.27.2 or later with git and make.
 
 ## Step 1: start Narad {#start}
 
@@ -21,7 +21,7 @@ Each option below runs one Narad node on your machine, serving its API on port 7
       -v narad-data:/var/lib/narad \
       -e NARAD_SECURITY_ENABLED=false \
       -e NARAD_CLUSTER_ADDR=127.0.0.1:7943 \
-      ghcr.io/debanganthakuria/narad:v3.2.2
+      ghcr.io/debanganthakuria/narad:v3.2.3
     ```
 
     The container logs one JSON line per event. Narad is serving once a line contains `"msg":"http listening"`.
@@ -58,7 +58,7 @@ Each option below runs one Narad node on your machine, serving its API on port 7
 === "From source"
 
     ```bash
-    git clone --branch v3.2.2 --depth 1 https://github.com/DebanganThakuria/narad
+    git clone --branch v3.2.3 --depth 1 https://github.com/DebanganThakuria/narad
     cd narad
     make build
     ./bin/narad server start --dev

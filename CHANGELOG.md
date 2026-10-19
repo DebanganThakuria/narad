@@ -10,6 +10,8 @@ summarized more briefly than the 1.x and later entries.
 
 ## [Unreleased]
 
+## [3.2.3] - 2026-10-19
+
 ### Removed
 - Tooling that is neither product code nor its tests, removed from the repository and kept for the maintainer outside it: the linearizability checker (`tests/linearizability`), `scripts/linearizability-nightly.sh` and its nightly workflow; the local monitoring setup (`ops/monitoring`, with its Grafana dashboards and Prometheus config, `scripts/local-monitoring-start.sh`, `scripts/local-monitoring-stop.sh`, `scripts/capture-local-pprof.sh` and the `make local-monitoring-start` and `local-monitoring-stop` targets); `scripts/gen_http_api.py`; and `scripts/check-release-refs.sh` with `make check-release-refs`. The load driver's `--history` flag goes with the checker it fed. `docs/reference/http-api.md` is now edited by hand alongside `docs/reference/openapi.yaml`, and pinned image versions in the docs are checked by hand at release. [Monitor and alert](docs/operate/monitoring.md#dashboard) lists the queries the dashboard graphed, and [Linearizability](docs/understand/linearizability.md) describes the property and the suites that test it.
 
@@ -638,7 +640,8 @@ First production release.
 ### Added
 - Narad's first alpha, published for early evaluation, local development, and design review, with a container image on GHCR. The remaining production-readiness gates (API auth, rate limiting, TLS, and a tested durability and disaster-recovery contract) were documented as still open.
 
-[Unreleased]: https://github.com/DebanganThakuria/narad/compare/v3.2.2...HEAD
+[Unreleased]: https://github.com/DebanganThakuria/narad/compare/v3.2.3...HEAD
+[3.2.3]: https://github.com/DebanganThakuria/narad/compare/v3.2.2...v3.2.3
 [3.2.2]: https://github.com/DebanganThakuria/narad/compare/v3.2.1...v3.2.2
 [3.2.1]: https://github.com/DebanganThakuria/narad/compare/v3.2.0...v3.2.1
 [3.2.0]: https://github.com/DebanganThakuria/narad/compare/v3.1.0...v3.2.0

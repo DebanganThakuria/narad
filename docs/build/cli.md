@@ -6,7 +6,7 @@ description: "Use the narad command to run a local broker, watch a topic, send t
 
 Use the `narad` command to run a local broker, watch a topic, send test messages and switch between clusters from a terminal.
 
-Before you start: Homebrew on macOS or Linux, or Git, Make and Go 1.26 or later to build from source.
+Before you start: Homebrew on macOS or Linux, or Git, Make and Go 1.27.2 or later to build from source.
 
 Everything the CLI does is also plain HTTP, so you never need it in production code. The same binary also runs the server: `narad serve` is what the container image starts.
 
@@ -18,12 +18,12 @@ Everything the CLI does is also plain HTTP, so you never need it in production c
     brew install debanganthakuria/narad/narad
     ```
 
-    The formula builds v3.2.2 from source, which takes a minute or more, and installs shell completions for bash, zsh and fish.
+    The formula builds v3.2.3 from source, which takes a minute or more, and installs shell completions for bash, zsh and fish.
 
 === "From source"
 
     ```sh
-    git clone --branch v3.2.2 --depth 1 https://github.com/DebanganThakuria/narad
+    git clone --branch v3.2.3 --depth 1 https://github.com/DebanganThakuria/narad
     cd narad
     make build
     ./bin/narad version
