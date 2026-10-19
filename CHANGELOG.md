@@ -13,6 +13,12 @@ summarized more briefly than the 1.x and later entries.
 ### Removed
 - Tooling that is neither product code nor its tests, removed from the repository and kept for the maintainer outside it: the linearizability checker (`tests/linearizability`), `scripts/linearizability-nightly.sh` and its nightly workflow; the local monitoring setup (`ops/monitoring`, with its Grafana dashboards and Prometheus config, `scripts/local-monitoring-start.sh`, `scripts/local-monitoring-stop.sh`, `scripts/capture-local-pprof.sh` and the `make local-monitoring-start` and `local-monitoring-stop` targets); `scripts/gen_http_api.py`; and `scripts/check-release-refs.sh` with `make check-release-refs`. The load driver's `--history` flag goes with the checker it fed. `docs/reference/http-api.md` is now edited by hand alongside `docs/reference/openapi.yaml`, and pinned image versions in the docs are checked by hand at release. [Monitor and alert](docs/operate/monitoring.md#dashboard) lists the queries the dashboard graphed, and [Linearizability](docs/understand/linearizability.md) describes the property and the suites that test it.
 
+### Changed
+- Dependencies refreshed (golang.org/x crypto 0.58.0, net 0.61.0, sync 0.24.0, sys 0.49.0 and text 0.43.0; prometheus/client_golang 1.25.0).
+
+### Security
+- The Go toolchain is pinned to 1.27.2, so building from source now needs a 1.27.2 toolchain. `govulncheck` reports ten standard-library advisories against 1.27.1 on paths Narad reaches: in `net/http`, an HTTP/2 server crash from an HPACK encoder race (GO-2026-6617), HTTP/2 server memory exhaustion from trailer headers (GO-2026-6603), excessive CPU from repeated initial window changes (GO-2026-6611), a double flow-control refund on HTTP/2 server streams (GO-2026-6612), malformed framing headers accepted by the HTTP/2 transport (GO-2026-6610), and HTTP/1 connection desynchronization after a `CONNECT` on the server (GO-2026-6613) and on the client (GO-2026-6605); a memory-limit bypass when parsing MIME headers in `net/textproto` (GO-2026-6608); malformed ECH outer extension references accepted by `crypto/tls` (GO-2026-6607); and, on Windows only, `os.Root` following junctions out of the root (GO-2026-6604). A scan on 1.27.2 reports none of them, and no others.
+
 ## [3.2.2] - 2026-10-08
 
 ### Added
