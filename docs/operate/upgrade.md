@@ -13,8 +13,8 @@ Before you start: every pod ready, Helm access to the release, and the [changelo
 1. Get the chart of the target release. In a clone made as in [Deploy on Kubernetes](deploy-kubernetes.md#install):
 
     ```bash
-    git fetch --depth 1 origin tag v3.2.2
-    git checkout v3.2.2
+    git fetch --depth 1 origin tag v3.2.3
+    git checkout v3.2.3
     ```
 
 2. Read the [version notes](#version-notes) for every release you cross.
@@ -24,7 +24,7 @@ Before you start: every pod ready, Helm access to the release, and the [changelo
     ```bash
     helm upgrade narad ./charts/narad -n narad \
       --reset-then-reuse-values \
-      --set image.tag=v3.2.2
+      --set image.tag=v3.2.3
     kubectl rollout status statefulset/narad -n narad
     ```
 
@@ -82,6 +82,7 @@ Partition segments, consumer position files and fan-out cursor files need nothin
 
 Read the notes for each release boundary you cross, in either direction.
 
+- **To v3.2.3.** Nothing to do in either direction: v3.2.3 changes no stored format, config key or API, so it rolls onto, and back to, v3.2.2 node by node. It is built with Go 1.27.2, which fixes ten standard-library advisories that affect v3.2.2, seven of them in `net/http` (the [changelog](https://github.com/DebanganThakuria/narad/blob/master/CHANGELOG.md) lists them), so rolling back brings them back. Building from source needs Go 1.27.2 or later.
 - **To v3.2.2.** No stored format or config key changes, so it rolls onto, and back to, v3.2.1 node by node. What clients can see:
     - *Forwarded acks say whether they landed.* An ack, extend or nack that never left the node you called answers `503` with `Retry-After: 1` (not applied, retry it); `502` now means only that the owner may have applied it. Until every node runs this release, a node on v3.2.1 still answers `502` for both, so keep treating `502` as possibly applied.
     - *Retry-After on owner-down.* The `503` for an ack, extend, nack, replay or pinned consume whose partition owner is down carries `Retry-After: 1`.
