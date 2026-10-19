@@ -1,0 +1,4 @@
+docs/operate/upgrade.md
+  8d94cd69-b052-4e22-81cd-f166a80ec0e6:2026-10-19T12:49:31.628Z 16-17,27,85
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"8d94cd69-b052-4e22-81cd-f166a80ec0e6:2026-10-19T12:49:31.628Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 4, "overriden_lines": 0}}}
