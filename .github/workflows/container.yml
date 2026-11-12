@@ -67,7 +67,7 @@ jobs:
       # last place to accept a moving target. Upstream has not cut a `v4`
       # tag in any case. Dependabot keeps this current.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4.1.2
+        uses: sigstore/cosign-installer@v4.1.3
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
