@@ -515,6 +515,24 @@ What a `202` promises, and what Narad trades for it.
 </div>
 </section>
 
+<section class="nr-print nr-tint nr-tint--sky" markdown>
+<div class="nr-print__head" markdown>
+
+## Thirty-six days, nothing lost {#soak}
+
+From 8 October to 13 November 2026, a three-node cluster on a shared Kubernetes development cluster served a client built on the [Go SDK](build/go-sdk.md). The client tracked every message it sent until it arrived.
+
+</div>
+<div class="nr-rows nr-rows--one" markdown>
+
+- **385.8 million deliveries, none lost.** About 130 messages a second went through single and batch produce, a 30-second [delay child](build/fanout-and-delay.md#delay-children) and a two-child fan-out, with 1% of single messages nacked on purpose. A message not delivered within 6 hours counted as lost, and that count stayed at 0 for the whole run.
+- **479 duplicates, about 1.2 per million.** All of them arrived on days a broker pod restarted, moved or was upgraded; stretches without such a move had none. That is at-least-once at work, and why handlers must be idempotent.
+- **The ground kept moving.** The brokers were upgraded in place twice (v3.2.1 to v3.2.3) and moved node on spot reclaims, consolidation and a Kubernetes version rotation. The client restarted 24 times, mostly on its own pod moves, with messages in flight. On the last day, all three brokers and the client moved within 80 seconds, leaving the cluster with no Raft leader for about 85 seconds. Every message in flight was delivered after.
+- **Latency held flat.** On a typical day, the p99 from produce to first delivery was about 49 ms for batches, 223 ms for single messages and 243 ms for fan-out children; days with restarts ran higher. Delayed messages arrived within 0.26 s of their due time at p99. No broker went above 135 MiB of memory.
+
+</div>
+</section>
+
 <section class="nr-also" markdown>
 
 ## Also in the one binary {#also}
