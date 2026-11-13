@@ -10,6 +10,14 @@ summarized more briefly than the 1.x and later entries.
 
 ## [Unreleased]
 
+## [3.2.4] - 2026-11-13
+
+### Changed
+- Dependencies refreshed: quic-go 0.65.0, golang.org/x net 0.62.0, sync 0.25.0 and sys 0.50.0, and prometheus/common 0.73.1.
+
+### Security
+- The Go toolchain is pinned to 1.27.4, so building from source now needs a 1.27.4 toolchain. `govulncheck` reports three advisories against v3.2.3 on paths Narad reaches: an HTTP/1 server crash from a `MaxBytesReader` header race in `net/http` (GO-2026-6859, fixed in Go 1.27.4); compromised intermediate certificates not distrusted by `crypto/x509` (GO-2026-6809, fixed in Go 1.27.3), reached when cluster nodes dial each other over TLS; and a panic on two-block frames in `github.com/klauspost/compress` (GO-2026-6865), fixed by moving to 1.20.3. A scan of this release reports none of them, and no others on reachable paths.
+
 ## [3.2.3] - 2026-10-19
 
 ### Removed
@@ -640,7 +648,8 @@ First production release.
 ### Added
 - Narad's first alpha, published for early evaluation, local development, and design review, with a container image on GHCR. The remaining production-readiness gates (API auth, rate limiting, TLS, and a tested durability and disaster-recovery contract) were documented as still open.
 
-[Unreleased]: https://github.com/DebanganThakuria/narad/compare/v3.2.3...HEAD
+[Unreleased]: https://github.com/DebanganThakuria/narad/compare/v3.2.4...HEAD
+[3.2.4]: https://github.com/DebanganThakuria/narad/compare/v3.2.3...v3.2.4
 [3.2.3]: https://github.com/DebanganThakuria/narad/compare/v3.2.2...v3.2.3
 [3.2.2]: https://github.com/DebanganThakuria/narad/compare/v3.2.1...v3.2.2
 [3.2.1]: https://github.com/DebanganThakuria/narad/compare/v3.2.0...v3.2.1
