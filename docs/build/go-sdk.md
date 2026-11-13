@@ -6,31 +6,22 @@ description: "Produce, consume and replay from a Go service with a client that m
 
 Produce, consume and replay from a Go service with a client that manages leases, retries and failing nodes for you.
 
-Before you start: Go 1.23 or later, and the address and credentials of a Narad cluster ([Connect and authenticate](connect.md)).
+Before you start: Go 1.26 or later, and the address and credentials of a Narad cluster ([Connect and authenticate](connect.md)).
 
 ## Install the client {#install}
 
 ```sh
-go get github.com/debanganthakuria/narad-go
+go get github.com/debanganthakuria/narad-go@latest
 ```
 
 ```text title="Output"
-go: downloading github.com/debanganthakuria/narad-go v0.0.0-20260918072218-377c85395037
-go: added github.com/beorn7/perks v1.0.1
-go: added github.com/cespare/xxhash/v2 v2.3.0
-go: added github.com/debanganthakuria/narad-go v0.0.0-20260918072218-377c85395037
-go: added github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
-go: added github.com/prometheus/client_golang v1.20.5
-go: added github.com/prometheus/client_model v0.6.1
-go: added github.com/prometheus/common v0.55.0
-go: added github.com/prometheus/procfs v0.15.1
-go: added golang.org/x/sys v0.22.0
-go: added google.golang.org/protobuf v1.34.2
+go: downloading github.com/debanganthakuria/narad-go v0.2.0
+go: added github.com/debanganthakuria/narad-go v0.2.0
 ```
 
-- The client lives in its own repository, [DebanganThakuria/narad-go](https://github.com/DebanganThakuria/narad-go), with its own README and API documentation in the source.
-- It has no tagged release yet, so `go get` records a pseudo-version of the main branch, as above. Your `go.mod` pins it until you update on purpose.
-- Its one direct dependency is the Prometheus client library, which the built-in [metrics](#metrics) use; the rest of the output is that library's dependencies.
+- The client lives in its own repository, [DebanganThakuria/narad-go](https://github.com/DebanganThakuria/narad-go), with its own README, [changelog](https://github.com/DebanganThakuria/narad-go/blob/main/CHANGELOG.md) and [API documentation](https://pkg.go.dev/github.com/debanganthakuria/narad-go).
+- It is versioned on its own, starting at v0.1.0. Below v1.0.0 a minor release may change the API, and its changelog says when one does.
+- The core `narad` package imports nothing beyond the Go standard library. The Prometheus client comes in only if you import the client's [metrics](#metrics) package.
 
 Every example below uses this import and this message type:
 
@@ -264,14 +255,20 @@ if err := msg.Ack(ctx); errors.Is(err, narad.ErrLeaseLost) {
 
 Logging takes any logger with `slog`'s method set, so the standard library needs no adapter: `narad.WithLogger(slog.Default())`. The client logs little: retries and node state changes at warn, and failures a consumer cannot report any other way at error.
 
-Prometheus metrics are built in:
+Prometheus metrics come from the client's `prometheus` package. Its name matches the Prometheus client library's, so import it under an alias:
 
 ```go
-metrics := narad.NewMetrics(prometheus.DefaultRegisterer)
+import (
+    narad "github.com/debanganthakuria/narad-go"
+    naradprom "github.com/debanganthakuria/narad-go/prometheus"
+    "github.com/prometheus/client_golang/prometheus"
+)
+
+metrics := naradprom.NewMetrics(prometheus.DefaultRegisterer)
 client, err := narad.New(addr, narad.WithEvents(metrics.Observe))
 ```
 
-That exports `narad_requests_total`, `narad_request_duration_seconds`, `narad_retries_total` and `narad_node_up`. Pass `narad.WithMetricsPrefix("payments")` to `NewMetrics` to put a prefix in front of each name, which two clients in one process need. `narad.WithEvents` takes any function, so you can report somewhere else instead.
+That exports `narad_requests_total`, `narad_request_duration_seconds`, `narad_retries_total` and `narad_node_up`. Pass `naradprom.WithMetricsPrefix("payments")` to `NewMetrics` to put a prefix in front of each name, which two clients in one process need. `narad.WithEvents` takes any function, so you can report somewhere else instead.
 
 ## Tune the client {#tuning}
 
